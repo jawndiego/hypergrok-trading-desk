@@ -1,0 +1,97 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "*": "ask",
+    "read": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.key": "deny",
+      "*.p12": "deny",
+      "*.pem": "deny",
+      "*.wallet": "deny",
+      "*.db": "deny",
+      "*.sqlite": "deny",
+      "*.sqlite*": "deny"
+    },
+    "edit": {
+      "*": "ask",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.key": "deny",
+      "*.p12": "deny",
+      "*.pem": "deny",
+      "*.wallet": "deny",
+      "*.db": "deny",
+      "*.sqlite": "deny",
+      "*.sqlite*": "deny"
+    },
+    "bash": {
+      "*": "deny",
+      "git status*": "deny",
+      "git status": "allow",
+      "git status --short": "allow",
+      "git status --short --branch": "allow",
+      "git diff*": "deny",
+      "git log*": "deny",
+      "python3 -m unittest*": "allow",
+      "python3 -m compileall*": "allow",
+      "trading-harness doctor*": "allow",
+      "git commit*": "ask",
+      "git push*": "deny",
+      "rm *": "deny"
+    },
+    "external_directory": "deny",
+    "skill": {
+      "*": "deny",
+      "operate-trading-desk": "allow",
+      "brief-market": "allow",
+      "validate-thesis": "allow",
+      "scan-signals": "allow",
+      "test-strategy": "allow"
+    },
+    "trading_desk_*": "deny",
+    "trading_desk_get_harness_status": "allow",
+    "trading_desk_get_market_brief": "allow",
+    "trading_desk_validate_trade_intent": "allow",
+    "task": "ask",
+    "webfetch": "ask",
+    "websearch": "ask",
+    "doom_loop": "ask"
+  },
+  "agent": {
+    "plan": {
+      "permission": {
+        "edit": "deny",
+        "bash": "deny",
+        "external_directory": "deny",
+        "skill": {
+          "*": "deny",
+          "operate-trading-desk": "allow",
+          "brief-market": "allow",
+          "validate-thesis": "allow",
+          "scan-signals": "allow",
+          "test-strategy": "allow"
+        },
+        "trading_desk_*": "deny",
+        "trading_desk_get_harness_status": "allow",
+        "trading_desk_get_market_brief": "allow",
+        "trading_desk_validate_trade_intent": "allow",
+        "webfetch": "ask",
+        "websearch": "ask"
+      }
+    }
+  },
+  "mcp": {
+    "trading_desk": {
+      "type": "local",
+      "command": [
+        "python3",
+        "plugins/trading-desk/server.py"
+      ],
+      "cwd": ".",
+      "enabled": true,
+      "timeout": 30000
+    }
+  }
+}

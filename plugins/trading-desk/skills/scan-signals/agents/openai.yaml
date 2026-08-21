@@ -1,0 +1,6 @@
+interface:
+  display_name: "Scan Signals"
+  short_description: "Interpret registered signals without trade authority"
+  default_prompt: "Use $scan-signals to check this registered rule and report read-only signal evidence."
+policy:
+  allow_implicit_invocation: true
