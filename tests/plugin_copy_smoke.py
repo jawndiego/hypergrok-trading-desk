@@ -16,8 +16,20 @@ from mcp.client.stdio import stdio_client
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PLUGIN = ROOT / "plugins" / "trading-desk"
 EXPECTED_TOOLS = {
+    "analyze_asset",
+    "get_latest_sentiment",
+    "get_learning_review",
+    "get_learning_summary",
+    "get_node_status",
     "get_harness_status",
     "get_market_brief",
+    "get_trade_stage",
+    "list_tracked_assets",
+    "pause_tracked_asset",
+    "record_manual_sentiment",
+    "stage_trade_candidate",
+    "track_asset",
+    "validate_candidate_profitability",
     "validate_trade_intent",
 }
 

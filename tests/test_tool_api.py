@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
+import tempfile
 import unittest
 
 from trading_harness.canonical import semantic_intent_hash
@@ -11,6 +13,10 @@ from trading_harness.tool_api import (
     ToolInputError,
     ToolService,
     tool_catalog,
+)
+from trading_harness.staging_inbox import (
+    TradeStagingInbox,
+    TrustedQuoteDecision,
 )
 
 
@@ -36,16 +42,38 @@ def valid_intent() -> dict[str, object]:
 
 
 class ToolCatalogTests(unittest.TestCase):
-    def test_catalog_exposes_only_three_read_only_tools(self) -> None:
+    def test_catalog_exposes_research_tools_but_no_execution_tool(self) -> None:
         self.assertEqual(
             {definition.name for definition in TOOL_CATALOG},
             {
+                "analyze_asset",
+                "get_latest_sentiment",
+                "get_learning_review",
+                "get_learning_summary",
+                "get_node_status",
                 "get_harness_status",
                 "get_market_brief",
+                "get_trade_stage",
+                "list_tracked_assets",
+                "pause_tracked_asset",
+                "record_manual_sentiment",
+                "stage_trade_candidate",
+                "track_asset",
+                "validate_candidate_profitability",
                 "validate_trade_intent",
             },
         )
-        self.assertTrue(all(definition.read_only for definition in TOOL_CATALOG))
+        self.assertEqual(
+            {definition.name for definition in TOOL_CATALOG if not definition.read_only},
+            {
+                "analyze_asset",
+                "stage_trade_candidate",
+                "track_asset",
+                "pause_tracked_asset",
+                "record_manual_sentiment",
+            },
+        )
+        self.assertTrue(all(not definition.destructive for definition in TOOL_CATALOG))
         forbidden = {"submit_order", "cancel_order", "approve_trade", "place_order"}
         self.assertTrue(forbidden.isdisjoint(definition.name for definition in TOOL_CATALOG))
 
@@ -87,19 +115,81 @@ class ToolCatalogTests(unittest.TestCase):
             elif isinstance(value, list):
                 stack.extend(value)
 
+    def test_manual_sentiment_schema_is_x_only_and_uses_discrete_rubric(self) -> None:
+        definition = next(
+            item for item in TOOL_CATALOG if item.name == "record_manual_sentiment"
+        )
+        evidence = definition.input_schema["properties"]["evidence"]["items"]
+
+        self.assertFalse(evidence["additionalProperties"])
+        self.assertIn("x", evidence["properties"]["source_url"]["pattern"])
+        self.assertEqual(
+            evidence["properties"]["polarity"]["enum"],
+            ["-1", "-0.5", "0", "0.5", "1"],
+        )
+        assessment = next(
+            item for item in TOOL_CATALOG if item.name == "analyze_asset"
+        ).output_schema["properties"]["assessment"]
+        self.assertFalse(
+            assessment["properties"]["eligible_to_trade"]["const"]
+        )
+        self.assertFalse(assessment["properties"]["order_submitted"]["const"])
+
 
 class ToolServiceTests(unittest.TestCase):
+    def test_stage_tools_write_only_non_authoritative_idempotent_inbox(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            analysis_hash = "a" * 64
+            inbox = TradeStagingInbox(
+                Path(directory) / "staging.sqlite3",
+                quote_callback=lambda request: TrustedQuoteDecision.blocked(
+                    block_code="nothing_to_trade",
+                    analysis_hash=request.expected_analysis_hash,
+                ),
+            )
+            service = ToolService(
+                market_brief_reader=lambda *_args, **_kwargs: {},
+                staging_inbox=inbox,
+            )
+            first = service.stage_trade_candidate("eth", analysis_hash, "cycle-1")
+            second = service.stage_trade_candidate("eth", analysis_hash, "cycle-1")
+            loaded = service.get_trade_stage(first["document"]["document_id"])
+
+            self.assertEqual(first, second)
+            self.assertEqual(first, loaded)
+            self.assertEqual("blocked", first["state"])
+            self.assertEqual("nothing_to_trade", first["document"]["block_code"])
+            self.assertFalse(first["authoritative"])
+            self.assertTrue(
+                all(value is False for value in first["document"]["authority"].values())
+            )
+            with self.assertRaisesRegex(ToolInputError, "arguments"):
+                service.invoke(
+                    "stage_trade_candidate",
+                    {
+                        "asset_id": "eth",
+                        "expected_analysis_hash": analysis_hash,
+                        "idempotency_key": "cycle-2",
+                        "quantity": "1",
+                    },
+                )
+
     def test_status_is_explicitly_fail_closed(self) -> None:
         status = ToolService(market_brief_reader=lambda *_args, **_kwargs: {}).get_harness_status()
 
         self.assertTrue(status["ok"])
-        self.assertEqual(status["mode"], "read_only")
+        self.assertEqual(status["mode"], "research_only")
         self.assertFalse(status["venue_writes_enabled"])
         self.assertFalse(status["credential_loading_enabled"])
+        self.assertFalse(status["learning"]["staging_profile_configured"])
+        self.assertFalse(status["learning"]["approval_tool_exposed"])
         self.assertEqual(status["execution"]["adapter"], "disabled")
         self.assertEqual(status["market_data"]["access"], "public_read_only")
         self.assertEqual(status["market_data"]["networks"], ["mainnet", "testnet"])
         self.assertFalse(status["market_data"]["credentials_required"])
+        self.assertTrue(status["research"]["asset_tracking"])
+        self.assertTrue(status["research"]["local_state_writes_enabled"])
+        self.assertFalse(status["research"]["manual_browser_unattended_eligible"])
 
     def test_market_brief_delegates_to_read_only_reader_and_canonicalizes(self) -> None:
         calls: list[tuple[str, str, object | None]] = []

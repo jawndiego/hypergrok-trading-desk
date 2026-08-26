@@ -1,7 +1,7 @@
 # Agent-Assisted Trading Harness Specification
 
-Status: Draft v0.2
-Decision date: 2026-08-21
+Status: Draft v0.5 — infrastructure-learning implementation and unqualified TESTNET worker
+Decision date: 2026-08-25
 Upstream source: [`galleonlabs/hypergrok-trading-desk`](https://github.com/galleonlabs/hypergrok-trading-desk)
 Working fork: [`jawndiego/hypergrok-trading-desk`](https://github.com/jawndiego/hypergrok-trading-desk)
 Verified fork `main`: `62cbe227a2ec531e0efa37254d4b6fae043fbfe5`
@@ -12,7 +12,7 @@ Current-main disposition matrix: [`hypergrok_audit_matrix.md`](hypergrok_audit_m
 
 Fork HyperGrok for provenance, operating procedures, role prompts, and Hyperliquid reference material. Do not treat it as the production execution foundation.
 
-The capital-bearing path will be implemented as a deterministic harness with typed interfaces, hard risk invariants, an isolated signer, durable state, independent reconciliation, and fault-tested recovery. Agents may research, validate theses, explain evidence, and draft proposals. Agents may not hold exchange credentials or directly mutate exchange state.
+The capital-bearing path is a deterministic TESTNET harness with typed interfaces, hard risk invariants, an isolated signer, durable state, independent reconciliation, and fault-tested recovery. It is not live-qualified. Agents may research, validate theses, explain evidence, and draft proposals. Agents may not hold exchange credentials or directly mutate exchange state.
 
 Use two trust zones inside the fork:
 
@@ -41,19 +41,258 @@ Build a trading desk that can:
 
 The system is a research and execution harness. It does not create alpha merely by adding agents, indicators, or roles.
 
-### 2.1 Agent-runtime abstraction
+### 2.1 Current Codex-facing outcome
+
+The implemented research interface must let a user:
+
+1. Register an explicit Hyperliquid asset/network watch in local state.
+2. Read live public context and strict completed 4h candles.
+3. Separate descriptive TA from the frozen registered strategy result.
+4. Add sourced sentiment through either an explicit manual X session or a future compliant API collector.
+5. Receive exactly `buy`, `sell`, `nothing`, or `unavailable`, with machine-readable blockers.
+6. Run costed historical validation when making an edge/profitability claim.
+7. For an explicitly requested infrastructure-learning experiment, stage a
+   deterministic TESTNET ticket from an exact saved directional analysis, an
+   active bounded grant, complete fresh daily-loss evidence and a fresh flat
+   account without claiming profitability.
+8. Carry an entry, reduce-only stop and take-profit in every risk-increasing plan.
+9. Persist analyses, abstentions, tickets, approval/execution references,
+   fills, fees, latency, venue-reported PnL and post-trade reviews by exact
+   component version.
+
+The always-on research node is credential-free and permanently records
+`capability=research_only` and `risk_gate=halted`. Codex, ChatGPT and OpenCode
+may write the local asset registry, sentiment, analysis, learning and
+non-authoritative staging records, but they cannot create a trusted approval,
+reserve risk, access the signer, or write to Hyperliquid.
+
+Manual use of the user's signed-in X browser is interactive only. The harness
+does not script the website, store cookies/tokens/raw post text, or treat manual
+polarity as unattended authority. Continuous sentiment requires the official
+X API or another compliant provider.
+
+### 2.2 Profitability is a thesis gate
+
+"Profitable" means a strategy remains eligible only while all registered
+historical, cost-stress, uncertainty, prospective-shadow, drift and
+concentration gates pass. It is not a guarantee.
+
+The first implemented `candidate-v0/1` ETH 4h evaluation was `REJECTED` on
+2026-08-24: 116 trades, -0.0331R net expectancy, 0.9401 profit factor,
+-0.2484R one-sided bootstrap lower bound, 19.4628R maximum drawdown and
+negative stressed expectancy. The harness must retain that failure and refuse
+to label the rule profitable or grant strategy/mainnet authority. It may still
+run a small attended TESTNET infrastructure-learning experiment under an
+explicit `profitability_qualified: false` grant, because that experiment is
+collecting mechanics/process evidence rather than claiming edge. It may not
+optimize the inspected window until a new preregistered evaluation permits it.
+
+`SMA-outfits` is currently a draft hypothesis source only. The reviewed commit
+contains a README and license but no advertised data or scripts, and it does
+not define complete entry/exit/stop/cost rules. See
+[`sma_outfits_validation.md`](sma_outfits_validation.md).
+
+### 2.3 Agent-runtime abstraction
 
 The deterministic core must not import, invoke, or depend on ChatGPT, Codex, Grok, Claude, or another model runtime.
 
-- ChatGPT and Codex are the first supported interfaces through the installable [`trading-desk` plugin](../plugins/trading-desk), repository [`AGENTS.md`](../AGENTS.md), and five focused packaged skills. ChatGPT and Codex share the same plugin and typed MCP contract.
-- OpenCode is a compatible second interface over a byte-identical mirror under `.agents/skills` and the same local MCP server. Its checked-in [`opencode.json`](../opencode.json) must default to `ask`, deny external-directory and sensitive-file access, omit a model/provider, and allow only the three reviewed read-only MCP tools by exact name.
+- ChatGPT and Codex are the first supported interfaces through the installable [`trading-desk` plugin](../plugins/trading-desk), repository [`AGENTS.md`](../AGENTS.md), and six focused packaged skills. ChatGPT and Codex share the same plugin and typed MCP contract.
+- OpenCode is a compatible second interface over a byte-identical mirror under `.agents/skills` and the same local MCP server. Its checked-in [`opencode.json`](../opencode.json) defaults to `ask`, denies external-directory and sensitive-file access, omits a model/provider, allows the reviewed read tools by exact name, and keeps local research/staging writes at `ask` and unavailable to plan mode.
 - Repository skills contain workflow guidance only; they call typed core interfaces and cannot confer credentials, evidence status, deployment grants, or exchange authority.
-- The current MCP surface is limited to fail-closed harness status, public Hyperliquid market briefs, and semantic-intent schema/hash validation. It cannot read credentials, authorize or admit an intent, reserve exposure, sign, or write to a venue.
+- The current fifteen-tool MCP surface adds asset tracking, manual sentiment persistence, immutable deterministic analysis, historical validation, non-authoritative staging, learning review and node status to harness status, public briefs and intent hashing. Its only mutations are local research/learning/staging state. It cannot read the API wallet, authorize or admit an intent, reserve exposure, sign, or write to a venue.
 - Future private data, authentication, authorization, and controlled actions belong in narrow server-side tools rather than skill prose. Any write tool requires a separate qualification milestone and must enforce its own authorization at the side-effect boundary.
 - The same domain, validation, risk, admission, OMS, ledger, and adapter APIs must work without any agent attached.
 - Removing or replacing the agent interface must not change deterministic results or capital-path behavior.
 
 This follows the official Codex model: [`AGENTS.md`](https://learn.chatgpt.com/docs/agent-configuration/agents-md) for durable repository guidance, [repo skills](https://learn.chatgpt.com/docs/build-skills) for focused repeatable workflows, and a [plugin/MCP server](https://developers.openai.com/plugins/concepts/plugins) only when installable connected tools are needed. OpenCode documents the same [`AGENTS.md`](https://opencode.ai/docs/rules/) and [`.agents/skills`](https://opencode.ai/docs/skills/) conventions.
+
+### 2.4 Current infrastructure-learning loop
+
+The implemented loop is intentionally asymmetric:
+
+1. Agent-facing tools save an exact analysis and append its BUY/SELL/NOTHING/
+   UNAVAILABLE decision cycle.
+2. `stage_trade_candidate` accepts only asset ID, exact analysis hash and an
+   idempotency key. All economic fields come from the trusted quote callback;
+   every authority flag is structurally false.
+3. A signed TESTNET infrastructure grant is account-, instrument-, policy-,
+   cap- and time-bound for at most 24 hours. It states that profitability and
+   mainnet authority are false. The research process treats it only as a
+   non-authoritative quote scope; the control process authenticates its MAC.
+4. A separate operator CLI reads the active staged ticket, displays its exact
+   mandatory-stop bracket and accepts confirmation only from `/dev/tty`. This
+   is attended TESTNET friction, not human cryptographic authentication; the
+   agent and control UIDs must be separate.
+5. The execution store registers the grant/ticket/opaque verified approval,
+   atomically consumes approval, reserves risk and queues exactly one command.
+6. The isolated worker synchronizes fills/funding to a fresh exact watermark,
+   performs startup reconciliation, then serializes recovery, protection,
+   safety and entry. Unknown writes are never retried without reconciliation.
+7. Execution state and complete parent/recovery-fill economics are projected into the
+   immutable learning ledger. Review remains descriptive and flags missing
+   funding, market-path or close evidence rather than inventing it.
+8. The agent process has no filesystem capability for execution, nonce,
+   daily-loss or control state. Agent quotes defer daily loss; a one-tick
+   executor capability is minted only by a complete authoritative refresh and
+   is required at the actual entry-dispatch decision. Executor-private
+   execution, nonce, daily-loss and control-socket artifacts use distinct
+   writable parents: attended control may reach execution state for exact
+   authorization, but has no directory capability for the other three.
+9. Parent and recovery reads begin at exact venue-server source snapshot
+   watermarks. Venue evidence time and local mutation/lease time are distinct;
+   canonical parent/recovery fills are attributed into one continuous position
+   chain, persisted once and never hidden as unmatched account activity.
+
+The MCP server never exposes approval, admission, signing, cancellation,
+flattening or venue-write tools. The separate executor config accepts only
+TESTNET and has distinct signer, approval, recovery and grant Keychain
+references. Dynamic plan CLOIDs are trusted only from the exact durable
+three-leg plan; flatten CLOIDs are domain-separated derivatives of the exact
+incident and fresh position snapshot and are rechecked by the live signer.
+
+### 2.5 Config-bound filesystem identities
+
+Executor config schema v2 contains three distinct, positive, non-root numeric
+fields: `executor_uid`, `research_uid`, and `control_uid`. The UID values are
+part of the canonical v2 config hash and therefore the durable deployment
+binding. Runtime ownership decisions are derived from these fixed roles; the
+config cannot supply a wider arbitrary owner list.
+
+The normative SQLite ownership matrix is:
+
+| State class | Main database | Exact `-wal`/`-shm`/`-journal` sidecars |
+| --- | --- | --- |
+| Execution | Executor UID only | Executor or control UID |
+| Nonce | Executor UID only | Executor UID only |
+| Daily loss | Executor UID only | Executor UID only |
+| Staging | Executor UID only | Executor, control, or research UID |
+| Learning | Executor UID only | Executor, control, or research UID |
+
+The control socket and its parent are executor-only. Main files are created by
+credential-free `init` under the executor UID and never acquire the sidecar
+owner exception. Every accepted artifact is a regular, single-link,
+mode-`0600` file; every state parent is a real mode-`0700` directory with its
+separately reviewed owner and ACL. Named ACL verification and negative access
+tests remain required because POSIX mode bits alone do not reveal macOS named
+principals.
+
+Cross-UID SQLite parents MUST remain executor-owned mode `0700` and MUST NOT
+grant `delete_child` to control or research. Pre-init inherit-only file ACEs
+MUST omit delete so exclusive main-file reservations are non-replaceable during
+composition. After `init`, file-level delete MAY be added only to future-file
+inheritance, leaving existing mains unchanged while enabling sidecar lifecycle.
+Qualification MUST prove control/research cannot unlink, rename or replace a
+main path and can still clean up cross-owner sidecars.
+
+Read-only verification snapshots MUST be mode `0700`, colocated with their
+source storage class, bounded by that class's quota and independent of ambient
+temporary-directory environment. `list,add_subdirectory` MAY be granted for this
+single purpose without `delete_child`; an inherit-only directory `delete` ACE
+MAY permit the creating role to remove that exact snapshot normally. Crash-left
+snapshot directories MUST be detected by runtime validation and require
+attended root review before reuse.
+
+The execution-sidecar exception follows an empirical macOS invariant. The
+executor-created main file retained executor ownership in both tested writer
+orders. When executor opened WAL first, WAL/SHM were executor-owned. When the
+attended control process opened WAL first, WAL/SHM were control-owned and the
+executor successfully cross-wrote through the exact inherited ACL. Treating
+all sidecars as process-owned would fail a legitimate restart; permitting the
+control UID for the exact execution sidecars preserves the narrower capital
+boundary. Research remains forbidden from execution state, and control and
+research remain forbidden from nonce, daily-loss, and socket state.
+
+The executor CLI and MCP entry points establish umask `0077` before state
+composition so attended control and research processes cannot create
+group/world-accessible sidecars through an ambient shell umask. Except for
+config-only validation, executor commands MUST run as `executor_uid`, attended
+commands MUST run as `control_uid`, and a configured learning MCP MUST run as
+`research_uid`. Schema v1 is rejected. No implementation may silently rewrite
+a v1 config as v2, rebind nonempty v1 state to the v2 hash, or create a
+replacement empty database when existing state is expected. Empty,
+never-qualified deployments may be deliberately initialized under v2; all
+other transitions require a separately reviewed state migration. None of
+these ownership rules represents or enables mainnet authority. Mainnet remains
+hard-disabled.
+
+`init` MUST be a one-time all-empty transition and MUST reject complete reruns
+and partial layouts. It MUST reserve each exact main-file name with exclusive,
+no-follow creation before schema composition; an interrupted partial result
+MUST remain fail-closed for explicit review. Existing-state open MUST first verify the complete current
+schema, migration history, durable binding and integrity without any CREATE,
+migration, repair or new binding. A zero-byte, schema-less, wrong-role or
+drifted file is invalid state, never a fresh database opportunity.
+
+Each learning/staging main and sidecar MUST enforce a live 64 MiB application
+cap. Each executor-private main and sidecar has a 1 GiB existing-open ceiling;
+live growth MUST additionally be constrained by an executor-only filesystem
+quota and lower monitored shutdown threshold. Shared-state size, schema,
+binding or integrity failure MUST block learning projection and every new entry, but MUST
+NOT prevent an otherwise valid core executor from starting reconciliation,
+protection and deterministic account-safety recovery. Shared evidence repair is
+a separate degraded-state procedure; capital recovery never depends on an
+unbounded research-writable scan. Urgent safety lanes MUST skip learning
+projection until the urgent lane clears. Entry dispatch MUST require successful
+same-tick learning synchronization and verified append headroom in addition to
+the authoritative same-tick daily-loss refresh. After any venue-write attempt,
+learning projection MUST yield to response/unknown-outcome reconciliation.
+
+All research-writable databases, logs and temporary growth MUST additionally
+be confined to a quota-limited storage class whose exhaustion cannot consume
+executor-private commit/recovery headroom. File-size checks alone are not this
+boundary. Qualification MUST fill the research quota and prove private
+execution, nonce and daily-loss commits still succeed.
+
+### 2.6 Executor egress and local router qualification
+
+The executor's application endpoint binding, the operating-system route and a
+router/VPN path are different controls. A network component MUST NOT receive a
+venue credential, signing capability, approval secret, command authority,
+executor database, control socket or agent runtime. Network availability MUST
+NOT be interpreted as admission or approval.
+
+Capital-path HTTP clients MUST use the compiled exact Hyperliquid URLs, reject
+redirects and disable ambient urllib proxy discovery. Executor configuration
+MUST fail closed when its process environment contains upper- or lowercase
+HTTP(S)/ALL/NO proxy variables, OpenSSL certificate-path overrides,
+requests/curl CA-bundle overrides or TLS key logging. Values of those variables
+MUST never be read or logged. A reviewed root-owned CA policy and normal TLS
+hostname verification remain required.
+
+The checked-in Ubuntu router schema v1 has exactly one mode:
+`local_nat_lab`. It keeps signing and execution on macOS and renders only
+reviewed topology and key strings attested as public by the operator. Its
+bundle MUST emit no `PrivateKey` field, venue credential, mainnet authority or
+venue-write authorization; the renderer cannot infer key provenance from the
+shared WireGuard encoding. It MUST declare that it neither changes public
+egress IP nor prevents direct host bypass. The router VM MUST have no
+repository/shared-state mount and MUST use default-drop forwarding, distinct
+ingress/WAN interfaces, NAT limited to the WireGuard IPv4 subnet and deliberate
+IPv6 non-forwarding.
+
+WireGuard private keys MUST be generated and retained on their owning machines
+outside repo, chat, cloud-init, argv and environment variables. Router-only key
+generation, preparation and read-only qualification MUST occur before venue
+credential provisioning. A local VM is not a VPN until it connects to a
+second remote peer; no documentation or status may call `local_nat_lab`
+VPN-qualified.
+
+Router health is not currently an application admission capability. If route
+loss occurs after durable authority consumption, the single permitted send may
+fail with an unknown outcome. That outcome MUST remain reserved and reconcile
+without resend. No application-configured direct-network fallback is permitted.
+In `local_nat_lab`, macOS may still bypass the VM if its route disappears;
+that disqualifies egress isolation and a successful request does not prove VM
+traversal. If the selected route instead blackholes, cancel/flatten recovery
+may remain unavailable until that path returns.
+
+Before the first harness TESTNET order write, qualification MUST cover normal
+read-only routing plus VM/tunnel/hypervisor loss, IPv4 and IPv6 leakage, DNS/DoT/QUIC
+bypass, interface renumbering, sleep/wake and reboot. Full live qualification
+also requires a narrow GTC/query/cancel canary, retained venue snapshot,
+ordinary attended reduce-only close, WebSocket recovery and forwarded-request
+response-loss injection. These are implementation requirements, not manual
+shortcuts to the existing protected-bracket signer.
 
 ## 3. Why HyperGrok Is Unsafe for Mainnet As-Is
 
@@ -105,6 +344,16 @@ Required behavior:
 - Route emergency actions through the same serialized executor, with explicit deadlines, precedence, retry/reconciliation rules, and paging; a second writer is forbidden.
 - Continuously compare protected size with live position size.
 - Never infer protection from the submitted request; verify it from venue state.
+
+Current Hyperliquid `normalTpsl` semantics do not provide a stop for an
+ordinary partially filled IOC parent: children become active only after full
+parent fill, and the IOC remainder cancellation removes them after a partial
+fill. There is no documented FOK order. Initial live qualification therefore
+accepts only a fully filled entry plus an independently visible stop covering
+the exact position. Any partial fill is an emergency state requiring an
+immediate bounded reduce-only flatten; there is an unavoidable brief
+unprotected interval, so a stop can never be described as an absolute loss
+guarantee.
 
 ### 3.5 Unknown outcomes require durable idempotency
 
@@ -279,6 +528,22 @@ Model orthogonal dimensions rather than one overloaded status:
 
 Legal transitions and cross-dimension invariants must cover partially-filled-then-canceled orders and every replacement/trigger path. Venue events are deduplicated and ordered by explicit precedence rules; corrections append compensating records rather than rewriting history. Contradictory venue reports fail closed for new risk and remain unresolved until reconciled.
 
+Fill identity is the canonical venue tuple (time, transaction hash, trade ID,
+order ID), not caller text. Parent and reduce-only recovery fills share one
+global ownership namespace. A recovery order reported missing is not safely
+absent until its signed expiry plus settlement grace and complete coverage at
+that cutoff; open or otherwise nonterminal recovery orders keep parent risk
+reserved. Reconciliation acquires its mutation lease only after read/parse
+validation and uses a fresh local mutation time, separately preserving the
+venue snapshot cutoff.
+
+An entry's final runtime capability is revocable through preflight and signing.
+The dispatcher must enter the runtime submission guard immediately before the
+store consumes the one-shot submission authority; that guard is held through
+the bounded transport call. Entering it is the point of no return: a shutdown
+or manual halt observed earlier prevents the send, while one arriving after it
+waits for that single attempt to finish and then drains/reconciles it.
+
 ## 6. Thesis Validation Is a Mandatory Gate
 
 Every strategy, indicator, event rule, agent-generated idea, or imported framework begins as an unvalidated thesis. This includes the SMA configurations documented by `unfairmarket/SMA-outfits`.
@@ -394,15 +659,16 @@ The repository selected these systems from a much larger advertised search. Its 
 
 ### 6.7 Skill boundary
 
-The ChatGPT/Codex plugin begins with five focused skills, mirrored exactly for OpenCode:
+The ChatGPT/Codex plugin currently packages six focused skills, mirrored exactly for OpenCode:
 
+- `assess-asset`: tracks a shadow-only 4h asset, combines current context, descriptive TA, the frozen registered signal and explicit sentiment evidence, and preserves buy/sell/nothing/unavailable plus eligibility as separate fields.
 - `operate-trading-desk`: coordinates stages and reports unavailable capabilities without manufacturing a fallback.
 - `brief-market`: calls the typed public Hyperliquid market-data tool and preserves network, source, receipt, and freshness evidence.
-- `validate-thesis`: structures validation plans and reviews deterministic evidence artifacts. The foundation does not yet persist thesis evidence or run backtests; future registry/evaluation writes must use typed core interfaces and have no venue access.
-- `scan-signals`: interprets read-only registered-rule scans. Until the deterministic scanner and normalized data adapter exist, it must return `unavailable`.
-- `test-strategy`: designs or reviews leakage-resistant historical evaluation; until a deterministic runner exists, it must not claim a run occurred.
+- `validate-thesis`: structures validation plans and reviews deterministic evidence artifacts without self-promoting them.
+- `scan-signals`: calls the deterministic completed-candle scanner and reports its registered result without sizing or execution.
+- `test-strategy`: invokes the frozen candidate runner when applicable and otherwise designs/reviews a preregistered leakage-resistant evaluation.
 
-Scanner statuses are `unavailable`, `observation`, `research_candidate`, or `validated_research_signal`. A skill never returns an order or position size. A custom parameter override creates a new draft thesis and forces `exploratory=true` and `no_trade=true`. If registration and evaluation later become materially different workflows, split `validate-thesis` without changing the core API.
+The assessment verdict is `buy`, `sell`, `nothing`, or `unavailable`; risk eligibility and trade authority remain separate booleans. A skill never creates an order or position size. A custom parameter override creates a new draft thesis and forces `exploratory=true` and `no_trade=true`.
 
 ## 7. Authorization Models
 
@@ -490,7 +756,16 @@ Generic cancel-all is forbidden while positions remain if it would remove protec
 
 Grants are capability-, environment-, account-, and thesis-version-specific, reversible, expiring, and recorded. Mainnet is never inferred from successful testnet operation. Testnet validates mechanics; it does not establish mainnet liquidity or execution quality. Infrastructure qualification may use synthetic strategies, but strategy-specific exchange activity requires the corresponding thesis and deployment grant.
 
-The current foundation implements only local `infrastructure_testnet` simulation admission and ships no venue adapter. Every strategy, shadow, mainnet, and systematic grant type is modeled for schema planning but must be rejected by persistence/admission until its evidence, governance, attestation, and execution milestones are implemented.
+The current foundation implements an authenticated, expiring
+`infrastructure_learning` TESTNET grant, non-authoritative model-facing
+staging, direct-terminal per-ticket approval, atomic admission and an isolated
+Hyperliquid writer/recovery worker. It has not completed live qualification.
+Infrastructure-learning tickets explicitly bypass profitability qualification
+only to collect small attended TESTNET mechanics/process evidence; they cannot
+be reinterpreted as strategy, systematic or mainnet authority. Strategy
+promotion still requires qualified profitability/shadow evidence. Every
+mainnet and systematic grant remains rejected until its evidence, governance,
+attestation, qualification, and deployment milestones are implemented.
 
 ## 9. Fork and Audit Plan
 
@@ -635,9 +910,11 @@ Systematic operation inherits all technical, security, account-safety, reconcili
 4. **Trade kernel:** implement canonical schemas, risk engine, authorization service, OMS, outbox, and ledger.
 5. **Signer and adapter:** add isolated signing and one pinned venue SDK behind an adapter.
 6. **Reconciliation and protection:** implement independent watchers, recovery, incidents, and paging.
-7. **Testnet qualification:** rehearse every supported action and fault scenario.
-8. **Capped mainnet:** use a dedicated funded account with per-ticket approval and conservative limits.
-9. **Systematic qualification:** promote only frozen validated strategies into expiring policy envelopes.
+7. **Learning loop:** bind saved analyses through non-authoritative staging and
+   attended admission to immutable execution/fill reviews.
+8. **Testnet qualification:** rehearse every supported action and fault scenario.
+9. **Capped mainnet:** future separate architecture using a dedicated funded account with per-ticket approval and conservative limits.
+10. **Systematic qualification:** promote only frozen validated strategies into expiring policy envelopes.
 
 ## 14. Definition of Done
 
@@ -653,5 +930,7 @@ The harness is complete only when a reviewer can reproduce and prove, from immut
 - How the system recovered from missing or contradictory responses.
 - Whether protection remained aligned with exposure.
 - What the trade cost and whether process and outcome met their separate criteria.
+- Which abstentions and unavailable decisions occurred under the same exact
+  versions, so selection and opportunity costs are not silently discarded.
 
 An agent's assertion is never the final evidence for any of these questions.

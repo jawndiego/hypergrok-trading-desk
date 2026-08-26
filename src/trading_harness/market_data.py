@@ -122,10 +122,13 @@ def _default_transport(
     )
 
     try:
-        # urllib's global opener follows redirects by default.  A private
-        # opener with an explicit rejecting handler preserves the endpoint
-        # allowlist before a second outbound request can occur.
-        opener = urlrequest.build_opener(_RejectRedirectHandler())
+        # Ignore ambient HTTP(S)_PROXY settings and reject redirects. The
+        # executor binds network routing outside the process; shell proxy
+        # configuration must not silently insert another transport hop.
+        opener = urlrequest.build_opener(
+            urlrequest.ProxyHandler({}),
+            _RejectRedirectHandler(),
+        )
         with opener.open(http_request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
             final_url = response.geturl()
             if final_url != endpoint:
@@ -153,6 +156,23 @@ def _default_transport(
         raise MarketDataResponseError(
             "Hyperliquid info response could not be safely decoded as UTF-8 JSON"
         ) from error
+
+
+def public_info_endpoint(network: str) -> str:
+    """Resolve one compiled-in public Hyperliquid ``/info`` endpoint."""
+
+    if not isinstance(network, str) or network not in _INFO_ENDPOINTS:
+        raise ValidationError("network must be exactly 'mainnet' or 'testnet'")
+    return _INFO_ENDPOINTS[network]
+
+
+def post_public_info(
+    endpoint: str,
+    payload: Mapping[str, JSONValue],
+) -> object:
+    """Use the hardened unsigned transport for an allowlisted ``/info`` read."""
+
+    return _default_transport(endpoint, payload)
 
 
 def _post_info(
@@ -608,4 +628,6 @@ __all__ = (
     "MarketDataResponseError",
     "MarketDataTransportError",
     "get_market_brief",
+    "post_public_info",
+    "public_info_endpoint",
 )
