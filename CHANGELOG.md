@@ -40,6 +40,18 @@
   renderer, nftables/WireGuard checks and an explicit TESTNET commissioning gap
   register. The local VM is network-only, preserves the host public IP and is
   not represented as VPN or mainnet qualification.
+- Added a separately namespaced schema-v11 TESTNET qualification core for
+  retained account/agent evidence, a fixed minimum GTC canary, bound cancel,
+  full-residual attended close, atomic reservation, per-step single-use
+  authority and crash normalization. No signer, sender, credential or CLI path
+  exposes it yet.
+- Added credential-free, plan-gated macOS APFS quota, final-path pre/post-init
+  ACL, exact offline install and storage-headroom guard artifacts. No machine
+  mutation or service activation is implied.
+- Added a deterministic Lima 2.2/VZ VM-plan renderer pinned to socket_vmnet
+  1.2.2 and a dated Ubuntu 24.04 ARM64 image. It models one default usernet WAN
+  plus one host-only ingress NIC and remains blocked on a signed apt snapshot,
+  VM creation and guest preflight.
 - Disabled ambient urllib proxy discovery for exact Hyperliquid info/exchange
   clients and made executor config reject proxy, CA-bundle and TLS-key-log
   environment variables before state, credentials or network access.

@@ -801,7 +801,7 @@ class MigrationAndIdentityTests(ExecutionStoreTestCase):
         finally:
             connection.close()
         self.assertEqual(
-            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             [row[0] for row in migrations],
         )
         self.assertTrue(all(len(row[1]) == 64 for row in migrations))
@@ -945,7 +945,7 @@ class MigrationAndIdentityTests(ExecutionStoreTestCase):
             ).fetchone()
         finally:
             connection.close()
-        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], versions)
+        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], versions)
         self.assertIn("preflight_hash", columns)
         self.assertIn("signed_evidence_hash", columns)
         self.assertIn("transport_evidence_hash", columns)

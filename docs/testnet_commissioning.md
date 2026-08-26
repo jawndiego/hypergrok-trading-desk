@@ -1,6 +1,9 @@
 # TESTNET commissioning and first-write gap register
 
-Status: **offline engine and guest-configuration renderer implemented; VM provisioning, machine, network and live qualification incomplete; first harness order write remains blocked**.
+Status: **offline engine, schema-v11 qualification core, machine plans and
+guest/VM renderers implemented; signer/sender/CLI integration, machine apply,
+network and live qualification incomplete; first harness order write remains
+blocked**.
 
 This document records the remaining work from a reviewed source commit to the
 first responsible harness-originated Hyperliquid TESTNET order. It is not
@@ -22,6 +25,13 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   UID 450, executor UID 451 and control UID 452.
 - A private-key-field-free local Ubuntu router profile and deterministic
   renderer exist; operator public-key provenance is still required.
+- A separate TESTNET-only qualification core durably represents the retained
+  account/agent snapshot, fixed GTC canary, bound cancel and full-residual
+  attended close. It has no signer, sender, credential or CLI capability.
+- Credential-free final-path APFS/ACL/install and storage-guard artifacts exist
+  under `deploy/macos/testnet`; none has been applied.
+- A pinned Lima/VZ VM plan exists under `deploy/ubuntu-router/lima`; its apply
+  path is absent and the signed apt snapshot remains review-pending.
 
 These facts do not make the machine transaction-ready.
 
@@ -39,21 +49,23 @@ their owning machines because their derived public keys are renderer inputs.
 2. **Root inventory.** Seal the exact-commit deployment pack and retain owner,
    mode, ACL, mount, LaunchDaemon and empty-state evidence from an attended
    root console.
-3. **Storage quota implementation.** The current pack's quota tool is
-   audit-only. Implement the APFS research/executor volume creation,
-   encryption decision, resumable failure handling, persistent mounts,
-   executor emergency reserve, log bounds and post-reboot exhaustion probes.
-   Implement the missing free-space/shutdown monitor; no current runtime
-   consumer enforces the staged threshold values.
-4. **Final-path pre-init ACL implementation.** The existing pre-init ACL script
-   targets the old `/var/db/trading-desk` skeleton while the staged config
-   targets `/var/db/trading-desk-volumes`. Add and review exact pre-init ACL
-   handling for the final quota-volume paths. Nonce, daily-loss and socket
-   parents remain executor-only; no cross-UID parent receives `delete_child`.
-5. **Admin installation.** Install the root-owned Python runtime and exact
-   reviewed application/wheel bundle. Prove UID 501 and all service identities
-   cannot modify or replace source, runtime or venv paths.
-6. **Ubuntu router lab.** Provision the two-NIC VM manually, generate the VM
+3. **Storage quota apply.** Review and seal
+   `deploy/macos/testnet/01-provision-apfs-storage.sh`, decide encrypted
+   attended unlock versus the script's explicit unencrypted-TESTNET-only
+   acceptance, then apply its resumable create/adopt, UUID mount and layout
+   phases. Reboot and prove quota/reserve/mount flags. The storage guard exists
+   but still needs rendered root-owned config, live threshold and log-retention
+   qualification.
+4. **Final-path ACL apply.** Review and seal the rollback-safe pre-init and
+   post-init scripts under `deploy/macos/testnet`. Apply only the pre-init phase
+   before `init`; nonce, daily-loss and socket remain executor-only and no
+   cross-UID parent receives `delete_child`.
+5. **Admin installation.** Use the exact merged-main offline installer under
+   `deploy/macos/testnet` with the sealed runtime and pack. Prove UID 501 and all
+   service identities cannot modify or replace source, runtime or venv paths.
+6. **Ubuntu router lab.** First render and verify the pinned Lima/VZ VM plan,
+   complete the signed apt snapshot lock and guest preflight, then provision
+   the exact two-NIC VM. Generate the VM
    and Mac WireGuard private keys only on their owning machines, derive and
    attest the public keys, then render and qualify `local_nat_lab` using
    `docs/ubuntu_vm_router.md`. It does not change the public IP and does not
@@ -84,13 +96,13 @@ following are code gaps, not operator commands waiting to be discovered:
 
 | Required qualification behavior | Current gap |
 | --- | --- |
-| Far non-marketable GTC canary, exact query and cancel | Signer accepts only a three-leg `normalTpsl` group with IOC entry; no qualification GTC CLI exists |
-| Retained pre-write account/metadata/order snapshot | Runtime reconciliation is internal; no attended evidence-export command exists |
-| Ordinary attended reduce-only close, including an unexpected GTC-canary fill | Reduce-only close is incident-driven account-safety recovery only |
+| Far non-marketable GTC canary, exact query and cancel | Typed semantics, reservation and schema-v11 store exist; dedicated signer envelope, sender, result transitions and direct-terminal CLI are absent |
+| Retained pre-write account/metadata/order snapshot | Exact retained evidence and tamper checks exist; live `userRole` reader and attended artifact export are absent |
+| Ordinary attended reduce-only close, including an unexpected GTC-canary fill | Full-residual canary-close semantics/store exist; signer/sender/CLI and terminal-flat reservation release are absent; general bracket-parent close is intentionally unsupported |
 | WebSocket disconnect/fill/recovery exercise | No WebSocket client or monitor is implemented; current runtime is REST polling |
 | Forward request but drop the real response | No bounded qualification fault injection exists |
 | Router health as an admission capability | No application router-health field or pre-admission guard exists |
-| Executor free-space shutdown threshold | No runtime monitor consumes the staged storage thresholds |
+| Executor free-space shutdown threshold | External fail-closed guard and launchd templates exist; root-owned config, real APFS `statvfs`, shutdown and restart behavior are not installed/qualified |
 | Signed qualification artifact | No artifact builder/signing workflow exists; the deliverable is still manual |
 
 Implement these as narrow TESTNET-only, attended and durable workflows with
@@ -127,7 +139,7 @@ cloud-init, logs, a shared folder or an agent-readable path.
 1. Preserve a fresh empty-directory, inode, owner, mode and pre-init ACL report.
 2. Run credential-free `validate` against the final schema-v2 config.
 3. Run `init` exactly once as executor UID 451.
-4. Implement and run a separately reviewed post-init ACL tool. It may add
+4. Review, seal and run the repo's post-init ACL tool. It may add
    `delete` only to future-file inheritance; it must not modify the existing
    execution, staging or learning mains.
 5. Prove durable mains remain executor-owned, mode 0600, single-link and
@@ -136,7 +148,9 @@ cloud-init, logs, a shared folder or an agent-readable path.
 6. Run credential-free `status` and `dry-run`. Wrong-UID commands must fail
    before state, Keychain or network access.
 
-There is currently no reviewed post-init ACL script in the deployment pack.
+The repo contains a rollback-safe post-init ACL artifact, but it is not yet in
+a sealed applied deployment. Its single-use receipt and main-file invariants
+must pass on the real quota paths.
 
 ## Foreground no-write qualification
 

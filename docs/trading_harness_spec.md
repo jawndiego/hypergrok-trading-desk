@@ -294,6 +294,17 @@ ordinary attended reduce-only close, WebSocket recovery and forwarded-request
 response-loss injection. These are implementation requirements, not manual
 shortcuts to the existing protected-bracket signer.
 
+Execution-store schema v11 reserves a separate TESTNET qualification namespace
+for retained account/agent evidence, short-lived attended permits, composite
+commands, per-phase signing/submission authority, query evidence and atomic
+notional/loss reservation. Qualification commands serialize against normal
+entry and incident recovery and MUST keep any sending/unknown attempt reserved.
+They MUST NOT be represented as a three-leg bracket or a fabricated recovery
+incident. This durable core grants no venue capability: a later dedicated
+signer envelope, one-shot sender, result-transition coordinator and
+direct-`/dev/tty` executor CLI must independently revalidate the exact action
+before the first live canary. No qualification action may become an MCP tool.
+
 ## 3. Why HyperGrok Is Unsafe for Mainnet As-Is
 
 ### 3.1 Controls are instructions rather than enforcement

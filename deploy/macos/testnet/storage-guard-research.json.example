@@ -1,0 +1,33 @@
+{
+  "apfs_container_uuid": "__REVIEWED_APFS_CONTAINER_UUID__",
+  "allowed_programs": [
+    "/opt/trading-desk/current/research/.venv/bin/trading-harness",
+    "/opt/trading-desk/current/research/.venv/bin/trading-harness-mcp"
+  ],
+  "expected_uid": 450,
+  "filesystem_type": "apfs",
+  "grace_seconds": 60,
+  "max_file_bytes": {
+    "/var/db/trading-desk-volumes/research/state/learning-shared/learning.sqlite3": 67108864,
+    "/var/db/trading-desk-volumes/research/state/learning-shared/learning.sqlite3-journal": 67108864,
+    "/var/db/trading-desk-volumes/research/state/learning-shared/learning.sqlite3-shm": 67108864,
+    "/var/db/trading-desk-volumes/research/state/learning-shared/learning.sqlite3-wal": 67108864,
+    "/var/db/trading-desk-volumes/research/state/learning-shared/staging.sqlite3": 67108864,
+    "/var/db/trading-desk-volumes/research/state/learning-shared/staging.sqlite3-journal": 67108864,
+    "/var/db/trading-desk-volumes/research/state/learning-shared/staging.sqlite3-shm": 67108864,
+    "/var/db/trading-desk-volumes/research/state/learning-shared/staging.sqlite3-wal": 67108864
+  },
+  "mountpoint": "/var/db/trading-desk-volumes/research",
+  "poll_seconds": 5,
+  "quota_bytes": 8589934592,
+  "reserve_bytes": 0,
+  "role": "research",
+  "schema_version": 1,
+  "shutdown_used_bytes": 7516192768,
+  "snapshot_parents": [
+    "/var/db/trading-desk-volumes/research/state/learning-shared",
+    "/var/db/trading-desk-volumes/research/state/research-private"
+  ],
+  "volume_uuid": "__REVIEWED_RESEARCH_VOLUME_UUID__",
+  "warn_used_bytes": 6442450944
+}

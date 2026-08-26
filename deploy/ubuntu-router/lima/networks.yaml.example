@@ -1,0 +1,13 @@
+# Generated public socket_vmnet plan. Installation and sudoers changes are not
+# performed by the renderer or any script in this bundle.
+paths:
+  socketVMNet: "/opt/socket_vmnet/bin/socket_vmnet"
+  varRun: "/private/var/run/lima"
+  sudoers: "/private/etc/sudoers.d/lima"
+group: __SOCKET_VMNET_GROUP_YAML__
+networks:
+  __INGRESS_NETWORK_NAME_YAML__:
+    mode: "host"
+    gateway: __INGRESS_GATEWAY_YAML__
+    dhcpEnd: __INGRESS_DHCP_END_YAML__
+    netmask: __INGRESS_NETMASK_YAML__

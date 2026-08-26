@@ -137,8 +137,10 @@ exhaustion probe pass after reboot, resource isolation is unqualified and
 always-on operation is forbidden.
 
 The local router and machine setup do not make the live checklist executable.
-A qualification-only GTC/query/cancel canary, attended ordinary reduce-only
-close, retained venue snapshot, WebSocket recovery path and bounded
+The qualification-only GTC/query/cancel, retained snapshot and attended-close
+semantics have a separate TESTNET-only durable core, but no SDK signer, sender,
+credential loader, executor CLI or MCP path can dispatch them. Transport-result
+transitions, terminal reservation release, WebSocket recovery and bounded
 forwarded-request/response-drop control remain reviewed implementation gaps.
 The first harness order write is forbidden until those gaps and the commissioning
 sequence in [`docs/testnet_commissioning.md`](docs/testnet_commissioning.md)

@@ -1,6 +1,7 @@
 # Hyperliquid testnet qualification
 
-Status: **offline capital core implemented; commissioning and live-workflow
+Status: **offline capital core and schema-v11 qualification persistence
+implemented; qualification signer/sender/CLI, commissioning and live-workflow
 gaps remain; live venue qualification not run**.
 
 The TESTNET execution functions are real and armed when the isolated worker is
@@ -126,24 +127,27 @@ sidecar files and stop for a separately reviewed migration.
 
 The target live sequence below is intentionally stronger than the currently
 exposed CLI. Do not skip its first steps by sending the already-armed bracket.
-The following reviewed capabilities still need implementation and observable
-tests:
+The GTC/cancel/close semantics and durable schema-v11 authority lane now exist,
+but they expose no signer, sender, credential or CLI capability. The following
+live integrations and observable tests remain:
 
-- a narrow attended TESTNET-only GTC canary/query/cancel workflow;
-- an operator-facing retained account/metadata/order snapshot;
-- an ordinary attended bounded reduce-only close available before any canary
-  that could fill unexpectedly;
+- a dedicated signer/sender/result-transition/TTY CLI for the narrow attended
+  TESTNET-only GTC canary/query/cancel core;
+- a live `userRole` reader and operator-facing retained
+  account/metadata/order artifact export;
+- signer/sender/terminal-flat reservation release for the ordinary attended
+  bounded reduce-only canary close;
 - WebSocket monitoring and disconnect/fill/REST recovery;
 - bounded fault injection that forwards one exact request while dropping its
   response;
 - optional application-level router health if router readiness is to be an
   admission gate rather than an OS-only failure boundary.
-- an enforced free-space shutdown monitor and a deterministic qualification
-  artifact builder/signing workflow.
+- installed and empirically qualified free-space shutdown guards plus a
+  deterministic qualification artifact builder/signing workflow.
 
-The current signer accepts only the mandatory three-leg `normalTpsl` group
-with IOC entry, ordinary flatten is incident-driven, and runtime monitoring is
-REST polling. Machine setup and credentials alone therefore do not make the
+The live signer still accepts only the mandatory three-leg `normalTpsl` group
+with IOC entry, and runtime monitoring is REST polling. Machine setup and
+credentials alone therefore do not make the
 first harness order write responsible. API-wallet `approveAgent` registration
 is a separate attended out-of-band account-provisioning write, not harness
 order qualification. See

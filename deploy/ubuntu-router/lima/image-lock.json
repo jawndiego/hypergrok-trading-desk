@@ -1,0 +1,10 @@
+{
+  "arch": "aarch64",
+  "location": "https://cloud-images.ubuntu.com/releases/noble/release-20260814/ubuntu-24.04-server-cloudimg-arm64.img",
+  "os": "ubuntu",
+  "release": "24.04",
+  "review_status": "verified",
+  "schema_version": 1,
+  "sha256": "4a281a921b8d7db952895ab619736f10efe9f63e111fa5b5779ed18f023818aa",
+  "size_bytes": 618370560
+}

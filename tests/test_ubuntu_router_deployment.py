@@ -63,10 +63,12 @@ class UbuntuRouterTemplateTests(unittest.TestCase):
             "mac-wireguard.conf.fragment.example",
             "trading-desk-router-check.sh.example",
         }
-        self.assertEqual(expected, {path.name for path in ROUTER_ROOT.iterdir()})
+        root_files = [path for path in ROUTER_ROOT.iterdir() if path.is_file()]
+        self.assertEqual(expected, {path.name for path in root_files})
+        self.assertTrue((ROUTER_ROOT / "lima").is_dir())
         combined = "\n".join(
             path.read_text(encoding="utf-8")
-            for path in sorted(ROUTER_ROOT.iterdir())
+            for path in sorted(root_files)
         )
         self.assertTrue(PLACEHOLDER_RE.findall(combined))
         self.assertTrue(
@@ -343,7 +345,11 @@ class UbuntuRouterDocumentationTests(unittest.TestCase):
         ):
             self.assertIn(required, router)
 
-        commissioning = COMMISSIONING_GUIDE.read_text(encoding="utf-8").lower()
+        commissioning = re.sub(
+            r"\s+",
+            " ",
+            COMMISSIONING_GUIDE.read_text(encoding="utf-8").lower(),
+        )
         for required in (
             "macos security update",
             "quota",

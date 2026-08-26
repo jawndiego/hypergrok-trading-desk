@@ -42,8 +42,10 @@ staged under an explicit `profitability_qualified: false` grant.
 | Isolated credential provider | macOS Keychain reader implemented; no env/file key loader |
 | Always-on serialized executor runtime | Implemented with fenced lease, daily-loss sync, strict recovery priority and graceful drain |
 | Direct attended control CLI | Implemented; confirmation is read from `/dev/tty`, never MCP/chat/stdin |
-| Local Ubuntu VM egress router | Secret-free renderer/templates implemented; `local_nat_lab` only, not installed or VPN-qualified |
-| Live Hyperliquid testnet | **Code armed; no account configured; first responsible write blocked by commissioning and qualification-workflow gaps** |
+| TESTNET qualification canary/close core | Typed GTC/query/cancel and full-residual close semantics plus schema-v11 durable authority/reservation state implemented; no signer, sender or CLI exposure |
+| macOS storage/ACL/install plan | Credential-free, rollback-safe plan/apply artifacts implemented; not applied; encryption, reboot and exhaustion evidence pending |
+| Local Ubuntu VM egress router | Secret-free router and Lima/VZ plan renderers implemented; package snapshot, VM creation and live qualification pending; not VPN-qualified |
+| Live Hyperliquid testnet | **No account configured; first responsible write remains blocked because the qualification signer/sender/CLI and commissioning gates are incomplete** |
 | Live Hyperliquid mainnet | **Hard-disabled in store, signer and transport** |
 
 The research/MCP executor remains disabled. Environment variables cannot turn
@@ -397,9 +399,11 @@ account (see the [full qualification checklist](docs/testnet_qualification.md)):
 8. restart with zero unresolved outbox records;
 9. final flat account with no orphan orders.
 
-This is a target checklist, not the current CLI surface. The GTC canary/cancel,
-ordinary attended close, WebSocket monitor and response-drop injection remain
-implementation gaps tracked in
+This is a target checklist, not the current CLI surface. The GTC canary,
+cancel and ordinary-close semantics now have an isolated durable core, but
+their SDK signer, sender, transport-result transitions, terminal reservation
+release and direct-terminal CLI remain disabled. WebSocket monitoring and
+response-drop injection also remain implementation gaps tracked in
 [`docs/testnet_commissioning.md`](docs/testnet_commissioning.md); the first
 harness order write remains blocked until they are closed.
 

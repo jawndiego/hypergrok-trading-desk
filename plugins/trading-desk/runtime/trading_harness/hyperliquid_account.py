@@ -721,6 +721,71 @@ class HyperliquidAccountSnapshot:
         }
 
 
+def verify_account_snapshot_integrity(
+    snapshot: HyperliquidAccountSnapshot,
+) -> None:
+    """Recompute every metadata and account digest in a typed snapshot.
+
+    Consumers at a signing or qualification boundary must not treat a frozen
+    dataclass as an integrity guarantee: ``object.__setattr__`` and mutable
+    adapter internals can still manufacture a value whose stored digest no
+    longer matches its contents.  This verifier is deliberately network-free
+    and raises before any caller can derive an action from such a value.
+    """
+
+    if not isinstance(snapshot, HyperliquidAccountSnapshot):
+        raise TypeError("snapshot must be HyperliquidAccountSnapshot")
+    records = [
+        {
+            "symbol": item.symbol,
+            "asset_id": item.asset_id,
+            "sz_decimals": item.sz_decimals,
+            "max_leverage": canonical_decimal(item.max_leverage),
+            "margin_mode": item.margin_mode,
+            "margin_table_id": item.margin_table_id,
+            "is_delisted": item.is_delisted,
+        }
+        for item in snapshot.metadata.instruments
+    ]
+    metadata_hash = domain_hash(
+        METADATA_SNAPSHOT_HASH_DOMAIN,
+        {
+            "collateral_token": snapshot.metadata.collateral_token,
+            "instruments": records,
+        },
+    )
+    if metadata_hash != snapshot.metadata.metadata_hash:
+        raise ValidationError("account metadata hash does not match contents")
+    for item, record in zip(snapshot.metadata.instruments, records, strict=True):
+        expected = domain_hash(
+            "trading-harness/hyperliquid-perp-instrument/v1",
+            {**record, "metadata_snapshot_hash": metadata_hash},
+        )
+        if item.metadata_hash != expected:
+            raise ValidationError(
+                "account instrument hash does not match metadata"
+            )
+    material = {
+        "schema_version": ACCOUNT_SNAPSHOT_SCHEMA_VERSION,
+        "venue": "hyperliquid",
+        "network": snapshot.network,
+        "main_account_address": snapshot.main_account_address,
+        "account_mode": snapshot.account_mode.value,
+        "server_time_ms": snapshot.server_time_ms,
+        "margin_summary": snapshot.margin_summary.canonical_record(),
+        "cross_margin_summary": snapshot.cross_margin_summary.canonical_record(),
+        "cross_maintenance_margin_used": canonical_decimal(
+            snapshot.cross_maintenance_margin_used
+        ),
+        "withdrawable": canonical_decimal(snapshot.withdrawable),
+        "positions": [item.canonical_record() for item in snapshot.positions],
+        "open_orders": [item.canonical_record() for item in snapshot.open_orders],
+        "metadata_hash": metadata_hash,
+    }
+    if domain_hash(ACCOUNT_SNAPSHOT_HASH_DOMAIN, material) != snapshot.snapshot_hash:
+        raise ValidationError("account snapshot hash does not match contents")
+
+
 def _parse_account_mode(response: object) -> StandardAccountMode:
     if not isinstance(response, str):
         raise HyperliquidAccountResponseError(
@@ -1367,4 +1432,5 @@ __all__ = (
     "TriggerKind",
     "UnsupportedAccountModeError",
     "fetch_account_snapshot",
+    "verify_account_snapshot_integrity",
 )

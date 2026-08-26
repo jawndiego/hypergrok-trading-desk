@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jawndiego.trading-desk-testnet-executor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/trading-desk/runtime/python-3.11.16/bin/python3.11</string>
+    <string>-I</string>
+    <string>/opt/trading-desk/current/bin/storage-headroom-guard.py</string>
+    <string>run</string>
+    <string>--config</string>
+    <string>/etc/trading-desk/storage-guard-executor.json</string>
+    <string>--</string>
+    <string>/opt/trading-desk/current/executor/.venv/bin/trading-harness-executor</string>
+    <string>run</string>
+    <string>--config</string>
+    <string>/etc/trading-desk/testnet-executor.toml</string>
+    <string>--worker-id</string>
+    <string>isolated-testnet-worker</string>
+    <string>--max-drain-steps</string>
+    <string>20</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/trading-desk/current/executor</string>
+  <key>UserName</key>
+  <string>trading-executor</string>
+  <key>GroupName</key>
+  <string>trading-executor</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ExitTimeOut</key>
+  <integer>210</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/var/db/trading-desk-volumes/executor/logs/executor/executor.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/db/trading-desk-volumes/executor/logs/executor/executor.stderr.log</string>
+</dict>
+</plist>

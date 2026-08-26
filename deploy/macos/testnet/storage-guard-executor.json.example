@@ -1,0 +1,37 @@
+{
+  "apfs_container_uuid": "__REVIEWED_APFS_CONTAINER_UUID__",
+  "allowed_programs": [
+    "/opt/trading-desk/current/executor/.venv/bin/trading-harness-executor"
+  ],
+  "expected_uid": 451,
+  "filesystem_type": "apfs",
+  "grace_seconds": 180,
+  "max_file_bytes": {
+    "/var/db/trading-desk-volumes/executor/state/daily-loss/daily-loss.sqlite3": 939524096,
+    "/var/db/trading-desk-volumes/executor/state/daily-loss/daily-loss.sqlite3-journal": 939524096,
+    "/var/db/trading-desk-volumes/executor/state/daily-loss/daily-loss.sqlite3-shm": 939524096,
+    "/var/db/trading-desk-volumes/executor/state/daily-loss/daily-loss.sqlite3-wal": 939524096,
+    "/var/db/trading-desk-volumes/executor/state/execution/execution.sqlite3": 939524096,
+    "/var/db/trading-desk-volumes/executor/state/execution/execution.sqlite3-journal": 939524096,
+    "/var/db/trading-desk-volumes/executor/state/execution/execution.sqlite3-shm": 939524096,
+    "/var/db/trading-desk-volumes/executor/state/execution/execution.sqlite3-wal": 939524096,
+    "/var/db/trading-desk-volumes/executor/state/nonce/nonce.sqlite3": 939524096,
+    "/var/db/trading-desk-volumes/executor/state/nonce/nonce.sqlite3-journal": 939524096,
+    "/var/db/trading-desk-volumes/executor/state/nonce/nonce.sqlite3-shm": 939524096,
+    "/var/db/trading-desk-volumes/executor/state/nonce/nonce.sqlite3-wal": 939524096
+  },
+  "mountpoint": "/var/db/trading-desk-volumes/executor",
+  "poll_seconds": 5,
+  "quota_bytes": 17179869184,
+  "reserve_bytes": 8589934592,
+  "role": "executor",
+  "schema_version": 1,
+  "shutdown_used_bytes": 6442450944,
+  "snapshot_parents": [
+    "/var/db/trading-desk-volumes/executor/state/execution",
+    "/var/db/trading-desk-volumes/executor/state/nonce",
+    "/var/db/trading-desk-volumes/executor/state/daily-loss"
+  ],
+  "volume_uuid": "__REVIEWED_EXECUTOR_VOLUME_UUID__",
+  "warn_used_bytes": 4294967296
+}

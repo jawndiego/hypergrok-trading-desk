@@ -1,0 +1,61 @@
+# Generated public VM plan. This file does not create or start an instance.
+# Review effective Lima defaults/overrides separately before any attended apply.
+# Reviewed instance name: __INSTANCE_NAME__
+minimumLimaVersion: __PINNED_LIMA_VERSION_YAML__
+vmType: "vz"
+arch: "aarch64"
+os: "Linux"
+images:
+  - location: __PINNED_IMAGE_LOCATION_YAML__
+    arch: "aarch64"
+    digest: __PINNED_IMAGE_DIGEST_YAML__
+cpus: __VM_CPUS__
+memory: __VM_MEMORY_YAML__
+disk: __VM_DISK_YAML__
+plain: true
+mounts: []
+additionalDisks: []
+provision: []
+probes: []
+portForwards: []
+containerd:
+  system: false
+  user: false
+vmOpts:
+  vz:
+    rosetta:
+      enabled: false
+      binfmt: false
+ssh:
+  loadDotSSHPubKeys: false
+  forwardAgent: false
+  forwardX11: false
+  forwardX11Trusted: false
+  overVsock: true
+propagateProxyEnv: false
+hostResolver:
+  enabled: false
+  ipv6: false
+  hosts: {}
+env: {}
+param: {}
+upgradePackages: false
+nestedVirtualization: false
+# Lima VZ 2.2 attaches one default user-mode NAT NIC. This sole explicit
+# socket_vmnet host NIC makes the expected guest total exactly two. Adding a
+# shared or vzNAT entry here would create an unqualified third NIC.
+networks:
+  - lima: __INGRESS_NETWORK_NAME_YAML__
+    macAddress: __INGRESS_MAC_YAML__
+    interface: __INGRESS_INTERFACE_YAML__
+    metric: 200
+user:
+  name: "routeradmin"
+  uid: 1000
+  home: "/var/lib/trading-desk-router"
+  shell: "/bin/bash"
+  passwordlessSudo: false
+audio:
+  device: "none"
+video:
+  display: "none"

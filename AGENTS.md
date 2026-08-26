@@ -52,9 +52,19 @@ This repository builds an agent-runtime-neutral trading research and execution h
   executor on macOS, does not change the public IP, does not prevent macOS host
   bypass, and is not VPN or mainnet qualification.
 - Read `docs/testnet_commissioning.md` before claiming transaction readiness.
-  Machine setup alone is insufficient: the qualification GTC/query/cancel,
-  ordinary attended reduce-only close, WebSocket recovery and bounded
-  response-loss injection are explicit implementation gaps.
+  Machine setup alone is insufficient. The qualification GTC/query/cancel,
+  retained snapshot and ordinary-close semantics now have a separate
+  TESTNET-only schema-v11 persistence lane, but SDK signing, HTTP submission,
+  direct-terminal CLI, transport-result transitions, terminal reservation
+  release, WebSocket recovery and bounded response-loss injection remain
+  deliberately disabled.
+- Credential-free macOS plans live under `deploy/macos/testnet`. They are
+  plan-only by default and do not authorize APFS creation, ACL mutation,
+  application installation, `init`, launchd, credentials or venue calls.
+- The repo-composable VM plan lives under `deploy/ubuntu-router/lima` and is
+  rendered by `scripts/render_ubuntu_router_vm.py`. It pins Lima, socket_vmnet
+  and a dated Ubuntu image, but VM apply remains absent and the signed apt
+  snapshot plus guest preflight must pass before router keys are generated.
 - The router VM is network-only. It receives no API-wallet, account config,
   execution state, Keychain access, repository/shared-folder mount, approval
   secret, agent runtime or venue authority.

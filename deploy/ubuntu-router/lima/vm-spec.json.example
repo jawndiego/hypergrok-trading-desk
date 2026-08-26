@@ -1,0 +1,35 @@
+{
+  "arch": "aarch64",
+  "cpus": 2,
+  "disk_gib": 20,
+  "instance_name": "trading-desk-router",
+  "memory_gib": 2,
+  "mode": "local_nat_lab",
+  "lima_home": {
+    "default_yaml": {
+      "sha256": null,
+      "state": "absent"
+    },
+    "effective_config_sha256": "44a93c5ffe995d717296e0c90574bc3252c33020f6811824f29dc1de6016f0f9",
+    "override_yaml": {
+      "sha256": null,
+      "state": "absent"
+    },
+    "path": "/var/db/trading-desk-lima"
+  },
+  "os": "ubuntu",
+  "os_release": "24.04",
+  "schema_version": 1,
+  "socket_vmnet_group": "admin",
+  "vm_type": "vz",
+  "wan_mode": "lima_default_usernet",
+  "ingress_network": {
+    "dhcp_end": "192.168.106.254",
+    "gateway_cidr": "192.168.106.1/24",
+    "guest_interface": "td-ingress",
+    "guest_mac_address": "02:74:64:00:00:01",
+    "guest_static_cidr": "192.168.106.2/24",
+    "mode": "host",
+    "name": "td-router-ingress"
+  }
+}

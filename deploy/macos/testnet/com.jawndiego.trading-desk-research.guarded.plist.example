@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jawndiego.trading-desk-research</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/trading-desk/runtime/python-3.11.16/bin/python3.11</string>
+    <string>-I</string>
+    <string>/opt/trading-desk/current/bin/storage-headroom-guard.py</string>
+    <string>run</string>
+    <string>--config</string>
+    <string>/etc/trading-desk/storage-guard-research.json</string>
+    <string>--</string>
+    <string>/opt/trading-desk/current/research/.venv/bin/trading-harness</string>
+    <string>node</string>
+    <string>run</string>
+    <string>--state-db</string>
+    <string>/var/db/trading-desk-volumes/research/state/research-private/research.sqlite3</string>
+    <string>--node-id</string>
+    <string>trading-desk-research</string>
+    <string>--poll-seconds</string>
+    <string>1</string>
+    <string>--history-bars</string>
+    <string>1200</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/trading-desk/current/research</string>
+  <key>UserName</key>
+  <string>trading-research</string>
+  <key>GroupName</key>
+  <string>trading-research</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ExitTimeOut</key>
+  <integer>90</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/var/db/trading-desk-volumes/research/logs/research/research.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/db/trading-desk-volumes/research/logs/research/research.stderr.log</string>
+</dict>
+</plist>

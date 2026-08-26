@@ -1104,6 +1104,267 @@ _SCHEMA_V10 = _Migration(
     ),
 )
 
+_SCHEMA_V11 = _Migration(
+    11,
+    "attended_testnet_qualification_lane",
+    (
+        """
+        CREATE TABLE execution_qualification_snapshots (
+            snapshot_hash TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            main_account_address TEXT NOT NULL,
+            api_wallet_address TEXT NOT NULL,
+            account_server_time_ms INTEGER NOT NULL,
+            retained_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE execution_qualification_permits (
+            permit_id TEXT PRIMARY KEY,
+            token_hash TEXT NOT NULL UNIQUE,
+            qualification_id TEXT NOT NULL,
+            intent_hash TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL CHECK (
+                kind IN ('gtc_place_query_cancel', 'attended_reduce_only_close')
+            ),
+            environment TEXT NOT NULL CHECK (environment = 'testnet'),
+            account_id TEXT NOT NULL,
+            main_account_address TEXT NOT NULL,
+            api_wallet_address TEXT NOT NULL,
+            source_snapshot_hash TEXT NOT NULL
+                REFERENCES execution_qualification_snapshots(snapshot_hash),
+            issuer_id TEXT NOT NULL,
+            audience TEXT NOT NULL,
+            issued_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('issued', 'consumed', 'revoked')),
+            command_id TEXT UNIQUE,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE execution_qualification_commands (
+            command_id TEXT PRIMARY KEY,
+            permit_id TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_permits(permit_id),
+            qualification_id TEXT NOT NULL UNIQUE,
+            intent_hash TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL CHECK (
+                kind IN ('gtc_place_query_cancel', 'attended_reduce_only_close')
+            ),
+            source_snapshot_hash TEXT NOT NULL,
+            authorization_hash TEXT NOT NULL UNIQUE,
+            intent_json TEXT NOT NULL,
+            intent_content_hash TEXT NOT NULL,
+            workflow_json TEXT NOT NULL,
+            workflow_content_hash TEXT NOT NULL,
+            workflow_hash TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (
+                state IN ('queued', 'claimed', 'reconciling', 'terminal', 'halted')
+            ),
+            current_phase TEXT NOT NULL CHECK (
+                current_phase IN ('place', 'cancel', 'close', 'complete', 'halted')
+            ),
+            reserved_loss TEXT NOT NULL,
+            reserved_notional TEXT NOT NULL,
+            reservation_released INTEGER NOT NULL
+                CHECK (reservation_released IN (0, 1)),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            terminal_at TEXT,
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            record_hash TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE execution_qualification_outbox (
+            command_id TEXT PRIMARY KEY
+                REFERENCES execution_qualification_commands(command_id),
+            state TEXT NOT NULL CHECK (
+                state IN ('queued', 'claimed', 'reconciling', 'terminal', 'halted')
+            ),
+            worker_id TEXT,
+            fencing_token INTEGER NOT NULL CHECK (fencing_token >= 0),
+            claimed_at TEXT,
+            lease_expires_at TEXT,
+            current_attempt_id TEXT,
+            attempt_count INTEGER NOT NULL CHECK (attempt_count BETWEEN 0 AND 2),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            record_hash TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE execution_qualification_steps (
+            command_id TEXT NOT NULL
+                REFERENCES execution_qualification_commands(command_id),
+            phase TEXT NOT NULL CHECK (phase IN ('place', 'cancel', 'close')),
+            action_hash TEXT NOT NULL UNIQUE,
+            action_json TEXT NOT NULL,
+            action_content_hash TEXT NOT NULL,
+            expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms >= 0),
+            state TEXT NOT NULL CHECK (
+                state IN (
+                    'ready', 'claimed', 'prepared', 'sending',
+                    'response_received', 'unknown', 'reconciled',
+                    'terminal_unsent'
+                )
+            ),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            record_hash TEXT NOT NULL,
+            PRIMARY KEY (command_id, phase)
+        )
+        """,
+        """
+        CREATE TABLE execution_qualification_signing_authorities (
+            authority_hash TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            action_hash TEXT NOT NULL,
+            worker_id TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+            issued_at TEXT NOT NULL,
+            lease_expires_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL,
+            UNIQUE (command_id, phase),
+            FOREIGN KEY (command_id, phase)
+                REFERENCES execution_qualification_steps(command_id, phase)
+        )
+        """,
+        """
+        CREATE TABLE execution_qualification_signed_evidence (
+            evidence_hash TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            action_hash TEXT NOT NULL,
+            signing_authority_hash TEXT NOT NULL UNIQUE,
+            nonce INTEGER NOT NULL CHECK (nonce >= 0),
+            wire_hash TEXT NOT NULL,
+            signature_hash TEXT NOT NULL,
+            envelope_hash TEXT NOT NULL,
+            signer_binding_hash TEXT NOT NULL,
+            expires_after_ms INTEGER NOT NULL CHECK (expires_after_ms >= 0),
+            signed_at_ms INTEGER NOT NULL CHECK (signed_at_ms >= 0),
+            recorded_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL,
+            UNIQUE (command_id, phase),
+            FOREIGN KEY (command_id, phase)
+                REFERENCES execution_qualification_steps(command_id, phase)
+        )
+        """,
+        """
+        CREATE TABLE execution_qualification_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            worker_id TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+            signed_evidence_hash TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_signed_evidence(evidence_hash),
+            transport_evidence_hash TEXT,
+            nonce INTEGER NOT NULL CHECK (nonce >= 0),
+            action_hash TEXT NOT NULL,
+            wire_hash TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (
+                state IN ('prepared', 'sending', 'response_received', 'unknown')
+            ),
+            prepared_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            record_hash TEXT NOT NULL,
+            UNIQUE (command_id, phase),
+            FOREIGN KEY (command_id, phase)
+                REFERENCES execution_qualification_steps(command_id, phase)
+        )
+        """,
+        """
+        CREATE TABLE execution_qualification_submission_authorities (
+            authority_hash TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            attempt_id TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_attempts(attempt_id),
+            signed_evidence_hash TEXT NOT NULL UNIQUE,
+            worker_id TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+            issued_at TEXT NOT NULL,
+            lease_expires_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL,
+            UNIQUE (command_id, phase),
+            FOREIGN KEY (command_id, phase)
+                REFERENCES execution_qualification_steps(command_id, phase)
+        )
+        """,
+        """
+        CREATE TABLE execution_qualification_transport_evidence (
+            evidence_hash TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            attempt_id TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_attempts(attempt_id),
+            signed_evidence_hash TEXT NOT NULL UNIQUE,
+            endpoint TEXT NOT NULL,
+            attempted_at_ms INTEGER NOT NULL CHECK (attempted_at_ms >= 0),
+            outcome TEXT NOT NULL CHECK (
+                outcome IN ('response_received', 'unknown')
+            ),
+            http_status INTEGER,
+            detail_code TEXT NOT NULL,
+            response_hash TEXT,
+            transport_attempt_hash TEXT NOT NULL,
+            send_count INTEGER NOT NULL CHECK (send_count = 1),
+            retry_performed INTEGER NOT NULL CHECK (retry_performed = 0),
+            recorded_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL,
+            UNIQUE (command_id, phase),
+            FOREIGN KEY (command_id, phase)
+                REFERENCES execution_qualification_steps(command_id, phase)
+        )
+        """,
+        """
+        CREATE TABLE execution_qualification_queries (
+            evidence_hash TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL
+                REFERENCES execution_qualification_commands(command_id),
+            query_kind TEXT NOT NULL CHECK (
+                query_kind IN ('open_by_cloid', 'open_by_oid', 'terminal')
+            ),
+            order_identity_hash TEXT,
+            account_snapshot_hash TEXT,
+            observed_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL,
+            UNIQUE (command_id, query_kind)
+        )
+        """,
+        """
+        CREATE INDEX idx_execution_qualification_outbox_state
+        ON execution_qualification_outbox (state, created_at, command_id)
+        """,
+        """
+        CREATE INDEX idx_execution_qualification_command_state
+        ON execution_qualification_commands (
+            state, reservation_released, created_at, command_id
+        )
+        """,
+    ),
+)
+
 _MIGRATIONS = (
     _SCHEMA_V1,
     _SCHEMA_V2,
@@ -1115,8 +1376,9 @@ _MIGRATIONS = (
     _SCHEMA_V8,
     _SCHEMA_V9,
     _SCHEMA_V10,
+    _SCHEMA_V11,
 )
-EXECUTION_SCHEMA_VERSION = 10
+EXECUTION_SCHEMA_VERSION = 11
 
 
 def _execution_schema_objects(
@@ -3916,6 +4178,18 @@ class ExecutionStore:
                         "ACCOUNT_RECOVERY_ACTIVE",
                         "active recovery command blocks new risk",
                     )
+                if connection.execute(
+                    """
+                    SELECT 1 FROM execution_qualification_commands
+                    WHERE state IN ('queued', 'claimed', 'reconciling')
+                       OR reservation_released = 0
+                    LIMIT 1
+                    """
+                ).fetchone() is not None:
+                    raise AdmissionDenied(
+                        "ACCOUNT_QUALIFICATION_ACTIVE",
+                        "qualification command or reservation blocks new risk",
+                    )
                 active_command = connection.execute(
                     """
                     SELECT command_id FROM execution_commands
@@ -5649,6 +5923,15 @@ class ExecutionStore:
                 """
                 SELECT 1 FROM execution_recovery_commands
                 WHERE state != 'terminal' LIMIT 1
+                """
+            ).fetchone() is not None:
+                return None
+            if connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_commands
+                WHERE state IN ('queued', 'claimed', 'reconciling')
+                   OR reservation_released = 0
+                LIMIT 1
                 """
             ).fetchone() is not None:
                 return None
@@ -8445,6 +8728,25 @@ class ExecutionStore:
                 """,
             ).fetchone() is not None:
                 raise StateConflict("account already has an active recovery command")
+            # Incident-bound account safety has priority over attended
+            # qualification.  Preemption and recovery queueing share this
+            # transaction so no qualifier can dispatch between the halt and
+            # the durable recovery outbox insert.  Reservation is retained;
+            # any qualifier attempt is normalized to unknown.
+            from .qualification_store import QualificationStore
+
+            QualificationStore(self)._preempt_for_account_safety_locked(
+                connection,
+                at=checked_at,
+            )
+            if connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_commands
+                WHERE state IN ('queued', 'claimed', 'reconciling')
+                LIMIT 1
+                """
+            ).fetchone() is not None:
+                raise StorageError("qualification preemption was incomplete")
             permit_material = self._recovery_permit_material(
                 permit,
                 state="consumed",

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jawndiego.trading-desk-learning-mcp</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/trading-desk/runtime/python-3.11.16/bin/python3.11</string>
+    <string>-I</string>
+    <string>/opt/trading-desk/current/bin/storage-headroom-guard.py</string>
+    <string>run</string>
+    <string>--config</string>
+    <string>/etc/trading-desk/storage-guard-research.json</string>
+    <string>--</string>
+    <string>/opt/trading-desk/current/research/.venv/bin/trading-harness-mcp</string>
+    <string>--transport</string>
+    <string>streamable-http</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8765</string>
+    <string>--learning-executor-config</string>
+    <string>/etc/trading-desk/research-testnet-profile.toml</string>
+    <string>--learning-research-db</string>
+    <string>/var/db/trading-desk-volumes/research/state/research-private/research.sqlite3</string>
+    <string>--learning-grant</string>
+    <string>/etc/trading-desk/research-learning-grant-g1.json</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/trading-desk/current/research</string>
+  <key>UserName</key>
+  <string>trading-research</string>
+  <key>GroupName</key>
+  <string>trading-research</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ExitTimeOut</key>
+  <integer>90</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/var/db/trading-desk-volumes/research/logs/learning-mcp/learning-mcp.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/db/trading-desk-volumes/research/logs/learning-mcp/learning-mcp.stderr.log</string>
+</dict>
+</plist>

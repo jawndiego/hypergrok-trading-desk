@@ -1,8 +1,9 @@
 # Local Ubuntu VM router for TESTNET qualification
 
-Status: **repository-rendered guest configuration; VM provisioning and boot
-orchestration remain manual/unqualified; not VPN-qualified or a capital
-security boundary**.
+Status: **repository-rendered guest configuration plus a pinned, plan-only
+Lima/VZ VM bundle; signed package snapshot, VM apply and boot orchestration
+remain unapplied/unqualified; not VPN-qualified or a capital security
+boundary**.
 
 This design keeps the signer/executor on macOS, where the reviewed System
 Keychain and UID/ACL model exist, and puts only network routing in a dedicated
@@ -89,13 +90,43 @@ Retain the printed manifest SHA-256 outside the writable bundle in the change
 record; checking against a digest stored only inside the same directory is not
 authentication.
 
-The renderer does not create a VM, pin an Ubuntu image, configure a hypervisor,
-attach two NICs, bootstrap packages, install files or arrange boot ordering.
-Those are explicit commissioning tasks, not hidden side effects of rendering.
+The guest-config renderer does not create or define the VM. The separate
+plan-only Lima renderer below pins the host/image envelope, but neither tool
+creates a VM, attaches a live NIC, bootstraps packages, installs files or
+arranges boot ordering. Those remain explicit commissioning tasks.
+
+## Plan-only Lima VM bundle
+
+`deploy/ubuntu-router/lima` adds a second deterministic renderer for the host
+VM envelope. It pins Lima 2.2.0, socket_vmnet 1.2.2 and the dated Ubuntu 24.04
+ARM64 release image from 2026-08-14. Stock Lima/VZ always supplies one default
+user-mode NAT NIC; the plan adds exactly one socket_vmnet host-only ingress
+NIC. Guest preflight fails if a third interface appears. The VZ-derived WAN
+name/MAC is retained as public post-create evidence and VM recreation requires
+requalification.
+
+```sh
+python3 scripts/render_ubuntu_router_vm.py \
+  --spec /absolute/reviewed/vm-spec.json \
+  --output-dir /absolute/new/router-vm-plan
+python3 scripts/render_ubuntu_router_vm.py \
+  --check-bundle /absolute/new/router-vm-plan \
+  --expected-manifest-sha256 REVIEWED_DIGEST_FROM_RENDER_OUTPUT
+limactl validate /absolute/new/router-vm-plan/lima.yaml
+```
+
+The output is apply-disabled and contains no key. It disables host mounts,
+containerd, Rosetta, host DNS/proxy propagation, SSH-agent forwarding and port
+forwards. Its package lock remains
+`awaiting_signed_apt_snapshot_and_vm_guest_preflight`: the candidate Ubuntu
+snapshot and archive keyring must prove every exact package version before a
+bootstrap/apply procedure may be added. `bootstrap-public.sh` therefore accepts
+only `--plan`.
 
 ## VM network contract
 
-Use an Ubuntu 24.04 ARM64 VM with two distinct NICs:
+Use an Ubuntu 24.04 ARM64 VM with two distinct NICs. The reviewed Lima plan
+realizes these as one implicit usernet WAN plus one explicit host-only ingress:
 
 1. An ingress/management NIC reachable from the Mac over a host-only or shared
    network. The Mac WireGuard endpoint and narrowly sourced SSH use this NIC.
@@ -132,7 +163,7 @@ default-drop output, pinned peer IP/UDP, tunnel-only DNS/NTP and NAT only onto
 the remote WireGuard interface. Do not convert modes with an environment
 variable or a small live edit.
 
-## Attended setup
+## Attended setup — currently blocked before apply
 
 Before any router or venue credential is created, confirm the Mac remains on a
 currently supported security release and retain reboot/runtime/test evidence.
@@ -141,55 +172,36 @@ The current host was updated from macOS 15.3.1 to 26.6.2 build 25G83 on
 requalified. Repeat after any later OS/runtime change. Apple publishes current
 security releases at <https://support.apple.com/100100>.
 
-Inside the Ubuntu VM, from its console:
+No VM/package/network/key command is authorized yet. The legacy unpinned
+`apt-get update`, unversioned package install and immediate `wg genkey`
+sequence has been removed because it bypassed the reviewed locks.
 
-```sh
-sudo apt-get update
-sudo apt-get install --yes wireguard nftables
-sudo install -d -o root -g root -m 0700 /etc/wireguard
-sudo sh -c 'umask 077; wg genkey > /etc/wireguard/trading-desk-router.key'
-sudo sh -c 'wg pubkey < /etc/wireguard/trading-desk-router.key > /etc/wireguard/trading-desk-router.pub'
-```
+The next attended change must be a separately reviewed apply artifact that:
 
-Generate an empty tunnel in the official macOS WireGuard app. Transfer only
-the VM and Mac public keys into the reviewed public profile. Never paste either
-private key into chat, the repository, profile JSON, cloud-init, a command
-argument or a shared folder.
+1. installs the exact hash- and signature-checked Lima and socket_vmnet
+   binaries, creates a dedicated mode-`0700` `/var/db/trading-desk-lima`,
+   installs only the rendered `networks.yaml`, and proves `default.yaml` and
+   `override.yaml` are absent;
+2. runs the rendered `host-preflight.sh --check` and retains the exact
+   `limactl validate --fill` digest before every create/start;
+3. proves the candidate signed Ubuntu snapshot, archive keyring hash and every
+   locked package version, then changes the package lock from
+   `review_pending_live_apt_policy` to `verified` through review;
+4. creates the VM without mounts, forwarded agent, proxy/DNS inheritance or a
+   third NIC, then runs `guest-preflight.sh --pre-key` from its console;
+5. installs the separately rendered guest router bundle, applies netplan from
+   the console, and passes `guest-preflight.sh --post-netplan` with exactly
+   `192.168.106.2/24`; and only then
+6. generates the VM WireGuard private key in the VM and the Mac key in the
+   official WireGuard app. Only derived public keys may enter the reviewed
+   router spec. Private keys never enter chat, the repo, cloud-init, argv,
+   environment, shared folders or evidence logs.
 
-Render the bundle, verify it against the retained manifest digest, and copy the
-public artifacts plus the exact reviewed renderer into a non-privileged VM
-staging directory. From the VM console, copy into a new root-only directory and
-re-run verification there before installation:
-
-```sh
-sudo install -d -o root -g root -m 0700 /usr/local/libexec
-sudo install -o root -g root -m 0500 render_ubuntu_router.py /usr/local/libexec/render_ubuntu_router
-sudo /usr/bin/test '!' -e /root/trading-desk-router-bundle
-sudo install -d -o root -g root -m 0700 /root/trading-desk-router-bundle
-sudo install -o root -g root -m 0600 router-bundle/50-trading-desk-router.yaml router-bundle/70-trading-desk-router.conf router-bundle/bundle-manifest.json router-bundle/mac-wireguard.conf.fragment router-bundle/nftables.conf router-bundle/wg-exec.conf /root/trading-desk-router-bundle/
-sudo install -o root -g root -m 0700 router-bundle/trading-desk-router-check /root/trading-desk-router-bundle/trading-desk-router-check
-sudo /usr/bin/python3 /usr/local/libexec/render_ubuntu_router \
-  --check-bundle /root/trading-desk-router-bundle \
-  --expected-manifest-sha256 REVIEWED_DIGEST_FROM_CHANGE_RECORD \
-  --require-owner-uid 0
-sudo install -o root -g root -m 0600 /root/trading-desk-router-bundle/wg-exec.conf /etc/wireguard/wg-exec.conf
-sudo install -o root -g root -m 0600 /root/trading-desk-router-bundle/nftables.conf /etc/nftables.conf
-sudo install -o root -g root -m 0600 /root/trading-desk-router-bundle/70-trading-desk-router.conf /etc/sysctl.d/70-trading-desk-router.conf
-sudo install -o root -g root -m 0600 /root/trading-desk-router-bundle/50-trading-desk-router.yaml /etc/netplan/50-trading-desk-router.yaml
-sudo install -o root -g root -m 0700 /root/trading-desk-router-bundle/trading-desk-router-check /usr/local/libexec/trading-desk-router-check
-sudo netplan generate
-sudo netplan apply
-sudo systemctl enable --now nftables.service
-sudo nft list ruleset
-sudo sysctl --system
-sudo systemctl enable --now wg-quick@wg-exec.service
-```
-
-Apply the firewall from a VM console, not the SSH session it is about to
-restrict. In the Mac WireGuard app retain the app-generated `PrivateKey` line,
-append the rendered public fragment, and activate the tunnel. The fragment
-captures both `0.0.0.0/0` and `::/0`; its IPv6 traffic deliberately fails
-closed at the local router rather than leaking through a native Mac route.
+Firewall/service activation and the Mac full-tunnel peer remain blocked until
+that apply artifact exists and passes review. When eventually authorized, the
+firewall must be applied from the VM console, not the SSH session it restricts;
+IPv6 must fail closed at the local router rather than leak over a native Mac
+route.
 
 ## Venue-credential-free qualification
 
@@ -230,9 +242,9 @@ The local router can carry read-only TESTNET traffic after its local checks. It
 may carry attended functional transactions only after the separate
 commissioning gaps close, and it never qualifies always-on egress isolation.
 The first harness order write remains blocked by
-`docs/testnet_commissioning.md`, including the absent qualification-only GTC
-canary/cancel workflow. Do not substitute the armed three-leg bracket as an
-easier first write.
+`docs/testnet_commissioning.md`. The qualification-only GTC/cancel durable core
+exists, but its signer, sender, result transitions and direct-terminal CLI do
+not. Do not substitute the armed three-leg bracket as an easier first write.
 
 After the local lab is stable, preserve the Mac-to-VM `wg-exec` interface and
 add a separately reviewed VM-to-remote-gateway tunnel. That later design can
