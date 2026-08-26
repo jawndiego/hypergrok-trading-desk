@@ -28,12 +28,12 @@ EXECUTOR_CONFIG = DEPLOY / "storage-guard-executor.json.example"
 RESEARCH_CONFIG = DEPLOY / "storage-guard-research.json.example"
 PLISTS = tuple(sorted(DEPLOY.glob("*.guarded.plist.example")))
 
-MERGED_MAIN = "67515a9cdf406e9007f1b9b54b40e7da9007961f"
-ARCHIVE_SHA256 = "a8e31ff9ac5522edd331136a2bdb573da0c84ccc702d57bbfb469b6f6be02b1c"
+REVIEWED_RELEASE = "b697d6815ecb0e368098b624161dad5723d5e869"
+ARCHIVE_SHA256 = "5cb15809e83075a8cfb09520e83cf48b70f68685518bb2c4562cd043f9259607"
 WHEEL_MANIFEST_SHA256 = (
-    "9e14aa0f0bc0ee75c08b27408b4edeb5cbf874aefca98b5b77b2714e00eaeeec"
+    "21aebb8f9a84bef48e023514d7b10d7f4a0c51974fcbc28e574c4b4012f4f8b0"
 )
-APP_WHEEL_SHA256 = "fd369cd101dc84ab105014bd5bf3908511a9c4ee0bb36f775e261bafd41b2fb4"
+APP_WHEEL_SHA256 = "be030b2ba63d6553a10a74bcd64c286b9e1f92995e6e8a101d4ef802721e3151"
 EXECUTOR_UUID = "11111111-2222-4333-8444-555555555555"
 RESEARCH_UUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 CONTAINER_UUID = "99999999-8888-4777-8666-555555555555"
@@ -242,7 +242,7 @@ class PlanOnlyScriptTests(unittest.TestCase):
 
     def test_installer_is_bound_to_merged_main_and_offline_media(self) -> None:
         text = INSTALL.read_text(encoding="utf-8")
-        self.assertIn(f"EXPECTED_COMMIT={MERGED_MAIN}", text)
+        self.assertIn(f"EXPECTED_COMMIT={REVIEWED_RELEASE}", text)
         self.assertIn(f"EXPECTED_ARCHIVE_SHA256={ARCHIVE_SHA256}", text)
         self.assertIn(
             f"EXPECTED_WHEEL_MANIFEST_SHA256={WHEEL_MANIFEST_SHA256}", text
@@ -297,7 +297,7 @@ class PlanOnlyScriptTests(unittest.TestCase):
                     "archive",
                     "--format=tar",
                     "--prefix=hypergrok-trading-desk/",
-                    MERGED_MAIN,
+                    REVIEWED_RELEASE,
                     "-o",
                     str(archive),
                 ],

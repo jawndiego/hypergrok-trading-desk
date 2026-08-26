@@ -26,4 +26,3 @@ actual=$(/usr/bin/openssl dgst -sha256 "$target" | /usr/bin/awk '{print $2}')
 copied=$(/usr/bin/openssl dgst -sha256 "$target" | /usr/bin/awk '{print $2}')
 wanted=$(/usr/bin/openssl dgst -sha256 "$candidate" | /usr/bin/awk '{print $2}')
 [ "$copied" = "$wanted" ] || die "vifs candidate copy mismatch"
-
