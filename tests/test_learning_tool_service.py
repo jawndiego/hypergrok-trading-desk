@@ -5,7 +5,6 @@ from decimal import Decimal
 import os
 from pathlib import Path
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -34,6 +33,7 @@ from tests.test_account_risk import flat_clearing
 from tests.test_hyperliquid_account import ACCOUNT, FixtureTransport
 from tests.test_learning_quote_service import config_text
 from tests.test_node import AT, history_reader
+from tests.ownership_fixtures import simulated_ownership
 from tests.test_research_api import evidence, iso
 
 
@@ -132,25 +132,46 @@ class ConfiguredLearningToolServiceTests(unittest.TestCase):
             clock=lambda: AT,
         )
 
-    def test_agent_stage_returns_real_non_authoritative_ticket_and_learning_cycle(self) -> None:
-        service = build_testnet_learning_tool_service(
-            config=self.config,
-            research_database=self.research_path,
-            signed_grant=self.grant,
-            clock=lambda: AT,
-            account_reader=lambda _address, _network: self.venue,
-            policy=self.policy,
+    def _research_ownership(
+        self,
+        overrides: dict[Path, int] | None = None,
+    ):
+        selected: dict[Path, int] = {}
+        for database in (
+            self.config.paths.learning_database,
+            self.config.paths.staging_database,
+        ):
+            selected[database.parent] = self.config.executor_uid
+            selected[database] = self.config.executor_uid
+            for suffix in ("-wal", "-shm", "-journal"):
+                selected[Path(str(database) + suffix)] = self.config.executor_uid
+        selected.update(overrides or {})
+        return simulated_ownership(
+            default_uid=self.config.research_uid,
+            euid=self.config.research_uid,
+            overrides=selected,
         )
-        status = service.get_harness_status()
-        self.assertFalse(self.config.paths.daily_loss_database.exists())
 
-        stage = service.stage_trade_candidate(
-            "eth", self.analysis["analysis_hash"], "configured-stage-0001"
-        )
-        ticket = stage["document"]["ticket_payload"]
-        review = service.get_learning_review(
-            "trade-" + ticket["risk_ticket"]["ticket_hash"][:32]
-        )
+    def test_agent_stage_returns_real_non_authoritative_ticket_and_learning_cycle(self) -> None:
+        with self._research_ownership():
+            service = build_testnet_learning_tool_service(
+                config=self.config,
+                research_database=self.research_path,
+                signed_grant=self.grant,
+                clock=lambda: AT,
+                account_reader=lambda _address, _network: self.venue,
+                policy=self.policy,
+            )
+            status = service.get_harness_status()
+            self.assertFalse(self.config.paths.daily_loss_database.exists())
+
+            stage = service.stage_trade_candidate(
+                "eth", self.analysis["analysis_hash"], "configured-stage-0001"
+            )
+            ticket = stage["document"]["ticket_payload"]
+            review = service.get_learning_review(
+                "trade-" + ticket["risk_ticket"]["ticket_hash"][:32]
+            )
 
         self.assertEqual("staged", stage["state"])
         self.assertEqual(
@@ -169,26 +190,36 @@ class ConfiguredLearningToolServiceTests(unittest.TestCase):
         self.assertFalse(review["close_outcome_recorded"])
 
     def test_policy_and_research_alias_fail_before_service_creation(self) -> None:
-        with self.assertRaisesRegex(ValidationError, "risk policy"):
-            build_testnet_learning_tool_service(
-                config=self.config,
-                research_database=self.research_path,
-                signed_grant=self.grant,
-                clock=lambda: AT,
-                policy=RiskSizingPolicy(),
-            )
-        with self.assertRaisesRegex(ValidationError, "separate"):
-            build_testnet_learning_tool_service(
-                config=self.config,
-                research_database=self.config.paths.learning_database,
-                signed_grant=self.grant,
-                clock=lambda: AT,
-                policy=self.policy,
-            )
+        with self._research_ownership():
+            with self.assertRaisesRegex(ValidationError, "risk policy"):
+                build_testnet_learning_tool_service(
+                    config=self.config,
+                    research_database=self.research_path,
+                    signed_grant=self.grant,
+                    clock=lambda: AT,
+                    policy=RiskSizingPolicy(),
+                )
+        with self._research_ownership(
+            {
+                self.config.paths.learning_database.parent: self.config.research_uid,
+                self.config.paths.learning_database: self.config.research_uid,
+            }
+        ):
+            with self.assertRaisesRegex(ValidationError, "separate"):
+                build_testnet_learning_tool_service(
+                    config=self.config,
+                    research_database=self.config.paths.learning_database,
+                    signed_grant=self.grant,
+                    clock=lambda: AT,
+                    policy=self.policy,
+                )
 
     def test_shared_main_databases_must_preexist_and_remain_executor_owned(self) -> None:
         self.config.paths.staging_database.unlink()
-        with self.assertRaisesRegex(ValidationError, "layout is invalid"):
+        with (
+            self._research_ownership(),
+            self.assertRaisesRegex(ValidationError, "layout is invalid"),
+        ):
             build_testnet_learning_tool_service(
                 config=self.config,
                 research_database=self.research_path,
@@ -200,25 +231,9 @@ class ConfiguredLearningToolServiceTests(unittest.TestCase):
 
         self.config.paths.staging_database.touch(mode=0o600)
         self.config.paths.staging_database.chmod(0o600)
-        real_lstat = Path.lstat
-
-        def selected_lstat(path: Path):
-            metadata = real_lstat(path)
-            if Path(path) != self.config.paths.learning_database:
-                return metadata
-            return SimpleNamespace(
-                st_mode=metadata.st_mode,
-                st_nlink=metadata.st_nlink,
-                st_size=metadata.st_size,
-                st_uid=self.config.control_uid,
-            )
-
         with (
-            patch.object(
-                Path,
-                "lstat",
-                autospec=True,
-                side_effect=selected_lstat,
+            self._research_ownership(
+                {self.config.paths.learning_database: self.config.control_uid}
             ),
             self.assertRaisesRegex(ValidationError, "layout is invalid"),
         ):
@@ -235,7 +250,10 @@ class ConfiguredLearningToolServiceTests(unittest.TestCase):
         sidecar.write_bytes(b"wal")
         sidecar.chmod(0o644)
 
-        with self.assertRaisesRegex(ValidationError, "layout is invalid"):
+        with (
+            self._research_ownership(),
+            self.assertRaisesRegex(ValidationError, "layout is invalid"),
+        ):
             build_testnet_learning_tool_service(
                 config=self.config,
                 research_database=self.research_path,
@@ -253,6 +271,7 @@ class ConfiguredLearningToolServiceTests(unittest.TestCase):
                 path.unlink()
 
         with (
+            self._research_ownership(),
             patch(
                 "trading_harness.learning_tool_service._shared_state_path",
                 side_effect=check_then_delete,

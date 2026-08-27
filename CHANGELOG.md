@@ -48,6 +48,11 @@
 - Added credential-free, plan-gated macOS APFS quota, final-path pre/post-init
   ACL, exact offline install and storage-headroom guard artifacts. No machine
   mutation or service activation is implied.
+- Replaced the shared macOS `security` executable credential path with
+  schema-v3, role-compiled native System Keychain readers, a sealed per-slot
+  attended provisioner, and a nonprinting pre/post-reboot UID probe matrix.
+  Real provisioning remains gated on the rebuilt exact release pack and live
+  sacrificial probe evidence.
 - Added a deterministic Lima 2.2/VZ VM-plan renderer pinned to socket_vmnet
   1.2.2 and a dated Ubuntu 24.04 ARM64 image. It models one default usernet WAN
   plus one host-only ingress NIC and remains blocked on a signed apt snapshot,

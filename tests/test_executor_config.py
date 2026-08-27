@@ -12,7 +12,7 @@ from trading_harness.executor_config import (
 
 
 def config_text(*, root_extra: str = "", path_extra: str = "") -> str:
-    return f'''schema_version = 2
+    return f'''schema_version = 3
 environment = "testnet"
 venue = "hyperliquid"
 node_id = "executor-alpha"
@@ -35,27 +35,31 @@ poll_interval_ms = 1000
 reconcile_interval_ms = 5000
 {root_extra}
 [credential]
-provider = "macos_keychain_generic_password"
-service = "com.example.testnet-signer"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-signer"
 account = "hyperliquid-api-wallet"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [approval_credential]
-provider = "macos_keychain_generic_password"
-service = "com.example.testnet-approval"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-approval"
 account = "approval-hmac"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [recovery_credential]
-provider = "macos_keychain_generic_password"
-service = "com.example.testnet-recovery"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-recovery"
 account = "recovery-hmac"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [grant_credential]
-provider = "macos_keychain_generic_password"
-service = "com.example.testnet-grant"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-grant"
 account = "grant-hmac"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [paths]
@@ -104,13 +108,16 @@ class StrictExecutorConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             first.approval_credential.service,
-            "com.example.testnet-approval",
+            "com.jawndiego.trading-desk.testnet-approval",
         )
         self.assertEqual(
             first.recovery_credential.service,
-            "com.example.testnet-recovery",
+            "com.jawndiego.trading-desk.testnet-recovery",
         )
-        self.assertEqual(first.grant_credential.service, "com.example.testnet-grant")
+        self.assertEqual(
+            first.grant_credential.service,
+            "com.jawndiego.trading-desk.testnet-grant",
+        )
         self.assertEqual(first.config_hash, reordered.config_hash)
         self.assertRegex(first.config_hash, r"^[0-9a-f]{64}$")
 
@@ -119,19 +126,23 @@ class StrictExecutorConfigTests(unittest.TestCase):
             environ={},
         )
         self.assertNotEqual(first.config_hash, changed.config_hash)
-        changed_uid = parse_executor_config(
-            config_text().replace("control_uid = 452", "control_uid = 453"),
-            environ={},
-        )
-        self.assertNotEqual(first.config_hash, changed_uid.config_hash)
+        with self.assertRaisesRegex(ExecutorConfigError, "must be exactly"):
+            parse_executor_config(
+                config_text().replace("control_uid = 452", "control_uid = 453"),
+                environ={},
+            )
 
     def test_schema_and_identity_uids_are_strict(self) -> None:
         cases = (
-            config_text().replace("schema_version = 2", "schema_version = 1"),
-            config_text().replace("schema_version = 2", "schema_version = true"),
+            config_text().replace("schema_version = 3", "schema_version = 2"),
+            config_text().replace("schema_version = 3", "schema_version = true"),
             config_text().replace("executor_uid = 451", "executor_uid = 0"),
             config_text().replace("research_uid = 450", "research_uid = true"),
             config_text().replace("control_uid = 452", "control_uid = 451"),
+            config_text()
+            .replace("executor_uid = 451", "executor_uid = 452")
+            .replace("control_uid = 452", "control_uid = 451"),
+            config_text().replace("research_uid = 450", "research_uid = 453"),
             config_text().replace("control_uid = 452", "control_uid = 2147483648"),
         )
         for text in cases:
@@ -293,10 +304,10 @@ class StrictExecutorConfigTests(unittest.TestCase):
 
     def test_every_keychain_authority_requires_a_distinct_item(self) -> None:
         duplicated = config_text().replace(
-            'service = "com.example.testnet-approval"\naccount = "approval-hmac"',
-            'service = "com.example.testnet-signer"\naccount = "hyperliquid-api-wallet"',
+            'service = "com.jawndiego.trading-desk.testnet-approval"\naccount = "approval-hmac"',
+            'service = "com.jawndiego.trading-desk.testnet-signer"\naccount = "hyperliquid-api-wallet"',
         )
-        with self.assertRaisesRegex(ExecutorConfigError, "must be distinct"):
+        with self.assertRaisesRegex(ExecutorConfigError, "fixed role-helper slot"):
             parse_executor_config(duplicated, environ={})
 
     def test_loader_requires_absolute_regular_non_symlink_utf8_file(self) -> None:

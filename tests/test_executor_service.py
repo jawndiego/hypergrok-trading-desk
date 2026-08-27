@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
@@ -60,6 +60,17 @@ class EmptyLossTransport:
         raise AssertionError("unexpected info read")
 
 
+class _StatProxy:
+    def __init__(self, metadata: os.stat_result, overrides: dict[str, int]) -> None:
+        self._metadata = metadata
+        self._overrides = overrides
+
+    def __getattr__(self, name: str):
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._metadata, name)
+
+
 class ExecutorServiceCompositionTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
@@ -75,6 +86,41 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
         self.config = parse_executor_config(
             config_text(self.root, self.policy.policy_hash), environ={}
         )
+        self._metadata_overrides: dict[Path, dict[str, int]] = {}
+        real_lstat = Path.lstat
+        real_stat = Path.stat
+
+        def selected_metadata(path: Path, metadata: os.stat_result):
+            selected = self._metadata_overrides.get(Path(path))
+            if selected is None:
+                try:
+                    Path(path).relative_to(self.root)
+                except ValueError:
+                    return metadata
+                selected = {"st_uid": self.config.executor_uid}
+            return _StatProxy(metadata, selected)
+
+        def selected_lstat(path: Path):
+            return selected_metadata(path, real_lstat(path))
+
+        def selected_stat(path: Path, *, follow_symlinks: bool = True):
+            return selected_metadata(
+                path,
+                real_stat(path, follow_symlinks=follow_symlinks),
+            )
+
+        euid_patch = patch(
+            "trading_harness.executor_service.os.geteuid",
+            return_value=self.config.executor_uid,
+        )
+        lstat_patch = patch.object(Path, "lstat", new=selected_lstat)
+        stat_patch = patch.object(Path, "stat", new=selected_stat)
+        euid_patch.start()
+        lstat_patch.start()
+        stat_patch.start()
+        self.addCleanup(euid_patch.stop)
+        self.addCleanup(lstat_patch.stop)
+        self.addCleanup(stat_patch.stop)
         clearing = flat_clearing()
         clearing["time"] = int((AT - timedelta(milliseconds=500)).timestamp() * 1000)
         self.snapshot = fetch_account_snapshot(
@@ -102,25 +148,22 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
             path.write_bytes(b"state")
             path.chmod(0o600)
 
-    @staticmethod
-    def _lstat_patch(
-        overrides: dict[Path, dict[str, int]],
-    ):
-        real_lstat = Path.lstat
-
-        def selected_lstat(path: Path):
-            metadata = real_lstat(path)
-            selected = overrides.get(Path(path))
-            if selected is None:
-                return metadata
-            return SimpleNamespace(
-                st_mode=selected.get("st_mode", metadata.st_mode),
-                st_nlink=selected.get("st_nlink", metadata.st_nlink),
-                st_size=selected.get("st_size", metadata.st_size),
-                st_uid=selected.get("st_uid", metadata.st_uid),
-            )
-
-        return patch.object(Path, "lstat", autospec=True, side_effect=selected_lstat)
+    @contextmanager
+    def _metadata_patch(self, overrides: dict[Path, dict[str, int]]):
+        missing = object()
+        previous = {
+            path: self._metadata_overrides.get(path, missing)
+            for path in overrides
+        }
+        self._metadata_overrides.update(overrides)
+        try:
+            yield
+        finally:
+            for path, value in previous.items():
+                if value is missing:
+                    self._metadata_overrides.pop(path, None)
+                else:
+                    self._metadata_overrides[path] = value  # type: ignore[assignment]
 
     def test_config_bound_multi_uid_sidecars_are_accepted(self) -> None:
         execution_wal = self._sidecar(
@@ -153,7 +196,7 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
             staging_shm: {"st_uid": self.config.research_uid},
         }
 
-        with self._lstat_patch(overrides):
+        with self._metadata_patch(overrides):
             _validate_state_layout(self.config, existing=True)
 
     def test_every_main_database_must_remain_executor_owned(self) -> None:
@@ -162,7 +205,7 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
         for database in self._main_state_files():
             with self.subTest(database=database.name):
                 with (
-                    self._lstat_patch(
+                    self._metadata_patch(
                         {database: {"st_uid": self.config.control_uid}}
                     ),
                     self.assertRaisesRegex(ValidationError, "invalid owner"),
@@ -176,7 +219,7 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
         self._materialize_layout(execution_wal)
 
         with (
-            self._lstat_patch(
+            self._metadata_patch(
                 {execution_wal: {"st_uid": self.config.research_uid}}
             ),
             self.assertRaisesRegex(ValidationError, "invalid owner"),
@@ -212,7 +255,7 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
         for sidecar, owner in cases:
             with self.subTest(sidecar=sidecar.name, owner=owner):
                 with (
-                    self._lstat_patch({sidecar: {"st_uid": owner}}),
+                    self._metadata_patch({sidecar: {"st_uid": owner}}),
                     self.assertRaisesRegex(ValidationError, "invalid owner"),
                 ):
                     _validate_state_layout(self.config, existing=True)
@@ -271,7 +314,7 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "requires review"):
             open_testnet_executor_state(self.config, clock=lambda: AT)
 
-    def test_every_state_database_is_bound_to_exact_v2_config(self) -> None:
+    def test_every_state_database_is_bound_to_exact_v3_config(self) -> None:
         initialize_testnet_executor_state(self.config, clock=lambda: AT)
         before = {path: path.read_bytes() for path in self._main_state_files()}
         for path in self._main_state_files():

@@ -286,7 +286,7 @@ class PlanOnlyScriptTests(unittest.TestCase):
             text=True,
         )
         self.assertNotEqual(refused.returncode, 0)
-        self.assertRegex(refused.stderr, r"(?i)root|sealed")
+        self.assertRegex(refused.stderr, r"(?i)root|sealed|rebind")
 
     def test_archive_binding_reproduces_from_the_merge_commit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -27,8 +27,8 @@ from .errors import ValidationError
 from .policy import exact_decimal
 
 
-EXECUTOR_CONFIG_SCHEMA_VERSION = 2
-EXECUTOR_CONFIG_HASH_DOMAIN = "trading-harness/executor-config/v2"
+EXECUTOR_CONFIG_SCHEMA_VERSION = 3
+EXECUTOR_CONFIG_HASH_DOMAIN = "trading-harness/executor-config/v3"
 MAX_CONFIG_BYTES = 64 * 1024
 
 _ADDRESS_RE = re.compile(r"^0x[0-9a-f]{40}$")
@@ -92,9 +92,9 @@ _ROOT_KEYS = frozenset(
     }
 )
 _CREDENTIAL_KEYS = frozenset(
-    {"provider", "service", "account", "timeout_seconds"}
+    {"provider", "service", "account", "timeout_seconds", "keychain_path"}
 )
-_CREDENTIAL_OPTIONAL_KEYS = frozenset({"keychain_path"})
+_CREDENTIAL_OPTIONAL_KEYS: frozenset[str] = frozenset()
 _PATH_KEYS = frozenset(
     {
         "execution_database",
@@ -279,9 +279,9 @@ class ExecutorCredentialConfig:
     keychain_path: str | None = None
 
     def __post_init__(self) -> None:
-        if self.provider != "macos_keychain_generic_password":
+        if self.provider != "macos_system_keychain_role_helper_v1":
             raise ExecutorConfigError(
-                "credential.provider must be macos_keychain_generic_password"
+                "credential.provider must be macos_system_keychain_role_helper_v1"
             )
         object.__setattr__(self, "service", _identifier(self.service, field="credential.service"))
         object.__setattr__(self, "account", _identifier(self.account, field="credential.account"))
@@ -306,6 +306,10 @@ class ExecutorCredentialConfig:
                     "credential.keychain_path must be normalized and absolute"
                 )
             object.__setattr__(self, "keychain_path", str(path))
+        if self.keychain_path != "/Library/Keychains/System.keychain":
+            raise ExecutorConfigError(
+                "credential.keychain_path must be the explicit System Keychain"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,6 +413,15 @@ class ExecutorConfig:
         if len({self.executor_uid, self.research_uid, self.control_uid}) != 3:
             raise ExecutorConfigError(
                 "executor_uid, research_uid, and control_uid must be distinct"
+            )
+        if (
+            self.executor_uid,
+            self.research_uid,
+            self.control_uid,
+        ) != (451, 450, 452):
+            raise ExecutorConfigError(
+                "executor_uid, research_uid, and control_uid must be exactly "
+                "451, 450, and 452"
             )
         object.__setattr__(self, "account_id", _identifier(self.account_id, field="account_id"))
         object.__setattr__(
@@ -514,6 +527,30 @@ class ExecutorConfig:
             if not isinstance(getattr(self, field), ExecutorCredentialConfig):
                 raise ExecutorConfigError(
                     f"{field} must be ExecutorCredentialConfig"
+                )
+        credential_policy = {
+            "credential": (
+                "com.jawndiego.trading-desk.testnet-signer",
+                "hyperliquid-api-wallet",
+            ),
+            "approval_credential": (
+                "com.jawndiego.trading-desk.testnet-approval",
+                "approval-hmac",
+            ),
+            "recovery_credential": (
+                "com.jawndiego.trading-desk.testnet-recovery",
+                "recovery-hmac",
+            ),
+            "grant_credential": (
+                "com.jawndiego.trading-desk.testnet-grant",
+                "grant-hmac",
+            ),
+        }
+        for field, expected in credential_policy.items():
+            item = getattr(self, field)
+            if (item.service, item.account) != expected:
+                raise ExecutorConfigError(
+                    f"{field} labels differ from the fixed role-helper slot"
                 )
         keychain_items = {
             (item.service, item.account)

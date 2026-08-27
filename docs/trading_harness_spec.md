@@ -152,9 +152,9 @@ incident and fresh position snapshot and are rechecked by the live signer.
 
 ### 2.5 Config-bound filesystem identities
 
-Executor config schema v2 contains three distinct, positive, non-root numeric
+Executor config schema v3 contains three distinct, positive, non-root numeric
 fields: `executor_uid`, `research_uid`, and `control_uid`. The UID values are
-part of the canonical v2 config hash and therefore the durable deployment
+part of the canonical v3 config hash and therefore the durable deployment
 binding. Runtime ownership decisions are derived from these fixed roles; the
 config cannot supply a wider arbitrary owner list.
 
@@ -207,10 +207,11 @@ composition so attended control and research processes cannot create
 group/world-accessible sidecars through an ambient shell umask. Except for
 config-only validation, executor commands MUST run as `executor_uid`, attended
 commands MUST run as `control_uid`, and a configured learning MCP MUST run as
-`research_uid`. Schema v1 is rejected. No implementation may silently rewrite
-a v1 config as v2, rebind nonempty v1 state to the v2 hash, or create a
-replacement empty database when existing state is expected. Empty,
-never-qualified deployments may be deliberately initialized under v2; all
+`research_uid`. Config schemas v1 and v2 are rejected. No implementation may
+silently rewrite an earlier config as v3, rebind nonempty earlier-schema state
+to the v3 hash, or create a replacement empty database when existing state is
+expected. Empty, never-qualified deployments may be deliberately initialized
+under v3; all
 other transitions require a separately reviewed state migration. None of
 these ownership rules represents or enables mainnet authority. Mainnet remains
 hard-disabled.

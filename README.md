@@ -39,7 +39,7 @@ staged under an explicit `profitability_qualified: false` grant.
 | Read-only account/metadata/reconciliation | Implemented with typed, hash-checked coordinators |
 | Hyperliquid exact wire, durable nonce, isolated signing and one-shot entry transport | Implemented and armed for TESTNET only |
 | Reduce-only close/cancel/same-nonce recovery | Implemented with durable permit, outbox, dispatch and reconciliation |
-| Isolated credential provider | macOS Keychain reader implemented; no env/file key loader |
+| Isolated credential provider | Schema-v3 native role readers, sealed provisioner and nonprinting UID probe implemented; exact pack install and live pre/post-reboot probe evidence pending; no key present |
 | Always-on serialized executor runtime | Implemented with fenced lease, daily-loss sync, strict recovery priority and graceful drain |
 | Direct attended control CLI | Implemented; confirmation is read from `/dev/tty`, never MCP/chat/stdin |
 | TESTNET qualification canary/close core | Typed GTC/query/cancel and full-residual close semantics plus schema-v11 durable authority/reservation state implemented; no signer, sender or CLI exposure |
@@ -265,9 +265,9 @@ qualification. The complete first-write blockers are tracked in
 
 Start from
 [`deploy/config/testnet-executor.toml.example`](deploy/config/testnet-executor.toml.example),
-render every placeholder, including the three distinct numeric
-`executor_uid`, `research_uid`, and `control_uid` values required by config
-schema v2. Keep the config admin-owned and mode `0400` with narrow read ACLs,
+render every placeholder, including exact numeric `executor_uid`,
+`research_uid`, and `control_uid` values 451, 450, and 452 required by config
+schema v3. Keep the config admin-owned and mode `0400` with narrow read ACLs,
 and create each state-directory parent with mode `0700`.
 Keep execution, nonce, daily-loss and control-socket state in four distinct
 executor-owned parents beneath the executor-private root. This lets the
@@ -307,9 +307,10 @@ research to traverse executor-private state. The attended CLI establishes
 umask `0077` before it can create a control-owned sidecar, and the MCP entry
 point does the same before research can create a shared-learning sidecar.
 
-Schema-v1 executor configs are rejected rather than silently reinterpreted.
-The v2 UID policy is part of the canonical config hash and durable database
-binding. Do not point a hand-edited v2 config at v1-bound state or silently
+Schema-v1 and schema-v2 executor configs are rejected rather than silently
+reinterpreted. The schema-v3 exact UID policy (research 450, executor 451,
+control 452) is part of the canonical config hash and durable database
+binding. Do not point a hand-edited v3 config at earlier-schema state or silently
 reinitialize a nonempty deployment. Preserve such state for review; only a
 proved-empty, never-qualified setup may be deliberately initialized anew.
 `init` is an all-empty, one-time transition: it rejects both a complete prior
@@ -318,10 +319,10 @@ Validate and initialize as the configured executor UID without
 loading credentials or touching the venue:
 
 ```bash
-trading-harness-executor validate --config /absolute/private/testnet-executor.toml
-trading-harness-executor init --config /absolute/private/testnet-executor.toml
-trading-harness-executor status --config /absolute/private/testnet-executor.toml
-trading-harness-executor dry-run --config /absolute/private/testnet-executor.toml
+sudo -u trading-executor -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor validate --config /absolute/private/testnet-executor.toml
+sudo -u trading-executor -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor init --config /absolute/private/testnet-executor.toml
+sudo -u trading-executor -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor status --config /absolute/private/testnet-executor.toml
+sudo -u trading-executor -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor dry-run --config /absolute/private/testnet-executor.toml
 ```
 
 Except for read-only config validation, the CLI rejects execution commands
@@ -333,16 +334,16 @@ input. There is intentionally no `--confirmation` argument and piping stdin is
 not accepted:
 
 ```bash
-trading-harness-executor issue-grant \
+sudo -u trading-control -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor issue-grant \
   --config /absolute/private/testnet-executor.toml \
   --output /absolute/private/active-learning-grant.json \
   --grant-id testnet-learning-001 --ttl-seconds 3600
 
-trading-harness-executor show-stage \
+sudo -u trading-control -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor show-stage \
   --config /absolute/private/testnet-executor.toml \
   --document-id stg_REVIEWED_ID
 
-trading-harness-executor authorize-stage \
+sudo -u trading-control -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor authorize-stage \
   --config /absolute/private/testnet-executor.toml \
   --grant /absolute/private/active-learning-grant.json \
   --document-id stg_REVIEWED_ID --approver-id local-operator
@@ -351,19 +352,19 @@ trading-harness-executor authorize-stage \
 Only after foreground qualification should the isolated worker run:
 
 ```bash
-trading-harness-executor run \
+sudo -u trading-executor -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor run \
   --config /absolute/private/testnet-executor.toml \
   --worker-id isolated-testnet-worker
 ```
 
-The isolated process can load one expected API-wallet key from macOS Keychain;
-it rejects environment variables and plaintext key files and verifies the
-derived signer address. Use a dedicated non-login OS identity so the
-research/MCP/Codex identity cannot read that Keychain item. Installing the
-extra alone does not configure an account or invoke a venue write.
-The LaunchDaemon profile uses the explicitly configured
-`/Library/Keychains/System.keychain` and `/usr/bin/security` item ACL; it never
-depends on `HOME` or a login-keychain search list.
+The isolated process has a schema-v3 role-helper provider for the explicit
+macOS System Keychain. Separate hardened native readers compile executor UID
+451 signer/recovery and control UID 452 approval/grant allowlists; neither
+accepts caller-selected labels or exposes provisioning. `/usr/bin/security` is
+not a provider path. No real signer or HMAC secret belongs in the deployment
+until the new exact commit/wheel/pack is rebound, both readers are installed
+root-owned mode `0510`, and cross-UID/reboot probes pass. Installing the extra
+alone does not configure an account or invoke a venue write.
 
 The execution path now includes:
 

@@ -1,4 +1,4 @@
-schema_version = 2
+schema_version = 3
 environment = "testnet"
 venue = "hyperliquid"
 node_id = "trading-desk-testnet-executor"
@@ -21,30 +21,30 @@ poll_interval_ms = 1000
 reconcile_interval_ms = 5000
 
 [credential]
-provider = "macos_keychain_generic_password"
-service = "__REVIEWED_SIGNER_KEYCHAIN_SERVICE__"
-account = "__REVIEWED_SIGNER_KEYCHAIN_ACCOUNT__"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-signer"
+account = "hyperliquid-api-wallet"
 keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [approval_credential]
-provider = "macos_keychain_generic_password"
-service = "__REVIEWED_APPROVAL_KEYCHAIN_SERVICE__"
-account = "__REVIEWED_APPROVAL_KEYCHAIN_ACCOUNT__"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-approval"
+account = "approval-hmac"
 keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [recovery_credential]
-provider = "macos_keychain_generic_password"
-service = "__REVIEWED_RECOVERY_KEYCHAIN_SERVICE__"
-account = "__REVIEWED_RECOVERY_KEYCHAIN_ACCOUNT__"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-recovery"
+account = "recovery-hmac"
 keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [grant_credential]
-provider = "macos_keychain_generic_password"
-service = "__REVIEWED_GRANT_KEYCHAIN_SERVICE__"
-account = "__REVIEWED_GRANT_KEYCHAIN_ACCOUNT__"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-grant"
+account = "grant-hmac"
 keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 

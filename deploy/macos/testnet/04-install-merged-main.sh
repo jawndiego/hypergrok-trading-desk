@@ -9,7 +9,12 @@ EXPECTED_APP_WHEEL_SHA256=be030b2ba63d6553a10a74bcd64c286b9e1f92995e6e8a101d4ef8
 EXPECTED_RESEARCH_LOCK_SHA256=8bb08431c71094259ad2e231cc89aef21feb219d56b3f219cc58e87b04333898
 EXPECTED_EXECUTOR_LOCK_SHA256=d1ad01eeed904d5e09709483220e201e1418b73f9d216ef1191f528d32f288da
 EXPECTED_GUARD_SHA256=ef7341d5a8a30a15f363be63b99133d54ce13e581097bc38908ca30ec91c70d1
-EXPECTED_RELEASE_RECEIPT_SHA256=4c071d1dcc2036bc7382f2aaf1270cdbdee49d828bfaf5b1b571855ecc520c1c
+EXPECTED_EXECUTOR_KEYCHAIN_HELPER_SHA256=42e583ee40d48546a92bf40bf650fa576ec3d86455bf663cc3760b90d050df27
+EXPECTED_CONTROL_KEYCHAIN_HELPER_SHA256=da10752940f726258f4e2439b657db0c2f3fefcb3c30ef6a1eaa69df3da8e194
+# The pinned b697 wheel predates the role-helper provider.  The exact release
+# commit/archive/wheel/pack must be rebuilt together before privileged apply.
+ROLE_HELPER_RELEASE_REBIND_REQUIRED=1
+EXPECTED_RELEASE_RECEIPT_SHA256=c9ec37da10908003a8a0b052b30d2de89bbddabb5e349726b4854c0456fefccb
 ARCHIVE_NAME=hypergrok-trading-desk-b697d68.tar
 TRADING_ROOT=/opt/trading-desk
 RUNTIME_ROOT=$TRADING_ROOT/runtime/python-3.11.16
@@ -23,6 +28,13 @@ RESEARCH_RELEASE=$RELEASE_FINAL/research
 EXECUTOR_RELEASE=$RELEASE_FINAL/executor
 BIN_RELEASE=$RELEASE_FINAL/bin
 GUARD_RELEASE=$BIN_RELEASE/storage-headroom-guard.py
+KEYCHAIN_HELPER_MEDIA_NAME=keychain-role-readers
+KEYCHAIN_HELPER_MEDIA=
+LIBEXEC_PARENT=$TRADING_ROOT/libexec
+EXECUTOR_KEYCHAIN_HELPER=$LIBEXEC_PARENT/trading-keychain-reader-executor-v1
+CONTROL_KEYCHAIN_HELPER=$LIBEXEC_PARENT/trading-keychain-reader-control-v1
+EXECUTOR_KEYCHAIN_HELPER_STAGE=$LIBEXEC_PARENT/.trading-keychain-reader-executor-v1.installing
+CONTROL_KEYCHAIN_HELPER_STAGE=$LIBEXEC_PARENT/.trading-keychain-reader-control-v1.installing
 CURRENT_LINK=$TRADING_ROOT/current
 CURRENT_CANDIDATE=$TRADING_ROOT/.current-$EXPECTED_COMMIT
 QUARANTINE_PARENT=$TRADING_ROOT/quarantine
@@ -43,6 +55,9 @@ plan() {
   /bin/echo "First-install the reviewed source tree for merged main $EXPECTED_COMMIT."
   /bin/echo "Require archive_sha256=$EXPECTED_ARCHIVE_SHA256"
   /bin/echo "Require wheel_manifest_sha256=$EXPECTED_WHEEL_MANIFEST_SHA256"
+  /bin/echo "Require executor_keychain_helper_sha256=$EXPECTED_EXECUTOR_KEYCHAIN_HELPER_SHA256"
+  /bin/echo "Require control_keychain_helper_sha256=$EXPECTED_CONTROL_KEYCHAIN_HELPER_SHA256"
+  /bin/echo "role_helper_release_rebind_required=$ROLE_HELPER_RELEASE_REBIND_REQUIRED"
   /bin/echo "Permanent release=$RELEASE_FINAL"
   /bin/echo "Build marker=$RELEASE_INSTALLING ready marker=$RELEASE_READY"
   /bin/echo "Atomic activation=$CURRENT_LINK -> releases/$EXPECTED_COMMIT"
@@ -65,6 +80,9 @@ assert_sealed_root() {
   [ "$(/usr/bin/id -u trading-research)" = 450 ] || die "trading-research UID drift"
   [ "$(/usr/bin/id -u trading-executor)" = 451 ] || die "trading-executor UID drift"
   [ "$(/usr/bin/id -u trading-control)" = 452 ] || die "trading-control UID drift"
+  [ "$(/usr/bin/id -g trading-research)" = 450 ] || die "trading-research primary GID drift"
+  [ "$(/usr/bin/id -g trading-executor)" = 451 ] || die "trading-executor primary GID drift"
+  [ "$(/usr/bin/id -g trading-control)" = 452 ] || die "trading-control primary GID drift"
   case "$0" in /*) ;; *) die "apply/recovery requires an absolute script path" ;; esac
   [ ! -L "$0" ] || die "script symlink rejected"
   script_path=$(/bin/realpath "$0")
@@ -111,12 +129,30 @@ verify_media() {
   esac
   research_lock=$lock_root/resolved-research.txt
   executor_lock=$lock_root/resolved-executor.txt
+  helper_root=$media/$KEYCHAIN_HELPER_MEDIA_NAME
+  executor_helper=$helper_root/trading-keychain-reader-executor-v1
+  control_helper=$helper_root/trading-keychain-reader-control-v1
+  helper_manifest=$helper_root/SHA256SUMS
   assert_sealed_tree "$media"
   [ -f "$archive" ] || die "missing exact source archive"
   [ -d "$wheelhouse" ] || die "missing wheelhouse"
   [ -f "$manifest" ] || die "missing wheel manifest"
   [ -f "$research_lock" ] || die "missing research lock"
   [ -f "$executor_lock" ] || die "missing executor lock"
+  [ -d "$helper_root" ] && [ ! -L "$helper_root" ] || die "missing keychain helper media"
+  helper_count=$(/usr/bin/find "$helper_root" -mindepth 1 -maxdepth 1 -print | /usr/bin/awk 'END {print NR + 0}')
+  helper_file_count=$(/usr/bin/find "$helper_root" -mindepth 1 -maxdepth 1 -type f | /usr/bin/awk 'END {print NR + 0}')
+  [ "$helper_count" = 3 ] && [ "$helper_file_count" = 3 ] || die "keychain helper media inventory is not exact"
+  [ -f "$executor_helper" ] && [ ! -L "$executor_helper" ] || die "missing executor keychain helper"
+  [ -f "$control_helper" ] && [ ! -L "$control_helper" ] || die "missing control keychain helper"
+  [ -f "$helper_manifest" ] && [ ! -L "$helper_manifest" ] || die "missing keychain helper manifest"
+  [ "$(digest "$executor_helper")" = "$EXPECTED_EXECUTOR_KEYCHAIN_HELPER_SHA256" ] || die "executor keychain helper digest mismatch"
+  [ "$(digest "$control_helper")" = "$EXPECTED_CONTROL_KEYCHAIN_HELPER_SHA256" ] || die "control keychain helper digest mismatch"
+  [ "$(/usr/bin/awk 'NF {count += 1} END {print count + 0}' "$helper_manifest")" = 2 ] || die "keychain helper manifest line count differs"
+  /usr/bin/grep -Fqx "$EXPECTED_EXECUTOR_KEYCHAIN_HELPER_SHA256  trading-keychain-reader-executor-v1" "$helper_manifest" || die "executor helper manifest entry differs"
+  /usr/bin/grep -Fqx "$EXPECTED_CONTROL_KEYCHAIN_HELPER_SHA256  trading-keychain-reader-control-v1" "$helper_manifest" || die "control helper manifest entry differs"
+  /usr/bin/codesign --verify --strict --verbose=2 "$executor_helper" || die "executor keychain helper signature invalid"
+  /usr/bin/codesign --verify --strict --verbose=2 "$control_helper" || die "control keychain helper signature invalid"
   [ "$(digest "$archive")" = "$EXPECTED_ARCHIVE_SHA256" ] || die "source archive digest mismatch"
   [ "$(digest "$manifest")" = "$EXPECTED_WHEEL_MANIFEST_SHA256" ] || die "wheel manifest digest mismatch"
   app_count=$(/usr/bin/awk '$2 == "trading_harness-0.2.0.dev0-py3-none-any.whl" {count += 1} END {print count + 0}' "$manifest")
@@ -129,8 +165,13 @@ verify_media() {
   manifest_count=$(/usr/bin/awk 'NF {count += 1} END {print count + 0}' "$manifest")
   wheel_count=$(/usr/bin/find "$wheelhouse" -maxdepth 1 -type f -name '*.whl' | /usr/bin/awk 'END {print NR + 0}')
   [ "$manifest_count" = "$wheel_count" ] || die "wheelhouse file count differs from manifest"
+  wheelhouse_entry_count=$(/usr/bin/find "$wheelhouse" -mindepth 1 -maxdepth 1 -print | /usr/bin/awk 'END {print NR + 0}')
+  [ "$wheelhouse_entry_count" = "$((wheel_count + 1))" ] || die "wheelhouse contains an unexpected entry"
+  duplicate_filename=$(/usr/bin/awk 'NF {if (seen[$2]++) {print $2; exit}}' "$manifest")
+  [ -z "$duplicate_filename" ] || die "duplicate wheel manifest filename: $duplicate_filename"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
+    /bin/echo "$line" | /usr/bin/grep -Eq '^[0-9a-f]{64}  [A-Za-z0-9_.+-]+\.whl$' || die "noncanonical wheel manifest line"
     expected=${line%% *}
     filename=${line#*  }
     /bin/echo "$expected" | /usr/bin/grep -Eq '^[0-9a-f]{64}$' || die "invalid wheel digest line"
@@ -277,6 +318,8 @@ release_receipt() {
   /bin/echo "research_lock_sha256=$EXPECTED_RESEARCH_LOCK_SHA256"
   /bin/echo "executor_lock_sha256=$EXPECTED_EXECUTOR_LOCK_SHA256"
   /bin/echo "guard_sha256=$EXPECTED_GUARD_SHA256"
+  /bin/echo "executor_keychain_helper_sha256=$EXPECTED_EXECUTOR_KEYCHAIN_HELPER_SHA256"
+  /bin/echo "control_keychain_helper_sha256=$EXPECTED_CONTROL_KEYCHAIN_HELPER_SHA256"
 }
 
 write_installing_receipt() {
@@ -499,7 +542,7 @@ cleanup() {
   set +e
   if [ -n "$PROBE_PARENT" ] && [ -n "$PROBE_LABEL" ]; then
     case "$PROBE_PARENT" in
-      "$TRADING_ROOT"|"$RELEASES_PARENT"|"$RELEASE_FINAL"|"$RESEARCH_RELEASE"|"$EXECUTOR_RELEASE"|"$BIN_RELEASE")
+      "$TRADING_ROOT"|"$RELEASES_PARENT"|"$RELEASE_FINAL"|"$RESEARCH_RELEASE"|"$EXECUTOR_RELEASE"|"$BIN_RELEASE"|"$LIBEXEC_PARENT")
         /bin/rm -f "$PROBE_PARENT/.rights-$PROBE_LABEL-target" \
           "$PROBE_PARENT/.rights-$PROBE_LABEL-renamed" \
           "$PROBE_PARENT/.rights-$PROBE_LABEL-create-501" \
@@ -533,6 +576,9 @@ assert_identities() {
   [ "$(/usr/bin/id -u trading-research)" = 450 ] || die "trading-research UID drift"
   [ "$(/usr/bin/id -u trading-executor)" = 451 ] || die "trading-executor UID drift"
   [ "$(/usr/bin/id -u trading-control)" = 452 ] || die "trading-control UID drift"
+  [ "$(/usr/bin/id -g trading-research)" = 450 ] || die "trading-research primary GID drift"
+  [ "$(/usr/bin/id -g trading-executor)" = 451 ] || die "trading-executor primary GID drift"
+  [ "$(/usr/bin/id -g trading-control)" = 452 ] || die "trading-control primary GID drift"
 }
 
 identity_uid() {
@@ -575,7 +621,7 @@ prepare_probe_sources() {
 verify_parent_denials() {
   parent=$1
   label=$2
-  case "$label" in current|releases|release|research|executor|bin) ;; *) die "unsafe probe label" ;; esac
+  case "$label" in current|releases|release|research|executor|bin|libexec) ;; *) die "unsafe probe label" ;; esac
   assert_secure_directory "$parent"
   prepare_probe_sources
   PROBE_PARENT=$parent
@@ -693,6 +739,101 @@ verify_release_parent_denials() {
   verify_parent_denials "$BIN_RELEASE" bin
 }
 
+assert_safe_keychain_helper_stage() {
+  path=$1
+  case "$path" in
+    "$EXECUTOR_KEYCHAIN_HELPER_STAGE"|"$CONTROL_KEYCHAIN_HELPER_STAGE") ;;
+    *) die "unexpected keychain helper staging path: $path" ;;
+  esac
+  [ -f "$path" ] && [ ! -L "$path" ] || die "keychain helper stage is not a regular file: $path"
+  [ "$(/bin/realpath "$path")" = "$path" ] || die "keychain helper staging path is not canonical: $path"
+  [ "$(/usr/bin/stat -f %u "$path")" = 0 ] || die "keychain helper stage must be root-owned: $path"
+  [ "$(/usr/bin/stat -f %l "$path")" = 1 ] || die "hard-linked keychain helper stage rejected: $path"
+  writable=$(/usr/bin/find "$path" -maxdepth 0 -perm +022 -print -quit)
+  [ -z "$writable" ] || die "keychain helper stage is group/world writable: $path"
+  assert_no_acl "$path"
+}
+
+verify_installed_keychain_helper() {
+  path=$1
+  expected_gid=$2
+  expected_sha=$3
+  expected_identifier=$4
+  [ -f "$path" ] && [ ! -L "$path" ] || die "keychain helper missing or symlinked: $path"
+  [ "$(/bin/realpath "$path")" = "$path" ] || die "keychain helper path is not canonical: $path"
+  [ "$(/usr/bin/stat -f %u "$path")" = 0 ] || die "keychain helper owner must be root: $path"
+  [ "$(/usr/bin/stat -f %g "$path")" = "$expected_gid" ] || die "keychain helper group differs: $path"
+  [ "$(/usr/bin/stat -f %Lp "$path")" = 510 ] || die "keychain helper mode must be 0510: $path"
+  [ "$(/usr/bin/stat -f %l "$path")" = 1 ] || die "hard-linked keychain helper rejected: $path"
+  assert_no_acl "$path"
+  [ "$(digest "$path")" = "$expected_sha" ] || die "keychain helper digest mismatch: $path"
+  details=$PROBE_TMP/keychain-helper-codesign-$expected_gid.txt
+  /usr/bin/codesign --verify --strict --verbose=2 "$path" || die "keychain helper signature invalid: $path"
+  /usr/bin/codesign -d --verbose=4 "$path" > /dev/null 2> "$details"
+  /usr/bin/grep -Fqx "Identifier=$expected_identifier" "$details" || die "keychain helper identifier differs: $path"
+  /usr/bin/grep -F 'flags=0x10002(adhoc,runtime)' "$details" >/dev/null || die "keychain helper lacks hardened runtime: $path"
+}
+
+install_role_helpers() {
+  media=$1
+  ensure_root_directory "$LIBEXEC_PARENT" 755
+  verify_parent_denials "$LIBEXEC_PARENT" libexec
+  for role in executor control; do
+    case "$role" in
+      executor)
+        source=$media/$KEYCHAIN_HELPER_MEDIA_NAME/trading-keychain-reader-executor-v1
+        stage=$EXECUTOR_KEYCHAIN_HELPER_STAGE
+        final=$EXECUTOR_KEYCHAIN_HELPER
+        group=trading-executor
+        gid=451
+        expected_sha=$EXPECTED_EXECUTOR_KEYCHAIN_HELPER_SHA256
+        identifier=com.jawndiego.trading-desk.keychain-reader.executor.v1
+        ;;
+      control)
+        source=$media/$KEYCHAIN_HELPER_MEDIA_NAME/trading-keychain-reader-control-v1
+        stage=$CONTROL_KEYCHAIN_HELPER_STAGE
+        final=$CONTROL_KEYCHAIN_HELPER
+        group=trading-control
+        gid=452
+        expected_sha=$EXPECTED_CONTROL_KEYCHAIN_HELPER_SHA256
+        identifier=com.jawndiego.trading-desk.keychain-reader.control.v1
+        ;;
+    esac
+    if [ -e "$final" ] || [ -L "$final" ]; then
+      [ ! -e "$stage" ] && [ ! -L "$stage" ] || die "helper final and staging paths both exist: $role"
+      verify_installed_keychain_helper "$final" "$gid" "$expected_sha" "$identifier"
+      continue
+    fi
+    if [ ! -e "$stage" ] && [ ! -L "$stage" ]; then
+      /bin/cp "$source" "$stage"
+    else
+      assert_safe_keychain_helper_stage "$stage"
+    fi
+    assert_safe_keychain_helper_stage "$stage"
+    # A prior run may have stopped while copying.  Never trust the retained
+    # bytes: after validating the inode, replace its contents from sealed media.
+    /bin/cp "$source" "$stage"
+    assert_safe_keychain_helper_stage "$stage"
+    /usr/sbin/chown root:"$group" "$stage"
+    /bin/chmod 0510 "$stage"
+    sync_regular_file_durable "$stage"
+    verify_installed_keychain_helper "$stage" "$gid" "$expected_sha" "$identifier"
+    atomic_rename_exclusive "$stage" "$final"
+    verify_installed_keychain_helper "$final" "$gid" "$expected_sha" "$identifier"
+  done
+  verify_parent_denials "$LIBEXEC_PARENT" libexec
+  run_as trading-executor /bin/test -x "$EXECUTOR_KEYCHAIN_HELPER" || die "executor cannot execute its role helper"
+  run_as trading-control /bin/test -x "$CONTROL_KEYCHAIN_HELPER" || die "control cannot execute its role helper"
+  for identity in '#501' trading-research; do
+    if run_as "$identity" /bin/test -x "$EXECUTOR_KEYCHAIN_HELPER"; then die "$identity can execute executor helper"; fi
+    if run_as "$identity" /bin/test -x "$CONTROL_KEYCHAIN_HELPER"; then die "$identity can execute control helper"; fi
+  done
+  if run_as trading-executor /bin/test -x "$CONTROL_KEYCHAIN_HELPER"; then die "executor can execute control helper"; fi
+  if run_as trading-control /bin/test -x "$EXECUTOR_KEYCHAIN_HELPER"; then die "control can execute executor helper"; fi
+  if run_as trading-executor /bin/test -r "$EXECUTOR_KEYCHAIN_HELPER"; then die "executor can read helper bytes"; fi
+  if run_as trading-control /bin/test -r "$CONTROL_KEYCHAIN_HELPER"; then die "control can read helper bytes"; fi
+}
+
 build_release() {
   media=$1
   [ ! -e "$RELEASE_FINAL" ] && [ ! -L "$RELEASE_FINAL" ] || die "release path already exists"
@@ -772,6 +913,7 @@ promote_current_once() {
 apply_install() {
   media=$1
   case "$media" in /*) ;; *) die "media path must be absolute" ;; esac
+  [ "$ROLE_HELPER_RELEASE_REBIND_REQUIRED" = 0 ] || die "role-helper release commit/wheel/pack rebind is required before apply"
   assert_sealed_root
   assert_identities
   assert_opt_ancestor_chain
@@ -805,6 +947,7 @@ apply_install() {
     prepare_probe_sources
     build_release "$media"
   fi
+  install_role_helpers "$media"
   verify_release_parent_denials
   verify_ready_release "$media"
   sync_tree_durable "$RELEASE_FINAL"

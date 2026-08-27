@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -27,6 +28,42 @@ def shell_function(text: str, name: str) -> str:
 
 
 class AtomicFirstInstallContractTests(unittest.TestCase):
+    def test_release_receipt_digest_binds_current_helper_hashes(self) -> None:
+        text = installer_text()
+        constants = dict(
+            re.findall(r"(?m)^([A-Z][A-Z0-9_]*)=([^\n]+)$", text)
+        )
+        fields = (
+            ("schema_version", "1"),
+            ("commit", constants["EXPECTED_COMMIT"]),
+            (
+                "release_path",
+                "/opt/trading-desk/releases/" + constants["EXPECTED_COMMIT"],
+            ),
+            ("archive_sha256", constants["EXPECTED_ARCHIVE_SHA256"]),
+            (
+                "wheel_manifest_sha256",
+                constants["EXPECTED_WHEEL_MANIFEST_SHA256"],
+            ),
+            ("app_wheel_sha256", constants["EXPECTED_APP_WHEEL_SHA256"]),
+            ("research_lock_sha256", constants["EXPECTED_RESEARCH_LOCK_SHA256"]),
+            ("executor_lock_sha256", constants["EXPECTED_EXECUTOR_LOCK_SHA256"]),
+            ("guard_sha256", constants["EXPECTED_GUARD_SHA256"]),
+            (
+                "executor_keychain_helper_sha256",
+                constants["EXPECTED_EXECUTOR_KEYCHAIN_HELPER_SHA256"],
+            ),
+            (
+                "control_keychain_helper_sha256",
+                constants["EXPECTED_CONTROL_KEYCHAIN_HELPER_SHA256"],
+            ),
+        )
+        payload = "".join(f"{key}={value}\n" for key, value in fields).encode()
+        self.assertEqual(
+            constants["EXPECTED_RELEASE_RECEIPT_SHA256"],
+            hashlib.sha256(payload).hexdigest(),
+        )
+
     def test_release_is_built_only_at_its_permanent_versioned_path(self) -> None:
         text = installer_text()
         for required in (
@@ -83,6 +120,8 @@ class AtomicFirstInstallContractTests(unittest.TestCase):
         self.assertIn("$EXPECTED_COMMIT", receipt)
         self.assertIn("$EXPECTED_ARCHIVE_SHA256", receipt)
         self.assertIn("$EXPECTED_WHEEL_MANIFEST_SHA256", receipt)
+        self.assertIn("$EXPECTED_EXECUTOR_KEYCHAIN_HELPER_SHA256", receipt)
+        self.assertIn("$EXPECTED_CONTROL_KEYCHAIN_HELPER_SHA256", receipt)
         self.assertIn("$EXPECTED_RELEASE_RECEIPT_SHA256", verify_receipt)
         self.assertIn("$RELEASE_READY", verify_ready)
         self.assertIn("$RELEASE_INSTALLING", verify_ready)
@@ -94,6 +133,84 @@ class AtomicFirstInstallContractTests(unittest.TestCase):
         self.assertLess(
             apply.index("build_release"),
             apply.index("promote_current_once"),
+        )
+
+    def test_role_helpers_are_hash_pinned_hardened_and_role_execute_only(self) -> None:
+        text = installer_text()
+        verify_media = shell_function(text, "verify_media")
+        install = shell_function(text, "install_role_helpers")
+        verify = shell_function(text, "verify_installed_keychain_helper")
+        apply = shell_function(text, "apply_install")
+        for required in (
+            "EXPECTED_EXECUTOR_KEYCHAIN_HELPER_SHA256=42e583ee40d48546a92bf40bf650fa576ec3d86455bf663cc3760b90d050df27",
+            "EXPECTED_CONTROL_KEYCHAIN_HELPER_SHA256=da10752940f726258f4e2439b657db0c2f3fefcb3c30ef6a1eaa69df3da8e194",
+            "LIBEXEC_PARENT=$TRADING_ROOT/libexec",
+            "ROLE_HELPER_RELEASE_REBIND_REQUIRED=1",
+        ):
+            self.assertIn(required, text)
+        for required in (
+            "helper media inventory is not exact",
+            "codesign --verify --strict",
+            "$EXPECTED_EXECUTOR_KEYCHAIN_HELPER_SHA256",
+            "$EXPECTED_CONTROL_KEYCHAIN_HELPER_SHA256",
+            "wheelhouse contains an unexpected entry",
+            "duplicate wheel manifest filename",
+            "noncanonical wheel manifest line",
+        ):
+            self.assertIn(required, verify_media)
+        for required in (
+            "/bin/chmod 0510",
+            "root:\"$group\"",
+            "atomic_rename_exclusive",
+            "trading-executor /bin/test -x",
+            "trading-control /bin/test -x",
+            "trading-research",
+            "#501",
+        ):
+            self.assertIn(required, install)
+        self.assertIn("flags=0x10002(adhoc,runtime)", verify)
+        self.assertLess(
+            apply.index("ROLE_HELPER_RELEASE_REBIND_REQUIRED"),
+            apply.index("assert_sealed_root"),
+        )
+
+    def test_role_helper_stage_resume_revalidates_inode_and_always_recopies(self) -> None:
+        text = installer_text()
+        stage_check = shell_function(text, "assert_safe_keychain_helper_stage")
+        install = shell_function(text, "install_role_helpers")
+
+        for required in (
+            "$EXECUTOR_KEYCHAIN_HELPER_STAGE",
+            "$CONTROL_KEYCHAIN_HELPER_STAGE",
+            "unexpected keychain helper staging path",
+            '-f "$path"',
+            '! -L "$path"',
+            '/bin/realpath "$path"',
+            '/usr/bin/stat -f %u',
+            '/usr/bin/stat -f %l',
+            "-perm +022",
+            'assert_no_acl "$path"',
+        ):
+            self.assertIn(required, stage_check)
+
+        # Both a newly-created stage and a retained safe stage converge on an
+        # unconditional recopy from sealed media. This makes an interruption
+        # during the first copy retryable without trusting partial bytes.
+        self.assertEqual(2, install.count('/bin/cp "$source" "$stage"'))
+        retained_branch = install.index("else\n      assert_safe_keychain_helper_stage")
+        unconditional_copy = install.rindex('/bin/cp "$source" "$stage"')
+        self.assertLess(retained_branch, unconditional_copy)
+        self.assertLess(
+            unconditional_copy,
+            install.index('/usr/sbin/chown root:"$group" "$stage"'),
+        )
+        self.assertLess(
+            install.index('/bin/chmod 0510 "$stage"'),
+            install.index('sync_regular_file_durable "$stage"'),
+        )
+        self.assertLess(
+            install.index('sync_regular_file_durable "$stage"'),
+            install.index('verify_installed_keychain_helper "$stage"'),
         )
 
     def test_current_promotion_is_atomic_first_install_only(self) -> None:
@@ -243,6 +360,13 @@ class AtomicFirstInstallContractTests(unittest.TestCase):
 
         for uid in ("501", "450", "451", "452"):
             self.assertIn(uid, identities + denials)
+        for role, gid in (
+            ("trading-research", "450"),
+            ("trading-executor", "451"),
+            ("trading-control", "452"),
+        ):
+            self.assertIn(f'/usr/bin/id -g {role})" = {gid}', identities)
+            self.assertIn(f"{role} primary GID drift", identities)
         for operation in ("create", "delete", "rename", "replace"):
             self.assertRegex(denials, rf"(?i){operation}")
 

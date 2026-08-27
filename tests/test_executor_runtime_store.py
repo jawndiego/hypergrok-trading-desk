@@ -39,13 +39,13 @@ def config_text(root: Path, *, poll_interval_ms: int = 1000) -> str:
         directory = root / name
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         directory.chmod(0o700)
-    return f'''schema_version = 2
+    return f'''schema_version = 3
 environment = "testnet"
 venue = "hyperliquid"
 node_id = "runtime-node-secret-label"
-executor_uid = {os.geteuid()}
-research_uid = {os.geteuid() + 1}
-control_uid = {os.geteuid() + 2}
+executor_uid = 451
+research_uid = 450
+control_uid = 452
 account_id = "runtime-account-secret-label"
 main_account_address = "0x1111111111111111111111111111111111111111"
 api_wallet_address = "0x2222222222222222222222222222222222222222"
@@ -62,27 +62,31 @@ poll_interval_ms = {poll_interval_ms}
 reconcile_interval_ms = 5000
 
 [credential]
-provider = "macos_keychain_generic_password"
-service = "runtime-keychain-secret-service"
-account = "runtime-keychain-secret-account"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-signer"
+account = "hyperliquid-api-wallet"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [approval_credential]
-provider = "macos_keychain_generic_password"
-service = "runtime-approval-secret-service"
-account = "runtime-approval-secret-account"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-approval"
+account = "approval-hmac"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [recovery_credential]
-provider = "macos_keychain_generic_password"
-service = "runtime-recovery-secret-service"
-account = "runtime-recovery-secret-account"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-recovery"
+account = "recovery-hmac"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [grant_credential]
-provider = "macos_keychain_generic_password"
-service = "runtime-grant-secret-service"
-account = "runtime-grant-secret-account"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-grant"
+account = "grant-hmac"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [paths]

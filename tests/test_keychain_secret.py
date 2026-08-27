@@ -8,9 +8,10 @@ from trading_harness.credential_provider import (
     CredentialMalformedError,
     CredentialNotFoundError,
     CredentialPlatformError,
+    EXECUTOR_KEYCHAIN_HELPER,
     MAX_ERROR_OUTPUT_BYTES,
     MAX_SECRET_OUTPUT_BYTES,
-    SECURITY_EXECUTABLE,
+    SYSTEM_KEYCHAIN_PATH,
 )
 from trading_harness.errors import ValidationError
 from trading_harness.keychain_secret import (
@@ -19,8 +20,8 @@ from trading_harness.keychain_secret import (
 )
 
 
-SERVICE = "com.jawndiego.testnet-recovery-hmac"
-ACCOUNT = "recovery-authority"
+SERVICE = "com.jawndiego.trading-desk.testnet-recovery"
+ACCOUNT = "recovery-hmac"
 SECRET = "ab" * 32
 
 
@@ -37,9 +38,16 @@ class Runner:
 def provider(result: BoundedCommandResult, *, system: str = "Darwin"):
     runner = Runner(result)
     selected = MacOSKeychainHexSecretProvider(
-        KeychainSecretConfig(SERVICE, ACCOUNT, "recovery_hmac"),
+        KeychainSecretConfig(
+            SERVICE,
+            ACCOUNT,
+            "recovery_hmac",
+            keychain_path=SYSTEM_KEYCHAIN_PATH,
+        ),
         _runner=runner,
         _platform_system=lambda: system,
+        _euid_reader=lambda: 451,
+        _install_verifier=lambda _path, _uid, _gid: None,
     )
     return selected, runner
 
@@ -47,7 +55,7 @@ def provider(result: BoundedCommandResult, *, system: str = "Darwin"):
 class KeychainHexSecretTests(unittest.TestCase):
     def test_loads_exact_32_bytes_with_fixed_argv_and_zeroes_buffers(self) -> None:
         result = BoundedCommandResult(
-            0, bytearray(("0x" + SECRET.upper() + "\r\n").encode()), bytearray()
+            0, bytearray(SECRET.encode()), bytearray()
         )
         selected, runner = provider(result)
 
@@ -58,13 +66,9 @@ class KeychainHexSecretTests(unittest.TestCase):
             [
                 (
                     (
-                        SECURITY_EXECUTABLE,
-                        "find-generic-password",
-                        "-s",
-                        SERVICE,
-                        "-a",
-                        ACCOUNT,
-                        "-w",
+                        EXECUTOR_KEYCHAIN_HELPER,
+                        "read",
+                        "recovery",
                     ),
                     5.0,
                     MAX_SECRET_OUTPUT_BYTES,
@@ -83,7 +87,7 @@ class KeychainHexSecretTests(unittest.TestCase):
         for sensitive in (SERVICE, ACCOUNT, SECRET):
             self.assertNotIn(sensitive, rendered)
 
-    def test_explicit_system_keychain_path_is_bound_into_argv(self) -> None:
+    def test_system_keychain_is_config_bound_but_never_caller_selected_in_argv(self) -> None:
         result = BoundedCommandResult(
             0, bytearray(SECRET.encode()), bytearray()
         )
@@ -97,17 +101,22 @@ class KeychainHexSecretTests(unittest.TestCase):
             ),
             _runner=runner,
             _platform_system=lambda: "Darwin",
+            _euid_reader=lambda: 451,
+            _install_verifier=lambda _path, _uid, _gid: None,
         )
         selected.load_secret()
         self.assertEqual(
-            "/Library/Keychains/System.keychain",
-            runner.calls[0][0][-1],
+            (EXECUTOR_KEYCHAIN_HELPER, "read", "recovery"),
+            runner.calls[0][0],
         )
 
     def test_malformed_missing_and_non_darwin_fail_closed(self) -> None:
         malformed = (
             b"",
             b"0" * 64,
+            ("AB" * 32).encode(),
+            ("0x" + SECRET).encode(),
+            (SECRET + "\n").encode(),
             b"a" * 63,
             b"g" * 64,
             (b"a" * 64) + b"\nextra",
@@ -149,7 +158,10 @@ class KeychainHexSecretTests(unittest.TestCase):
                         account=values[1],
                         purpose=values[2],
                         timeout_seconds=values[3],
+                        keychain_path=SYSTEM_KEYCHAIN_PATH,
                     )
+        with self.assertRaises(ValidationError):
+            KeychainSecretConfig(SERVICE, ACCOUNT, "recovery_hmac")
 
 
 if __name__ == "__main__":

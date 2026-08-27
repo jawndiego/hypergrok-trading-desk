@@ -28,13 +28,13 @@ def config_text(root: Path) -> str:
         directory = root / name
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         directory.chmod(0o700)
-    return f'''schema_version = 2
+    return f'''schema_version = 3
 environment = "testnet"
 venue = "hyperliquid"
 node_id = "sensitive-node-label"
-executor_uid = {os.geteuid()}
-research_uid = {os.geteuid() + 1}
-control_uid = {os.geteuid() + 2}
+executor_uid = 451
+research_uid = 450
+control_uid = 452
 account_id = "sensitive-account-label"
 main_account_address = "0x1111111111111111111111111111111111111111"
 api_wallet_address = "0x2222222222222222222222222222222222222222"
@@ -51,27 +51,31 @@ poll_interval_ms = 1000
 reconcile_interval_ms = 5000
 
 [credential]
-provider = "macos_keychain_generic_password"
-service = "sensitive-keychain-service"
-account = "sensitive-keychain-account"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-signer"
+account = "hyperliquid-api-wallet"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [approval_credential]
-provider = "macos_keychain_generic_password"
-service = "sensitive-approval-service"
-account = "sensitive-approval-account"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-approval"
+account = "approval-hmac"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [recovery_credential]
-provider = "macos_keychain_generic_password"
-service = "sensitive-recovery-service"
-account = "sensitive-recovery-account"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-recovery"
+account = "recovery-hmac"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [grant_credential]
-provider = "macos_keychain_generic_password"
-service = "sensitive-grant-service"
-account = "sensitive-grant-account"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-grant"
+account = "grant-hmac"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [paths]
@@ -138,14 +142,14 @@ class ExecutorStatusTests(unittest.TestCase):
             "sensitive-account-label",
             "0x1111111111111111111111111111111111111111",
             "0x2222222222222222222222222222222222222222",
-            "sensitive-keychain-service",
-            "sensitive-keychain-account",
-            "sensitive-approval-service",
-            "sensitive-approval-account",
-            "sensitive-recovery-service",
-            "sensitive-recovery-account",
-            "sensitive-grant-service",
-            "sensitive-grant-account",
+            "com.jawndiego.trading-desk.testnet-signer",
+            "hyperliquid-api-wallet",
+            "com.jawndiego.trading-desk.testnet-approval",
+            "approval-hmac",
+            "com.jawndiego.trading-desk.testnet-recovery",
+            "recovery-hmac",
+            "com.jawndiego.trading-desk.testnet-grant",
+            "grant-hmac",
             str(self.root),
             "sensitive-execution.sqlite3",
             "sensitive-learning.sqlite3",

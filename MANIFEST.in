@@ -12,7 +12,7 @@ include plugins/trading-desk/server.py
 recursive-include .agents/skills *.md *.yaml
 recursive-include docs *.md
 recursive-include deploy *.example
-recursive-include deploy/macos/testnet *.md *.py *.sh
+recursive-include deploy/macos/testnet *.c *.md *.py *.sh
 recursive-include deploy/ubuntu-router/lima *.json *.sh
 recursive-include plugins/trading-desk/runtime *.py
 recursive-include plugins/trading-desk/skills *.md *.yaml

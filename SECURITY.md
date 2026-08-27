@@ -53,6 +53,12 @@ Use this fork's GitHub **Report a vulnerability** flow to open a private securit
   entry/stop/target CLOIDs are trusted only from the immutable three-leg plan;
   recovery-close CLOIDs are independently derived from the incident and fresh
   position snapshot and revalidated inside the live signer.
+- `/usr/bin/security` is not a credential-provider path. Two native hardened
+  readers compile distinct executor/control UID, path and slot allowlists and
+  expose only pipe-bound retrieval from the explicit System Keychain. Config
+  schema v3 binds their fixed labels. Real provisioning and execution remain
+  blocked until the hash-pinned helpers are installed and sacrificial positive,
+  negative, cross-role and post-reboot probes pass.
 - The agent/MCP identity cannot open executor-private execution, nonce,
   daily-loss or control-socket state. Only staging and learning databases live
   in the narrowly ACL-scoped shared-learning directory; agent quotes defer the
@@ -63,7 +69,7 @@ Use this fork's GitHub **Report a vulnerability** flow to open a private securit
 
 ### Config-bound state ownership
 
-Executor config schema v2 binds three distinct, non-root numeric identities:
+Executor config schema v3 binds three distinct, non-root numeric identities:
 `executor_uid`, `research_uid`, and `control_uid`. They are included in the
 canonical config hash; a v1 config or v1-bound state set is not silently
 migrated, rebound, or recreated.

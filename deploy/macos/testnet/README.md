@@ -76,6 +76,21 @@ later resize changes the tested resource boundary.
    intact with `--quarantine-incomplete EXACT_RECEIPT_SHA256`; it is never
    deleted. All transitions retain `fsync`/`F_FULLFSYNC` ordering and negative
    create/delete/rename/replace probes for UIDs 501/450/451/452.
+   The same sealed media must contain the two reproducibly built hardened
+   readers from `build-keychain-role-readers.sh`. The installer hash-pins and
+   code-signature-verifies them, then installs immutable copies at
+   `/opt/trading-desk/libexec/trading-keychain-reader-executor-v1` and
+   `/opt/trading-desk/libexec/trading-keychain-reader-control-v1` as
+   `root:trading-executor`/`root:trading-control`, mode `0510`. Apply remains
+   compiled off until the new provider commit, wheel and deployment pack are
+   rebound together; the currently pinned b697 wheel still contains the legacy
+   provider. The separate
+   [attended System Keychain provisioning plan](KEYCHAIN_PROVISIONING_PLAN.md)
+   describes the fixed-slot, non-exporting native provisioner and its removal
+   after qualification. Its harmless probe records must pass the sealed
+   [nonprinting role-probe runner](KEYCHAIN_ROLE_PROBE_PLAN.md) matrix before
+   any production secret is entered. Neither ephemeral native tool is part of
+   reader installation or installer apply.
 8. Render the two storage-guard JSON examples with the retained public volume
    UUIDs and stable APFS container UUID. Install them root-owned, non-writable by service UIDs, with narrow
    read ACLs. The guarded plist examples intentionally exit successfully after

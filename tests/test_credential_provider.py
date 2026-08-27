@@ -15,6 +15,7 @@ from trading_harness.credential_provider import (
     CredentialPlatformError,
     CredentialTimeoutError,
     ETH_ACCOUNT_DISTRIBUTION,
+    EXECUTOR_KEYCHAIN_HELPER,
     KeychainCredentialConfig,
     MAX_ERROR_OUTPUT_BYTES,
     MAX_SECRET_OUTPUT_BYTES,
@@ -22,7 +23,7 @@ from trading_harness.credential_provider import (
     OFFICIAL_SDK_DISTRIBUTION,
     OFFICIAL_SDK_VERSION,
     SECP256K1_ORDER,
-    SECURITY_EXECUTABLE,
+    SYSTEM_KEYCHAIN_PATH,
 )
 from trading_harness import credential_provider
 from trading_harness.errors import ValidationError
@@ -80,11 +81,18 @@ def provider(
     system: str = "Darwin",
 ) -> MacOSKeychainCredentialProvider:
     return MacOSKeychainCredentialProvider(
-        KeychainCredentialConfig(SERVICE, ACCOUNT, EXPECTED),
+        KeychainCredentialConfig(
+            SERVICE,
+            ACCOUNT,
+            EXPECTED,
+            keychain_path=SYSTEM_KEYCHAIN_PATH,
+        ),
         _runner=runner,
         _wallet_factory=wallet_factory,
         _version_reader=versions() if version_reader is None else version_reader,
         _platform_system=lambda: system,
+        _euid_reader=lambda: 451,
+        _install_verifier=lambda _path, _uid, _gid: None,
     )
 
 
@@ -92,7 +100,7 @@ class SuccessfulLoadTests(unittest.TestCase):
     def test_uses_exact_argv_and_returns_only_verified_wallet(self) -> None:
         result = BoundedCommandResult(
             0,
-            bytearray((PRIVATE_KEY + "\n").encode()),
+            bytearray(PRIVATE_KEY.encode()),
             bytearray(),
         )
         runner = FakeRunner(result)
@@ -111,13 +119,9 @@ class SuccessfulLoadTests(unittest.TestCase):
             [
                 (
                     (
-                        SECURITY_EXECUTABLE,
-                        "find-generic-password",
-                        "-s",
-                        SERVICE,
-                        "-a",
-                        ACCOUNT,
-                        "-w",
+                        EXECUTOR_KEYCHAIN_HELPER,
+                        "read",
+                        "signer",
                     ),
                     5.0,
                     MAX_SECRET_OUTPUT_BYTES,
@@ -128,23 +132,19 @@ class SuccessfulLoadTests(unittest.TestCase):
         self.assertTrue(all(value == 0 for value in result.stdout))
         self.assertEqual(result.stderr, bytearray())
 
-    def test_key_with_canonical_prefix_and_crlf_is_accepted(self) -> None:
+    def test_prefix_uppercase_and_line_endings_are_rejected(self) -> None:
         result = BoundedCommandResult(
             0,
             bytearray(("0x" + PRIVATE_KEY.upper() + "\r\n").encode()),
             bytearray(),
         )
-        received: list[str] = []
-        wallet = provider(
-            FakeRunner(result),
-            wallet_factory=lambda key: received.append(key) or FakeWallet(),
-        ).load_wallet()
-        self.assertIsInstance(wallet, FakeWallet)
-        self.assertEqual(received, ["0x" + PRIVATE_KEY])
+        with self.assertRaises(CredentialMalformedError):
+            provider(FakeRunner(result)).load_wallet()
+        self.assertTrue(all(value == 0 for value in result.stdout))
 
-    def test_explicit_system_keychain_path_is_bound_into_argv(self) -> None:
+    def test_system_keychain_is_config_bound_but_never_caller_selected_in_argv(self) -> None:
         result = BoundedCommandResult(
-            0, bytearray((PRIVATE_KEY + "\n").encode()), bytearray()
+            0, bytearray(PRIVATE_KEY.encode()), bytearray()
         )
         runner = FakeRunner(result)
         selected = MacOSKeychainCredentialProvider(
@@ -158,13 +158,15 @@ class SuccessfulLoadTests(unittest.TestCase):
             _wallet_factory=lambda _key: FakeWallet(),
             _version_reader=versions(),
             _platform_system=lambda: "Darwin",
+            _euid_reader=lambda: 451,
+            _install_verifier=lambda _path, _uid, _gid: None,
         )
 
         selected.load_wallet()
 
         self.assertEqual(
-            "/Library/Keychains/System.keychain",
-            runner.calls[0][0][-1],
+            (EXECUTOR_KEYCHAIN_HELPER, "read", "signer"),
+            runner.calls[0][0],
         )
 
     def test_status_is_static_redacted_and_performs_no_lookup(self) -> None:
@@ -179,7 +181,9 @@ class SuccessfulLoadTests(unittest.TestCase):
         self.assertFalse(status["secret_exposed"])
         self.assertFalse(status["provisioning_supported"])
         self.assertFalse(status["write_supported"])
-        self.assertEqual(status["security_executable"], "/usr/bin/security")
+        self.assertEqual(status["helper_executable"], EXECUTOR_KEYCHAIN_HELPER)
+        self.assertEqual(status["helper_slot"], "signer")
+        self.assertEqual(status["expected_uid"], 451)
 
 
 class FailureTests(unittest.TestCase):
@@ -187,6 +191,28 @@ class FailureTests(unittest.TestCase):
         runner = FakeRunner(AssertionError("must not run"))
         with self.assertRaises(CredentialPlatformError):
             provider(runner, system="Linux").load_wallet()
+        self.assertEqual(runner.calls, [])
+
+    def test_wrong_euid_fails_before_install_dependency_or_command_access(self) -> None:
+        runner = FakeRunner(AssertionError("must not run"))
+        selected = MacOSKeychainCredentialProvider(
+            KeychainCredentialConfig(
+                SERVICE,
+                ACCOUNT,
+                EXPECTED,
+                keychain_path=SYSTEM_KEYCHAIN_PATH,
+            ),
+            _runner=runner,
+            _wallet_factory=lambda _key: FakeWallet(),
+            _version_reader=versions(),
+            _platform_system=lambda: "Darwin",
+            _euid_reader=lambda: 450,
+            _install_verifier=lambda _path, _uid, _gid: (_ for _ in ()).throw(
+                AssertionError("must not verify install")
+            ),
+        )
+        with self.assertRaises(CredentialPlatformError):
+            selected.load_wallet()
         self.assertEqual(runner.calls, [])
 
     def test_missing_command_and_item_are_sanitized(self) -> None:
@@ -226,6 +252,9 @@ class FailureTests(unittest.TestCase):
             b"1" * 63,
             b"g" * 64,
             b"0" * 64,
+            ("A" * 64).encode(),
+            ("0x" + PRIVATE_KEY).encode(),
+            (PRIVATE_KEY + "\n").encode(),
             f"{SECP256K1_ORDER:064x}".encode(),
             (b"1" * 64) + b"\nextra",
             b" " + (b"1" * 64),
@@ -288,7 +317,22 @@ class FailureTests(unittest.TestCase):
         ):
             with self.subTest(service=service, account=account, timeout=timeout):
                 with self.assertRaises((TypeError, ValidationError)):
-                    KeychainCredentialConfig(service, account, address, timeout)
+                    KeychainCredentialConfig(
+                        service,
+                        account,
+                        address,
+                        timeout,
+                        keychain_path=SYSTEM_KEYCHAIN_PATH,
+                    )
+        with self.assertRaises(ValidationError):
+            KeychainCredentialConfig(SERVICE, ACCOUNT, EXPECTED)
+        with self.assertRaises(ValidationError):
+            KeychainCredentialConfig(
+                SERVICE,
+                ACCOUNT,
+                EXPECTED,
+                keychain_path="/tmp/not-system.keychain",
+            )
 
 
 class StaticCapabilityTests(unittest.TestCase):
@@ -304,6 +348,7 @@ class StaticCapabilityTests(unittest.TestCase):
             "set-generic-password",
             "add-generic-password",
             "delete-generic-password",
+            '"find-generic-password"',
         ):
             self.assertNotIn(forbidden, source)
         selected = provider(FakeRunner(AssertionError("unused")))

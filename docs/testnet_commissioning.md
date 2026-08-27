@@ -125,9 +125,12 @@ After the venue-credential-free gates pass:
    proof that it maps to the intended main account/subaccount and has not been
    pruned or replaced.
 4. Generate independent signer, approval, recovery and grant secrets.
-5. Provision the four explicit System Keychain items from an attended terminal.
-6. Positively test only the intended executor/control lookups and negatively
-   test research UID access. Reboot and repeat.
+5. Install and verify the reviewed, root-owned role-restricted Keychain helper.
+   Do not use the shared `/usr/bin/security` executable as the item ACL and do
+   not provision through its ambiguous interactive CLI.
+6. With a sacrificial value, positively test only the intended executor/control
+   helper lookups and negatively test research plus desktop UID access. Reboot
+   and repeat; only then provision the four explicit System Keychain items.
 7. Render the final public executor config with the lowercase main/API wallet
    addresses, account ID and all previously reviewed values; retain its hash.
 
@@ -137,7 +140,7 @@ cloud-init, logs, a shared folder or an agent-readable path.
 ## One-time init and post-init ACL work
 
 1. Preserve a fresh empty-directory, inode, owner, mode and pre-init ACL report.
-2. Run credential-free `validate` against the final schema-v2 config.
+2. Run credential-free `validate` against the final schema-v3 config.
 3. Run `init` exactly once as executor UID 451.
 4. Review, seal and run the repo's post-init ACL tool. It may add
    `delete` only to future-file inheritance; it must not modify the existing

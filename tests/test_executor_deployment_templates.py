@@ -21,8 +21,8 @@ PLACEHOLDER = re.compile(r"__[A-Z0-9_]+__")
 SERVICE_VALUES = {
     "__REVIEWED_EXECUTOR_USER__": "trading-executor",
     "__REVIEWED_EXECUTOR_GROUP__": "trading-executor",
-    "__REVIEWED_REPO_DIR__": "/opt/trading-desk/executor",
-    "__REVIEWED_VENV_BIN__": "/opt/trading-desk/executor/.venv/bin",
+    "__REVIEWED_REPO_DIR__": "/opt/trading-desk/current/executor",
+    "__REVIEWED_VENV_BIN__": "/opt/trading-desk/current/executor/.venv/bin",
     "__REVIEWED_CONFIG_FILE__": "/etc/trading-desk/testnet-executor.toml",
     "__REVIEWED_EXECUTOR_STATE_DIR__": "/var/lib/trading-desk/testnet-executor",
     "__REVIEWED_LEARNING_STATE_DIR__": "/var/lib/trading-desk/learning",
@@ -38,14 +38,6 @@ CONFIG_VALUES = {
     "__REVIEWED_INSTRUMENT__": "ETH-PERP",
     "__REVIEWED_ASSET_ID__": "1",
     "__REVIEWED_RECOVERY_CLOID__": "0x" + "e" * 32,
-    "__REVIEWED_SIGNER_KEYCHAIN_SERVICE__": "testnet-signer",
-    "__REVIEWED_SIGNER_KEYCHAIN_ACCOUNT__": "api-wallet",
-    "__REVIEWED_APPROVAL_KEYCHAIN_SERVICE__": "testnet-approval",
-    "__REVIEWED_APPROVAL_KEYCHAIN_ACCOUNT__": "approval-hmac",
-    "__REVIEWED_RECOVERY_KEYCHAIN_SERVICE__": "testnet-recovery",
-    "__REVIEWED_RECOVERY_KEYCHAIN_ACCOUNT__": "recovery-hmac",
-    "__REVIEWED_GRANT_KEYCHAIN_SERVICE__": "testnet-grant",
-    "__REVIEWED_GRANT_KEYCHAIN_ACCOUNT__": "grant-hmac",
     "__REVIEWED_EXECUTION_STATE_DIR__": "/var/lib/trading-desk/testnet-executor/execution",
     "__REVIEWED_NONCE_STATE_DIR__": "/var/lib/trading-desk/testnet-executor/nonce",
     "__REVIEWED_DAILY_LOSS_STATE_DIR__": "/var/lib/trading-desk/testnet-executor/daily-loss",
@@ -55,12 +47,12 @@ CONFIG_VALUES = {
 LEARNING_VALUES = {
     "__REVIEWED_RESEARCH_USER__": "trading-research",
     "__REVIEWED_RESEARCH_GROUP__": "trading-research",
-    "__REVIEWED_VENV_BIN__": "/opt/trading-desk/research/.venv/bin",
+    "__REVIEWED_VENV_BIN__": "/opt/trading-desk/current/research/.venv/bin",
     "__REVIEWED_MCP_PORT__": "8765",
     "__REVIEWED_CONFIG_FILE__": "/etc/trading-desk/research-testnet.toml",
     "__REVIEWED_RESEARCH_DB__": "/var/lib/trading-desk/research/research.sqlite3",
     "__REVIEWED_GRANT_FILE__": "/var/lib/trading-desk/research/grant.json",
-    "__REVIEWED_REPO_DIR__": "/opt/trading-desk/research",
+    "__REVIEWED_REPO_DIR__": "/opt/trading-desk/current/research",
     "__REVIEWED_LOG_DIR__": "/var/log/trading-desk/research",
     "__REVIEWED_RESEARCH_STATE_DIR__": "/var/lib/trading-desk/research",
     "__REVIEWED_LEARNING_STATE_DIR__": "/var/lib/trading-desk/learning",
@@ -151,6 +143,39 @@ class ExecutorDeploymentTemplateTests(unittest.TestCase):
                     config.grant_credential,
                 )
             )
+        )
+        self.assertEqual(
+            {
+                (item.provider, item.service, item.account)
+                for item in (
+                    config.credential,
+                    config.approval_credential,
+                    config.recovery_credential,
+                    config.grant_credential,
+                )
+            },
+            {
+                (
+                    "macos_system_keychain_role_helper_v1",
+                    "com.jawndiego.trading-desk.testnet-signer",
+                    "hyperliquid-api-wallet",
+                ),
+                (
+                    "macos_system_keychain_role_helper_v1",
+                    "com.jawndiego.trading-desk.testnet-approval",
+                    "approval-hmac",
+                ),
+                (
+                    "macos_system_keychain_role_helper_v1",
+                    "com.jawndiego.trading-desk.testnet-recovery",
+                    "recovery-hmac",
+                ),
+                (
+                    "macos_system_keychain_role_helper_v1",
+                    "com.jawndiego.trading-desk.testnet-grant",
+                    "grant-hmac",
+                ),
+            },
         )
         self.assertEqual(
             4,

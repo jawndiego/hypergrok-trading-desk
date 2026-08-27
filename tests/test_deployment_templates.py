@@ -13,6 +13,14 @@ ROOT = Path(__file__).resolve().parents[1]
 LAUNCHD = ROOT / "deploy/launchd/com.jawndiego.trading-desk-research.plist.example"
 SYSTEMD = ROOT / "deploy/systemd/trading-desk-research.service.example"
 GUIDE = ROOT / "docs/always_on_operation.md"
+KEYCHAIN_GUIDES = (
+    ROOT / "AGENTS.md",
+    ROOT / "README.md",
+    ROOT / "SECURITY.md",
+    GUIDE,
+    ROOT / "docs/testnet_qualification.md",
+    ROOT / "docs/testnet_commissioning.md",
+)
 
 PLACEHOLDER_RE = re.compile(r"__[A-Z0-9_]+__")
 REQUIRED_PLACEHOLDERS = {
@@ -78,6 +86,19 @@ def render(text: str, replacements: dict[str, str]) -> str:
 
 
 class SharedTemplateContractTests(unittest.TestCase):
+    def test_docs_do_not_advertise_shared_security_cli_provisioning(self) -> None:
+        for path in KEYCHAIN_GUIDES:
+            text = template_text(path)
+            self.assertNotIn(
+                "/usr/bin/security add-generic-password",
+                text,
+                msg=str(path),
+            )
+            self.assertNotIn("-T /usr/bin/security", text, msg=str(path))
+        combined = "\n".join(template_text(path) for path in KEYCHAIN_GUIDES)
+        self.assertIn("role-restricted", combined)
+        self.assertIn("sacrificial", combined)
+
     def test_templates_exist_and_use_only_the_reviewed_placeholders(self) -> None:
         for path in (LAUNCHD, SYSTEMD):
             self.assertTrue(path.is_file())
@@ -304,6 +325,20 @@ class OperatorGuideTests(unittest.TestCase):
             "clock uncertainty",
         ):
             self.assertIn(required, lower)
+
+    def test_attended_role_commands_start_with_an_empty_environment(self) -> None:
+        commands = [
+            line
+            for line in self.text.splitlines()
+            if line.startswith("sudo -u trading-")
+            and "/opt/trading-desk/current/" in line
+        ]
+        self.assertTrue(commands)
+        for command in commands:
+            self.assertIn(
+                "-- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C ",
+                command,
+            )
 
 
 if __name__ == "__main__":

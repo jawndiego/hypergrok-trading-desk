@@ -40,25 +40,22 @@ research/MCP/Codex OS identity must not be able to read the signer or recovery
 credentials. Approval and grant HMAC items are also distinct from the signer.
 
 For a boot-time macOS LaunchDaemon, use the explicit System keychain configured
-in every credential stanza. `-w` must be the final option so `security` prompts
-on the TTY; do not put the key in shell history or argv. Trust the executable
-the harness actually invokes (`/usr/bin/security`), not Python:
+in every credential stanza. Do not use `security add-generic-password` for a
+real secret: its interactive form cannot safely combine a final prompt option
+with the explicit positional System keychain, and omitting that path can select
+the desktop login keychain. Do not trust `/usr/bin/security` as the Keychain
+application ACL either; every local role can invoke that shared executable.
 
-```sh
-sudo /usr/bin/security add-generic-password -U \
-  -a hyperliquid-api-wallet \
-  -s com.jawndiego.trading-desk.testnet-signer \
-  -T /usr/bin/security \
-  /Library/Keychains/System.keychain \
-  -w
-```
-
-Provision the approval, recovery and grant HMAC items the same way under their
-distinct service/account labels; each is an independently generated nonzero
-32-byte value encoded as 64 hex characters. Positively test explicit-path
-lookups under the final executor/control UIDs, negatively test the research
-UID, reboot, and repeat before qualification. Do not rely on a login-keychain
-search list or `HOME` in a LaunchDaemon.
+Provisioning remains blocked until a reviewed, root-owned role-restricted
+helper is installed and bound into the provider. First qualify the helper with
+a sacrificial value: positively test the intended executor/control UID,
+negatively test all other service and desktop UIDs, reboot, and repeat. Only
+then provision the signer plus independent approval, recovery and grant HMAC
+items. Do not rely on a login-keychain search list or `HOME` in a LaunchDaemon.
+The executor reader admits only UID/GID 451 slots `signer` and `recovery`; the
+control reader admits only UID/GID 452 slots `approval` and `grant`. Labels are
+fixed by executor config schema v3 and the native binaries; UID 450, UID 501
+and cross-role calls must fail before Keychain access.
 
 The harness only reads that item, verifies the derived public signer address,
 and zeroes its command-output buffers. It has no credential provisioning,
@@ -71,7 +68,7 @@ an editable checkout or a user-writable Homebrew runtime. Installing
 dependencies does not enable execution.
 
 Render the strict executor config from
-`deploy/config/testnet-executor.toml.example`. Schema v2 requires the exact
+`deploy/config/testnet-executor.toml.example`. Schema v3 requires the exact
 numeric UIDs of three distinct non-root executor, research, and attended-control
 identities. Validate and initialize it with `trading-harness-executor validate`
 and `init` under the configured executor UID. Retain the redacted config hash
@@ -117,8 +114,9 @@ receive only the inherit-only directory `delete` ACE needed to remove their own
 snapshot. They must leave a crash artifact that causes an attended root-review
 stop detected by runtime validation; parent `delete_child` remains forbidden.
 
-Schema v1 is rejected, and the v2 UIDs change the canonical config hash. There
-is no silent state migration, config rebinding, or empty-database recreation.
+Config schemas v1 and v2 are rejected, and the exact v3 UIDs are bound into the
+canonical config hash. There is no silent state migration, config rebinding,
+or empty-database recreation.
 On this new machine, run `init` only after proving no harness state exists. If
 any v1-bound or other nonempty state is discovered, preserve its main and
 sidecar files and stop for a separately reviewed migration.
@@ -181,12 +179,12 @@ Before connecting the signer process, retain passing evidence for:
 15. the research/MCP UID failing read/write access to execution, nonce and
     daily-loss state, while every entry requires a complete same-tick loss
     refresh even across an IDLE-preview/admission race.
-16. the exact v2 UID binding and main/sidecar owner matrix, including a
+16. the exact v3 UID binding and main/sidecar owner matrix, including a
     control-first execution WAL/SHM followed by a successful executor reopen;
 17. ambient-`0022` attended CLI launch still producing mode-`0600` SQLite
     sidecars, with extra ACL principals, wrong owners, hard links, and
     symlinks all failing closed;
-18. config v1 and nonempty v1-bound state being rejected without mutation,
+18. config v1/v2 and nonempty earlier-schema state being rejected without mutation,
     credential loading, database recreation, or venue I/O.
 19. `init` rejecting both a complete rerun and every partial existing/missing
     state mixture without changing any inode or byte;

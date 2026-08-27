@@ -1,12 +1,14 @@
-"""Isolated, read-only macOS Keychain credential provider.
+"""Isolated, role-restricted macOS System Keychain credential provider.
 
 The provider has one capability: retrieve an API-wallet private key from a
 generic-password item and return an ``eth-account`` wallet whose public address
 matches the configured signer.  It has no provisioning, update, delete,
 environment-variable, plaintext-file, logging, network, or signing endpoint.
 
-The ``security`` process is invoked with a fixed executable and argv list;
-there is no shell.  Both output streams and execution time are bounded.  Raw
+The globally executable ``/usr/bin/security`` tool is deliberately absent.
+A root-owned, hardened native helper compiled for the executor role is invoked
+with one fixed slot and no caller-selected Keychain label or path.  Both output
+streams and execution time are bounded.  Raw
 secret bytes are held in mutable buffers and overwritten in ``finally``.  No
 error or status value includes command output or the private key.
 """
@@ -19,6 +21,7 @@ import os
 import platform
 import re
 import selectors
+import stat
 import subprocess
 import time
 from typing import Callable, Protocol
@@ -31,7 +34,43 @@ from .hyperliquid_signer import (
 )
 
 
-SECURITY_EXECUTABLE = "/usr/bin/security"
+SYSTEM_KEYCHAIN_PATH = "/Library/Keychains/System.keychain"
+EXECUTOR_KEYCHAIN_HELPER = (
+    "/opt/trading-desk/libexec/trading-keychain-reader-executor-v1"
+)
+CONTROL_KEYCHAIN_HELPER = (
+    "/opt/trading-desk/libexec/trading-keychain-reader-control-v1"
+)
+_SLOT_POLICY: dict[str, tuple[str, str, int, int, str]] = {
+    "signer": (
+        "com.jawndiego.trading-desk.testnet-signer",
+        "hyperliquid-api-wallet",
+        451,
+        451,
+        EXECUTOR_KEYCHAIN_HELPER,
+    ),
+    "recovery": (
+        "com.jawndiego.trading-desk.testnet-recovery",
+        "recovery-hmac",
+        451,
+        451,
+        EXECUTOR_KEYCHAIN_HELPER,
+    ),
+    "approval": (
+        "com.jawndiego.trading-desk.testnet-approval",
+        "approval-hmac",
+        452,
+        452,
+        CONTROL_KEYCHAIN_HELPER,
+    ),
+    "grant": (
+        "com.jawndiego.trading-desk.testnet-grant",
+        "grant-hmac",
+        452,
+        452,
+        CONTROL_KEYCHAIN_HELPER,
+    ),
+}
 ETH_ACCOUNT_DISTRIBUTION = "eth-account"
 ETH_ACCOUNT_MIN_VERSION = (0, 10, 0)
 ETH_ACCOUNT_MAX_VERSION = (0, 14, 0)
@@ -43,7 +82,7 @@ SECP256K1_ORDER = int(
 )
 
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
-_PRIVATE_KEY_RE = re.compile(r"^(?:0x)?[0-9a-fA-F]{64}$")
+_PRIVATE_KEY_RE = re.compile(r"^[0-9a-f]{64}$")
 _VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 
@@ -101,6 +140,7 @@ class BoundedCommandResult:
 CommandRunner = Callable[
     [tuple[str, ...], float, int, int], BoundedCommandResult
 ]
+InstallVerifier = Callable[[str, int, int], None]
 
 
 def _text(value: object, field: str, maximum: int = 128) -> str:
@@ -122,24 +162,68 @@ def _address(value: object) -> str:
     return value.lower()
 
 
-def _keychain_path(value: object) -> str | None:
-    if value is None:
-        return None
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > 1024
-        or any(ord(character) < 32 for character in value)
-    ):
-        raise ValidationError("keychain_path is invalid")
-    if not os.path.isabs(value) or os.path.normpath(value) != value:
-        raise ValidationError("keychain_path must be normalized and absolute")
-    return value
+def _system_keychain_path(value: object) -> str:
+    if value != SYSTEM_KEYCHAIN_PATH:
+        raise ValidationError("keychain_path must be the explicit System Keychain")
+    return SYSTEM_KEYCHAIN_PATH
+
+
+def _slot_policy(
+    slot: object,
+    *,
+    service: object,
+    account: object,
+) -> tuple[str, str, int, int, str]:
+    if not isinstance(slot, str) or slot not in _SLOT_POLICY:
+        raise ValidationError("credential slot is not allowlisted")
+    policy = _SLOT_POLICY[slot]
+    if service != policy[0] or account != policy[1]:
+        raise ValidationError("credential labels differ from the fixed slot policy")
+    return policy
 
 
 def _zero(buffer: bytearray) -> None:
     for index in range(len(buffer)):
         buffer[index] = 0
+
+
+def verify_role_helper_install(path: str, expected_uid: int, expected_gid: int) -> None:
+    """Verify the non-agent-writable helper and every fixed ancestor."""
+
+    if (
+        path not in {EXECUTOR_KEYCHAIN_HELPER, CONTROL_KEYCHAIN_HELPER}
+        or expected_uid not in {451, 452}
+        or expected_gid != expected_uid
+        or os.path.realpath(path) != path
+    ):
+        raise CredentialCommandUnavailable("credential helper installation is invalid")
+    ancestors = ("/", "/opt", "/opt/trading-desk", "/opt/trading-desk/libexec")
+    try:
+        for ancestor in ancestors:
+            metadata = os.lstat(ancestor)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != 0
+                or metadata.st_gid != 0
+                or metadata.st_mode & 0o022
+                or os.path.islink(ancestor)
+            ):
+                raise CredentialCommandUnavailable(
+                    "credential helper installation is invalid"
+                )
+        metadata = os.lstat(path)
+    except (FileNotFoundError, PermissionError, OSError):
+        raise CredentialCommandUnavailable(
+            "credential helper installation is unavailable"
+        ) from None
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != expected_gid
+        or stat.S_IMODE(metadata.st_mode) != 0o510
+        or metadata.st_nlink != 1
+    ):
+        raise CredentialCommandUnavailable("credential helper installation is invalid")
 
 
 def _stop_process(process: subprocess.Popen[bytes]) -> None:
@@ -162,11 +246,15 @@ def run_argv_bounded(
 ) -> BoundedCommandResult:
     """Run one fixed argv command with bounded pipes and no shell."""
 
+    if not isinstance(argv, tuple) or len(argv) != 3 or any(
+        not isinstance(value, str) or not value for value in argv
+    ):
+        raise CredentialCommandUnavailable("credential command is unavailable")
+    helper, verb, slot = argv
     if (
-        not isinstance(argv, tuple)
-        or not argv
-        or argv[0] != SECURITY_EXECUTABLE
-        or any(not isinstance(value, str) or not value for value in argv)
+        verb != "read"
+        or slot not in _SLOT_POLICY
+        or helper != _SLOT_POLICY[slot][4]
     ):
         raise CredentialCommandUnavailable("credential command is unavailable")
     if not 0 < timeout_seconds <= 10:
@@ -182,7 +270,6 @@ def run_argv_bounded(
             shell=False,
             close_fds=True,
             env={
-                "PATH": "/usr/bin:/bin",
                 "LANG": "C",
                 "LC_ALL": "C",
             },
@@ -253,6 +340,7 @@ class KeychainCredentialConfig:
     def __post_init__(self) -> None:
         object.__setattr__(self, "service", _text(self.service, "service"))
         object.__setattr__(self, "account", _text(self.account, "account"))
+        _slot_policy("signer", service=self.service, account=self.account)
         object.__setattr__(
             self,
             "expected_signer_address",
@@ -260,7 +348,25 @@ class KeychainCredentialConfig:
         )
         if type(self.timeout_seconds) is not int or not 1 <= self.timeout_seconds <= 10:
             raise ValidationError("timeout_seconds must be an integer from 1 to 10")
-        object.__setattr__(self, "keychain_path", _keychain_path(self.keychain_path))
+        object.__setattr__(
+            self, "keychain_path", _system_keychain_path(self.keychain_path)
+        )
+
+    @property
+    def helper_slot(self) -> str:
+        return "signer"
+
+    @property
+    def expected_uid(self) -> int:
+        return _SLOT_POLICY[self.helper_slot][2]
+
+    @property
+    def expected_gid(self) -> int:
+        return _SLOT_POLICY[self.helper_slot][3]
+
+    @property
+    def helper_executable(self) -> str:
+        return _SLOT_POLICY[self.helper_slot][4]
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,7 +376,9 @@ class CredentialProviderStatus:
     service_fingerprint: str
     account_fingerprint: str
     signer_fingerprint: str
-    security_executable: str
+    helper_executable: str
+    helper_slot: str
+    expected_uid: int
     sdk_requirement: str
     wallet_dependency_requirement: str
     credential_loaded: bool = False
@@ -285,7 +393,9 @@ class CredentialProviderStatus:
             "service_fingerprint": self.service_fingerprint,
             "account_fingerprint": self.account_fingerprint,
             "signer_fingerprint": self.signer_fingerprint,
-            "security_executable": self.security_executable,
+            "helper_executable": self.helper_executable,
+            "helper_slot": self.helper_slot,
+            "expected_uid": self.expected_uid,
             "sdk_requirement": self.sdk_requirement,
             "wallet_dependency_requirement": self.wallet_dependency_requirement,
             "credential_loaded": self.credential_loaded,
@@ -331,6 +441,8 @@ class MacOSKeychainCredentialProvider:
         _wallet_factory: WalletFactory | None = None,
         _version_reader: VersionReader = importlib_metadata.version,
         _platform_system: Callable[[], str] = platform.system,
+        _euid_reader: Callable[[], int] = os.geteuid,
+        _install_verifier: InstallVerifier = verify_role_helper_install,
     ) -> None:
         if not isinstance(config, KeychainCredentialConfig):
             raise TypeError("config must be KeychainCredentialConfig")
@@ -338,6 +450,8 @@ class MacOSKeychainCredentialProvider:
             ("runner", _runner),
             ("version_reader", _version_reader),
             ("platform_system", _platform_system),
+            ("euid_reader", _euid_reader),
+            ("install_verifier", _install_verifier),
         ):
             if not callable(value):
                 raise TypeError(f"{field} must be callable")
@@ -348,10 +462,12 @@ class MacOSKeychainCredentialProvider:
         self._wallet_factory = _wallet_factory
         self._version_reader = _version_reader
         self._platform_system = _platform_system
+        self._euid_reader = _euid_reader
+        self._install_verifier = _install_verifier
 
     def status(self) -> CredentialProviderStatus:
         return CredentialProviderStatus(
-            provider="macos_keychain_generic_password",
+            provider="macos_system_keychain_role_helper_v1",
             configured=True,
             service_fingerprint=domain_hash(
                 "trading-harness/keychain-service/v1", self._config.service
@@ -363,7 +479,9 @@ class MacOSKeychainCredentialProvider:
                 "trading-harness/expected-signer/v1",
                 self._config.expected_signer_address,
             ),
-            security_executable=SECURITY_EXECUTABLE,
+            helper_executable=self._config.helper_executable,
+            helper_slot=self._config.helper_slot,
+            expected_uid=self._config.expected_uid,
             sdk_requirement=f"{OFFICIAL_SDK_DISTRIBUTION}=={OFFICIAL_SDK_VERSION}",
             wallet_dependency_requirement="eth-account>=0.10.0,<0.14.0",
         )
@@ -390,11 +508,7 @@ class MacOSKeychainCredentialProvider:
     @staticmethod
     def _normalize_key(buffer: bytearray) -> str:
         raw = bytes(buffer)
-        if raw.endswith(b"\r\n"):
-            raw = raw[:-2]
-        elif raw.endswith(b"\n"):
-            raw = raw[:-1]
-        if not raw or b"\n" in raw or b"\r" in raw:
+        if len(raw) != 64 or b"\n" in raw or b"\r" in raw:
             raise CredentialMalformedError("Keychain credential format is invalid")
         try:
             text = raw.decode("ascii")
@@ -402,7 +516,7 @@ class MacOSKeychainCredentialProvider:
             raise CredentialMalformedError("Keychain credential format is invalid") from None
         if not _PRIVATE_KEY_RE.fullmatch(text):
             raise CredentialMalformedError("Keychain credential format is invalid")
-        digits = text[2:] if text.startswith("0x") else text
+        digits = text
         scalar = int(digits, 16)
         if not 1 <= scalar < SECP256K1_ORDER:
             raise CredentialMalformedError("Keychain credential scalar is invalid")
@@ -411,16 +525,20 @@ class MacOSKeychainCredentialProvider:
     def load_wallet(self) -> object:
         if self._platform_system() != "Darwin":
             raise CredentialPlatformError("macOS Keychain provider requires Darwin")
+        if self._euid_reader() != self._config.expected_uid:
+            raise CredentialPlatformError(
+                "credential helper requires the configured executor UID"
+            )
+        self._install_verifier(
+            self._config.helper_executable,
+            self._config.expected_uid,
+            self._config.expected_gid,
+        )
         wallet_factory, expected_wallet_type = self._dependencies()
         argv = (
-            SECURITY_EXECUTABLE,
-            "find-generic-password",
-            "-s",
-            self._config.service,
-            "-a",
-            self._config.account,
-            "-w",
-            *((self._config.keychain_path,) if self._config.keychain_path else ()),
+            self._config.helper_executable,
+            "read",
+            self._config.helper_slot,
         )
         try:
             result = self._runner(
@@ -482,6 +600,7 @@ class MacOSKeychainCredentialProvider:
 
 __all__ = (
     "BoundedCommandResult",
+    "CONTROL_KEYCHAIN_HELPER",
     "CredentialAddressMismatch",
     "CredentialCommandUnavailable",
     "CredentialDependencyError",
@@ -492,7 +611,11 @@ __all__ = (
     "CredentialProviderError",
     "CredentialProviderStatus",
     "CredentialTimeoutError",
+    "EXECUTOR_KEYCHAIN_HELPER",
+    "InstallVerifier",
     "KeychainCredentialConfig",
     "MacOSKeychainCredentialProvider",
+    "SYSTEM_KEYCHAIN_PATH",
     "run_argv_bounded",
+    "verify_role_helper_install",
 )

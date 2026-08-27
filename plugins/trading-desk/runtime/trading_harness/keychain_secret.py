@@ -10,6 +10,7 @@ sign, access the network, or read secrets from files/environment variables.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import platform
 import re
 from typing import Callable
@@ -26,15 +27,23 @@ from .credential_provider import (
     CredentialProviderError,
     MAX_ERROR_OUTPUT_BYTES,
     MAX_SECRET_OUTPUT_BYTES,
-    SECURITY_EXECUTABLE,
-    _keychain_path,
+    InstallVerifier,
+    _SLOT_POLICY,
+    _slot_policy,
+    _system_keychain_path,
     run_argv_bounded,
+    verify_role_helper_install,
 )
 from .errors import ValidationError
 
 
-_HEX_SECRET_RE = re.compile(r"^(?:0x)?[0-9a-fA-F]{64}$")
+_HEX_SECRET_RE = re.compile(r"^[0-9a-f]{64}$")
 _PURPOSES = frozenset({"approval_hmac", "recovery_hmac", "grant_hmac"})
+_PURPOSE_SLOTS = {
+    "approval_hmac": "approval",
+    "recovery_hmac": "recovery",
+    "grant_hmac": "grant",
+}
 
 
 def _label(value: object, *, field: str) -> str:
@@ -68,9 +77,32 @@ class KeychainSecretConfig:
         object.__setattr__(self, "account", _label(self.account, field="account"))
         if self.purpose not in _PURPOSES:
             raise ValidationError("purpose is not an allowlisted HMAC authority")
+        _slot_policy(
+            _PURPOSE_SLOTS[self.purpose],
+            service=self.service,
+            account=self.account,
+        )
         if type(self.timeout_seconds) is not int or not 1 <= self.timeout_seconds <= 10:
             raise ValidationError("timeout_seconds must be from 1 through 10")
-        object.__setattr__(self, "keychain_path", _keychain_path(self.keychain_path))
+        object.__setattr__(
+            self, "keychain_path", _system_keychain_path(self.keychain_path)
+        )
+
+    @property
+    def helper_slot(self) -> str:
+        return _PURPOSE_SLOTS[self.purpose]
+
+    @property
+    def expected_uid(self) -> int:
+        return _SLOT_POLICY[self.helper_slot][2]
+
+    @property
+    def expected_gid(self) -> int:
+        return _SLOT_POLICY[self.helper_slot][3]
+
+    @property
+    def helper_executable(self) -> str:
+        return _SLOT_POLICY[self.helper_slot][4]
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +111,9 @@ class KeychainSecretStatus:
     purpose: str
     service_fingerprint: str
     account_fingerprint: str
+    helper_executable: str
+    helper_slot: str
+    expected_uid: int
     configured: bool = True
     credential_loaded: bool = False
     secret_exposed: bool = False
@@ -91,6 +126,9 @@ class KeychainSecretStatus:
             "purpose": self.purpose,
             "service_fingerprint": self.service_fingerprint,
             "account_fingerprint": self.account_fingerprint,
+            "helper_executable": self.helper_executable,
+            "helper_slot": self.helper_slot,
+            "expected_uid": self.expected_uid,
             "configured": self.configured,
             "credential_loaded": self.credential_loaded,
             "secret_exposed": self.secret_exposed,
@@ -108,18 +146,30 @@ class MacOSKeychainHexSecretProvider:
         *,
         _runner: CommandRunner = run_argv_bounded,
         _platform_system: Callable[[], str] = platform.system,
+        _euid_reader: Callable[[], int] = os.geteuid,
+        _install_verifier: InstallVerifier = verify_role_helper_install,
     ) -> None:
         if not isinstance(config, KeychainSecretConfig):
             raise TypeError("config must be KeychainSecretConfig")
-        if not callable(_runner) or not callable(_platform_system):
-            raise TypeError("runner and platform_system must be callable")
+        if not all(
+            callable(value)
+            for value in (
+                _runner,
+                _platform_system,
+                _euid_reader,
+                _install_verifier,
+            )
+        ):
+            raise TypeError("runner, platform, identity, and install checks must be callable")
         self._config = config
         self._runner = _runner
         self._platform_system = _platform_system
+        self._euid_reader = _euid_reader
+        self._install_verifier = _install_verifier
 
     def status(self) -> KeychainSecretStatus:
         return KeychainSecretStatus(
-            provider="macos_keychain_generic_password",
+            provider="macos_system_keychain_role_helper_v1",
             purpose=self._config.purpose,
             service_fingerprint=domain_hash(
                 "trading-harness/hmac-keychain-service/v1",
@@ -129,16 +179,15 @@ class MacOSKeychainHexSecretProvider:
                 "trading-harness/hmac-keychain-account/v1",
                 {"purpose": self._config.purpose, "value": self._config.account},
             ),
+            helper_executable=self._config.helper_executable,
+            helper_slot=self._config.helper_slot,
+            expected_uid=self._config.expected_uid,
         )
 
     @staticmethod
     def _decode(buffer: bytearray) -> bytes:
         raw = bytes(buffer)
-        if raw.endswith(b"\r\n"):
-            raw = raw[:-2]
-        elif raw.endswith(b"\n"):
-            raw = raw[:-1]
-        if not raw or b"\n" in raw or b"\r" in raw:
+        if len(raw) != 64 or b"\n" in raw or b"\r" in raw:
             raise CredentialMalformedError("Keychain HMAC credential format is invalid")
         try:
             text = raw.decode("ascii")
@@ -148,7 +197,7 @@ class MacOSKeychainHexSecretProvider:
             ) from None
         if not _HEX_SECRET_RE.fullmatch(text):
             raise CredentialMalformedError("Keychain HMAC credential format is invalid")
-        digits = text[2:] if text.startswith("0x") else text
+        digits = text
         result = bytes.fromhex(digits)
         if len(result) != 32 or not any(result):
             raise CredentialMalformedError("Keychain HMAC credential is invalid")
@@ -157,15 +206,17 @@ class MacOSKeychainHexSecretProvider:
     def load_secret(self) -> bytes:
         if self._platform_system() != "Darwin":
             raise CredentialPlatformError("macOS Keychain provider requires Darwin")
+        if self._euid_reader() != self._config.expected_uid:
+            raise CredentialPlatformError("Keychain secret lookup requires its exact role UID")
+        self._install_verifier(
+            self._config.helper_executable,
+            self._config.expected_uid,
+            self._config.expected_gid,
+        )
         argv = (
-            SECURITY_EXECUTABLE,
-            "find-generic-password",
-            "-s",
-            self._config.service,
-            "-a",
-            self._config.account,
-            "-w",
-            *((self._config.keychain_path,) if self._config.keychain_path else ()),
+            self._config.helper_executable,
+            "read",
+            self._config.helper_slot,
         )
         try:
             result = self._runner(

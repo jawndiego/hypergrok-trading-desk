@@ -61,6 +61,12 @@ This repository builds an agent-runtime-neutral trading research and execution h
 - Credential-free macOS plans live under `deploy/macos/testnet`. They are
   plan-only by default and do not authorize APFS creation, ACL mutation,
   application installation, `init`, launchd, credentials or venue calls.
+- Never provision a real secret through `security add-generic-password` or
+  trust the shared `/usr/bin/security` executable in an item ACL. The macOS
+  execution design requires the sealed role-specific native readers, fixed
+  UID/slot mappings, and the nonprinting sacrificial matrix in
+  `deploy/macos/testnet/KEYCHAIN_ROLE_PROBE_PLAN.md` before and after reboot.
+  Until those gates pass, keep venue and HMAC secrets offline.
 - The repo-composable VM plan lives under `deploy/ubuntu-router/lima` and is
   rendered by `scripts/render_ubuntu_router_vm.py`. It pins Lima, socket_vmnet
   and a dated Ubuntu image, but VM apply remains absent and the signed apt

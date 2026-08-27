@@ -43,22 +43,22 @@ does not authorize mainnet.
 ## Install a reviewed build with Python 3.11
 
 Use a reviewed commit or release in a root/admin-owned installation directory;
-do not run a mutable checkout owned by the service account. The examples below
-use `/opt/trading-desk/research` as a neutral illustration. Substitute the
-locally reviewed absolute path consistently.
+do not run a mutable checkout owned by the service account. The macOS installer
+builds both locked environments at their permanent versioned paths and promotes
+the first-install `current` pointer used below. Do not recreate or mutate that
+venv in place. A manual or Linux installation needs its own reviewed immutable
+path and locked, offline dependency build before these commands apply.
 
 ```sh
-cd /opt/trading-desk/research
-python3.11 -m venv .venv
-./.venv/bin/python -m pip install --no-deps .
+cd /opt/trading-desk/current/research
 ./.venv/bin/trading-harness doctor
 ```
 
 `doctor` must report Python `>=3.11`, `live_trading: false`, venue writes
 disabled and credential loading disabled. The research node itself does not
-need MCP. The separate Codex/OpenCode service does; install it in the reviewed
-research venv with `./.venv/bin/python -m pip install '.[mcp]'` before enabling
-the learning-MCP supervisor. A `--no-deps` install cannot run that service.
+need MCP. The separate Codex/OpenCode service does, so its dependencies must be
+present in the reviewed research lock and sealed build before promotion. Never
+use an online or in-place `pip install` to change `/opt/trading-desk/current`.
 
 Create the state and log directories before starting a supervisor. The
 research user owns those directories with mode `0700`; the database and backup
@@ -69,13 +69,13 @@ relative paths or a network-mounted SQLite database.
 Run once in the foreground before installing a service:
 
 ```sh
-/opt/trading-desk/research/.venv/bin/trading-harness node run --state-db /var/db/trading-desk/research/research.sqlite3 --node-id trading-desk-research --poll-seconds 1 --history-bars 1200
+sudo -u trading-research -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/research/.venv/bin/trading-harness node run --state-db /var/db/trading-desk/research/research.sqlite3 --node-id trading-desk-research --poll-seconds 1 --history-bars 1200
 ```
 
 Press `Ctrl-C` to exercise graceful shutdown. Then inspect persisted state:
 
 ```sh
-/opt/trading-desk/research/.venv/bin/trading-harness node status --state-db /var/db/trading-desk/research/research.sqlite3 --node-id trading-desk-research
+sudo -u trading-research -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/research/.venv/bin/trading-harness node status --state-db /var/db/trading-desk/research/research.sqlite3 --node-id trading-desk-research
 ```
 
 The status response is the application-level view. Supervisor status, process
@@ -156,7 +156,7 @@ sudo systemctl stop trading-desk-research.service
 Application status remains:
 
 ```sh
-/opt/trading-desk/research/.venv/bin/trading-harness node status --state-db /var/lib/trading-desk/research/research.sqlite3 --node-id trading-desk-research
+sudo -u trading-research -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/research/.venv/bin/trading-harness node status --state-db /var/lib/trading-desk/research/research.sqlite3 --node-id trading-desk-research
 ```
 
 ## Local Ubuntu VM router lab
@@ -202,8 +202,8 @@ environment. Render
 `deploy/config/testnet-executor.toml.example` to an absolute owner-only file,
 replace every placeholder, and leave the compiled default risk-policy hash
 unchanged unless the code and policy change together. Executor config schema
-v2 requires distinct, non-root numeric `executor_uid`, `research_uid`, and
-`control_uid` fields. The identities are part of the canonical config hash and
+v3 requires exact numeric `executor_uid`, `research_uid`, and `control_uid`
+values 451, 450, and 452. The identities are part of the canonical config hash and
 durable state binding; they are not looked up from an ambient username or
 environment variable. The four Keychain items must be distinct:
 
@@ -220,24 +220,44 @@ each final service identity—including negative tests—before live use.
 
 For a boot-time macOS LaunchDaemon, every credential stanza must name the
 explicit `/Library/Keychains/System.keychain`; do not rely on a login-keychain
-search list or `HOME`. Provision from an attended admin terminal with
-`/usr/bin/security` itself in the item ACL—the harness invokes that executable,
-not Python. `-w` remains last so the secret is prompted, never placed in argv:
+search list or `HOME`. Do **not** provision a real credential with the
+`security add-generic-password` CLI. On the supported macOS release its
+interactive password form cannot also bind an explicit positional keychain:
+putting the keychain before the final prompt option exits with usage, while
+omitting the keychain can silently select the operator's login keychain.
 
-```sh
-sudo /usr/bin/security add-generic-password -U -a hyperliquid-api-wallet -s com.jawndiego.trading-desk.testnet-signer -T /usr/bin/security /Library/Keychains/System.keychain -w
-sudo /usr/bin/security add-generic-password -U -a approval-hmac -s com.jawndiego.trading-desk.testnet-approval -T /usr/bin/security /Library/Keychains/System.keychain -w
-sudo /usr/bin/security add-generic-password -U -a recovery-hmac -s com.jawndiego.trading-desk.testnet-recovery -T /usr/bin/security /Library/Keychains/System.keychain -w
-sudo /usr/bin/security add-generic-password -U -a grant-hmac -s com.jawndiego.trading-desk.testnet-grant -T /usr/bin/security /Library/Keychains/System.keychain -w
-```
+Trusting `/usr/bin/security` in a Keychain item ACL is also not an OS-user
+boundary: the ACL identifies the shared executable, while executor, research,
+control and the desktop user can all invoke it. Real credential provisioning
+therefore remains blocked until the reviewed deployment installs a
+role-restricted, root-owned Keychain helper, the provider is bound to that
+exact helper, and sacrificial positive/negative UID probes pass before and
+after reboot. Keychain Access may be used only to create the sacrificial test
+item during that attended qualification; never use it to work around the
+helper gate with a real signer or HMAC value.
 
-The first prompt is a 32-byte API-wallet key encoded as 64 hex characters;
-the other three are separately generated nonzero 32-byte HMAC keys in the same
-encoding. Treat trusting `/usr/bin/security` as safe only together with strict
-OS-user separation. Before installing launchd, positively test each permitted
+The reviewed reader contract uses two different hardened native applications,
+both installed below a root-owned, non-writable `/opt/trading-desk/libexec`:
+
+| Reader | Required identity | Fixed slots and Keychain labels |
+| --- | --- | --- |
+| `trading-keychain-reader-executor-v1` | executor UID/GID 451 only | `signer` = `com.jawndiego.trading-desk.testnet-signer` / `hyperliquid-api-wallet`; `recovery` = `com.jawndiego.trading-desk.testnet-recovery` / `recovery-hmac` |
+| `trading-keychain-reader-control-v1` | control UID/GID 452 only | `approval` = `com.jawndiego.trading-desk.testnet-approval` / `approval-hmac`; `grant` = `com.jawndiego.trading-desk.testnet-grant` / `grant-hmac` |
+
+The helper derives role from real/effective UID and accepts only `read SLOT`;
+service, account and keychain path are not caller inputs. UID 450, desktop UID
+501 and either cross-role invocation are denied. Executor config schema v3
+requires the fixed `macos_system_keychain_role_helper_v1` provider, all four
+canonical labels and the literal System Keychain path. The reader has no
+provision, update, delete, list or terminal-output mode.
+
+The signer is a 32-byte API-wallet key encoded as 64 hex characters; the other
+three items are separately generated nonzero 32-byte HMAC keys in the same
+encoding. Before installing launchd, positively test each permitted helper
 lookup under its final UID with the explicit keychain path, and negatively test
-the research UID. Do not proceed if a LaunchDaemon cannot read the intended
-item after reboot without unlocking a login session.
+every other service and desktop UID. Do not proceed if a forbidden UID can
+execute the helper, if a permitted LaunchDaemon cannot read its intended item
+after reboot, or if any lookup depends on unlocking a login session.
 
 Use three different local directory classes: executor-private state for
 execution, nonce, daily-loss and the configured control-socket path;
@@ -276,7 +296,7 @@ A reviewed macOS layout is, for example:
   attended control only, mode `0700` parent and generation-specific `0600` files;
 - `/var/db/trading-desk/research/`: research SQLite; research only.
 
-The v2 owner policy is exact and distinguishes durable main files from
+The v3 owner policy is exact and distinguishes durable main files from
 transient SQLite sidecars:
 
 | Configured artifact | Main-file owner | Allowed `-wal`/`-shm`/`-journal` owners |
@@ -298,7 +318,7 @@ executor-owned in both orderings. With an executor-first WAL session its WAL
 and SHM were executor-owned. With a control-first WAL session they were
 control-owned, while the executor still had the exact inherited read/write ACL
 and successfully wrote the database. A process-owned-only sidecar check would
-therefore reject a valid crash/restart state. The v2 policy accepts that exact
+therefore reject a valid crash/restart state. The v3 policy accepts that exact
 control-owned execution sidecar without admitting control ownership of the
 main database or any control/research ownership in nonce or daily-loss state.
 
@@ -359,8 +379,8 @@ and stops until root reviews and removes them.
 Validate and initialize without credential or network access:
 
 ```sh
-/opt/trading-desk/executor/.venv/bin/trading-harness-executor validate --config /etc/trading-desk/testnet-executor.toml
-/opt/trading-desk/executor/.venv/bin/trading-harness-executor init --config /etc/trading-desk/testnet-executor.toml
+sudo -u trading-executor -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor validate --config /etc/trading-desk/testnet-executor.toml
+sudo -u trading-executor -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor init --config /etc/trading-desk/testnet-executor.toml
 ```
 
 Pause here for the attended root ACL finalization described above: add delete
@@ -370,13 +390,13 @@ control or research database connection before they pass. Then continue as the
 executor UID:
 
 ```sh
-/opt/trading-desk/executor/.venv/bin/trading-harness-executor status --config /etc/trading-desk/testnet-executor.toml
-/opt/trading-desk/executor/.venv/bin/trading-harness-executor dry-run --config /etc/trading-desk/testnet-executor.toml
+sudo -u trading-executor -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor status --config /etc/trading-desk/testnet-executor.toml
+sudo -u trading-executor -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor dry-run --config /etc/trading-desk/testnet-executor.toml
 ```
 
 `validate`, `init`, `status`, and `dry-run` do not load Keychain items or call
 Hyperliquid. `init` refuses missing/insecure parent directories, binds every
-database to the exact config, and enforces the v2 main/sidecar owner policy.
+database to the exact config, and enforces the schema-v3 main/sidecar owner policy.
 `status` and `dry-run` require complete current schemas, migration histories,
 durable bindings and integrity chains for core execution, nonce and daily-loss
 state. Shared learning is verified separately and is reported as degraded if it
@@ -395,11 +415,11 @@ the signed-grant copy. The MCP entry point also establishes umask `0077` for
 its full server lifetime so foreground qualification has the same sidecar mode
 invariant as launchd.
 
-Config schema v1 is rejected. `init` requires all configured state directories
+Config schemas v1 and v2 are rejected. `init` requires all configured state directories
 to be empty, exclusively reserves all five exact main-file names, and rejects
 reruns and partially populated layouts. An interrupted reservation or schema
 build remains invalid partial state for root review; it is never auto-repaired.
-There is no silent v1-to-v2 state migration and
+There is no silent earlier-schema-to-v3 state migration and
 no automatic rebinding of an existing database to new UIDs or a new config
 hash. On a new machine, initialize anew only after proving the target state
 directories contain no real harness state (sacrificial ACL probe files are not
@@ -410,7 +430,7 @@ and require a separately reviewed migration; do not run `init` over it.
 Issue a short-lived infrastructure-learning grant in a direct terminal:
 
 ```sh
-/opt/trading-desk/executor/.venv/bin/trading-harness-executor issue-grant --config /etc/trading-desk/testnet-executor.toml --output /var/db/trading-desk/control-private/grants/learning-grant-g1.json --grant-id testnet-learning-001 --ttl-seconds 3600
+sudo -u trading-control -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor issue-grant --config /etc/trading-desk/testnet-executor.toml --output /var/db/trading-desk/control-private/grants/learning-grant-g1.json --grant-id testnet-learning-001 --ttl-seconds 3600
 ```
 
 The command opens `/dev/tty` and requires the exact displayed confirmation. It
@@ -422,7 +442,7 @@ must be tested independently.
 Run the configured agent-facing MCP service under the research identity:
 
 ```sh
-/opt/trading-desk/research/.venv/bin/trading-harness-mcp --transport streamable-http --host 127.0.0.1 --port 8765 --learning-executor-config /etc/trading-desk/research-testnet-profile.toml --learning-research-db /var/db/trading-desk/research/research.sqlite3 --learning-grant /var/db/trading-desk/research/learning-grant-g1.json
+sudo -u trading-research -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/research/.venv/bin/trading-harness-mcp --transport streamable-http --host 127.0.0.1 --port 8765 --learning-executor-config /etc/trading-desk/research-testnet-profile.toml --learning-research-db /var/db/trading-desk/research/research.sqlite3 --learning-grant /var/db/trading-desk/research/learning-grant-g1.json
 ```
 
 Before startup, use a research-readable root-owned config and a root-owned
@@ -455,8 +475,8 @@ a staged document ID, review and authorize it from the separate attended
 terminal:
 
 ```sh
-/opt/trading-desk/executor/.venv/bin/trading-harness-executor show-stage --config /etc/trading-desk/testnet-executor.toml --document-id stg_REVIEWED_ID
-/opt/trading-desk/executor/.venv/bin/trading-harness-executor authorize-stage --config /etc/trading-desk/testnet-executor.toml --grant /var/db/trading-desk/control-private/grants/learning-grant-g1.json --document-id stg_REVIEWED_ID --approver-id local-operator
+sudo -u trading-control -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor show-stage --config /etc/trading-desk/testnet-executor.toml --document-id stg_REVIEWED_ID
+sudo -u trading-control -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor authorize-stage --config /etc/trading-desk/testnet-executor.toml --grant /var/db/trading-desk/control-private/grants/learning-grant-g1.json --document-id stg_REVIEWED_ID --approver-id local-operator
 ```
 
 After the configured MCP passes in the foreground, render the matching
@@ -477,7 +497,7 @@ reconciliation before READY, serializes safety ahead of new entry, always uses
 the three-leg mandatory-stop group, and drains bounded safety work on SIGTERM:
 
 ```sh
-/opt/trading-desk/executor/.venv/bin/trading-harness-executor run --config /etc/trading-desk/testnet-executor.toml --worker-id isolated-testnet-worker
+sudo -u trading-executor -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor run --config /etc/trading-desk/testnet-executor.toml --worker-id isolated-testnet-worker
 ```
 
 After foreground qualification on macOS, render
@@ -508,7 +528,7 @@ lease has expired, inspect `status`, then acknowledge only its exact revision
 and reason from the attended control terminal:
 
 ```sh
-/opt/trading-desk/executor/.venv/bin/trading-harness-executor acknowledge-halt --config /etc/trading-desk/testnet-executor.toml --expected-revision REVIEWED_REVISION --expected-reason internal_error
+sudo -u trading-control -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor acknowledge-halt --config /etc/trading-desk/testnet-executor.toml --expected-revision REVIEWED_REVISION --expected-reason internal_error
 ```
 
 The command requires an exact `/dev/tty` phrase, loads no credential, performs

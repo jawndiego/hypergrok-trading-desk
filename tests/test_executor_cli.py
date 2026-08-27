@@ -32,6 +32,7 @@ from trading_harness.grant_artifact import (
 from trading_harness.planning import RiskSizingPolicy
 from tests.test_learning_quote_service import config_text
 from tests.test_node import AT
+from tests.ownership_fixtures import simulated_ownership
 
 
 SECRET = b"g" * 32
@@ -68,6 +69,21 @@ class ExecutorCliTests(unittest.TestCase):
         path.write_bytes(b"state")
         path.chmod(0o600)
         return config, path
+
+    def _ownership(
+        self,
+        *,
+        euid: int = 451,
+        default_uid: int = 451,
+        overrides: dict[Path, int] | None = None,
+    ):
+        selected = {self.config: 0}
+        selected.update(overrides or {})
+        return simulated_ownership(
+            default_uid=default_uid,
+            euid=euid,
+            overrides=selected,
+        )
 
     @staticmethod
     def _current_umask() -> int:
@@ -129,21 +145,12 @@ class ExecutorCliTests(unittest.TestCase):
         self.assertFalse(output.exists())
 
     def test_executor_command_requires_configured_executor_uid_before_dispatch(self) -> None:
-        mismatched = self.root / "mismatched-executor.toml"
-        mismatched.write_text(
-            config_text(self.root, self.policy.policy_hash).replace(
-                f"executor_uid = {os.geteuid()}",
-                f"executor_uid = {os.geteuid() + 3}",
-            ),
-            encoding="utf-8",
-        )
-        mismatched.chmod(0o600)
         with patch(
             "trading_harness.executor_cli._dispatch",
             side_effect=AssertionError("wrong identity must not dispatch"),
         ):
             result, _stdout, stderr = run_cli(
-                ["init", "--config", str(mismatched)]
+                ["init", "--config", str(self.config)]
             )
 
         self.assertEqual(2, result)
@@ -154,11 +161,17 @@ class ExecutorCliTests(unittest.TestCase):
         target = path.with_name("target.sqlite3")
         path.rename(target)
         path.symlink_to(target)
-        with self.assertRaisesRegex(StateConflict, "state must be initialized"):
+        with (
+            self._ownership(),
+            self.assertRaisesRegex(StateConflict, "state must be initialized"),
+        ):
             _require_state_file(config, path, label="test")
         path.unlink()
         path.mkdir(mode=0o700)
-        with self.assertRaisesRegex(StateConflict, "state must be initialized"):
+        with (
+            self._ownership(),
+            self.assertRaisesRegex(StateConflict, "state must be initialized"),
+        ):
             _require_state_file(config, path, label="test")
 
     def test_state_file_precheck_rejects_hardlink(self) -> None:
@@ -166,7 +179,10 @@ class ExecutorCliTests(unittest.TestCase):
         hardlink = self.root / "state-hardlink.sqlite3"
         os.link(path, hardlink)
 
-        with self.assertRaisesRegex(StateConflict, "state must be initialized"):
+        with (
+            self._ownership(),
+            self.assertRaisesRegex(StateConflict, "state must be initialized"),
+        ):
             _require_state_file(config, path, label="test")
 
     def test_state_file_precheck_requires_exact_mode_0600(self) -> None:
@@ -175,8 +191,11 @@ class ExecutorCliTests(unittest.TestCase):
         for mode in (0o400, 0o700, 0o640):
             with self.subTest(mode=oct(mode)):
                 path.chmod(mode)
-                with self.assertRaisesRegex(
-                    StateConflict, "state must be initialized"
+                with (
+                    self._ownership(),
+                    self.assertRaisesRegex(
+                        StateConflict, "state must be initialized"
+                    ),
                 ):
                     _require_state_file(config, path, label="test")
 
@@ -184,7 +203,10 @@ class ExecutorCliTests(unittest.TestCase):
         config, path = self._state_file()
         path.parent.chmod(0o777)
         try:
-            with self.assertRaisesRegex(StateConflict, "state must be initialized"):
+            with (
+                self._ownership(),
+                self.assertRaisesRegex(StateConflict, "state must be initialized"),
+            ):
                 _require_state_file(config, path, label="test")
         finally:
             path.parent.chmod(0o700)
@@ -192,7 +214,10 @@ class ExecutorCliTests(unittest.TestCase):
         sidecar = Path(str(path) + "-wal")
         sidecar.write_bytes(b"wal")
         sidecar.chmod(0o644)
-        with self.assertRaisesRegex(StateConflict, "state must be initialized"):
+        with (
+            self._ownership(),
+            self.assertRaisesRegex(StateConflict, "state must be initialized"),
+        ):
             _require_state_file(config, path, label="test")
 
     def test_command_surface_is_testnet_only_and_has_no_confirmation_argument(self) -> None:
@@ -225,9 +250,10 @@ class ExecutorCliTests(unittest.TestCase):
         self.assertFalse(report["venue_write_attempted"])
         self.assertNotIn("0x111111", validated[1])
 
-        initialized = run_cli(["init", "--config", str(self.config)])
-        status = run_cli(["status", "--config", str(self.config)])
-        dry = run_cli(["dry-run", "--config", str(self.config)])
+        with self._ownership():
+            initialized = run_cli(["init", "--config", str(self.config)])
+            status = run_cli(["status", "--config", str(self.config)])
+            dry = run_cli(["dry-run", "--config", str(self.config)])
 
         self.assertEqual(0, initialized[0], initialized[2])
         self.assertEqual(0, status[0], status[2])
@@ -241,7 +267,8 @@ class ExecutorCliTests(unittest.TestCase):
         self.assertFalse(dry_report["entry_blocked_by_shared_learning"])
 
     def test_status_surfaces_recovery_capable_shared_learning_degradation(self) -> None:
-        initialized = run_cli(["init", "--config", str(self.config)])
+        with self._ownership():
+            initialized = run_cli(["init", "--config", str(self.config)])
         self.assertEqual(0, initialized[0], initialized[2])
         config = load_executor_config(self.config, environ={})
         with closing(
@@ -249,8 +276,9 @@ class ExecutorCliTests(unittest.TestCase):
         ) as connection, connection:
             connection.execute("DROP TRIGGER learning_ledger_no_delete")
 
-        status = run_cli(["status", "--config", str(self.config)])
-        dry = run_cli(["dry-run", "--config", str(self.config)])
+        with self._ownership():
+            status = run_cli(["status", "--config", str(self.config)])
+            dry = run_cli(["dry-run", "--config", str(self.config)])
 
         self.assertEqual(0, status[0], status[2])
         self.assertEqual(0, dry[0], dry[2])
@@ -274,6 +302,7 @@ class ExecutorCliTests(unittest.TestCase):
         stdout = StringIO()
         stderr = StringIO()
         with (
+            self._ownership(euid=452, default_uid=452),
             patch(
                 "trading_harness.executor_cli._secret_provider",
                 return_value=FakeSecretProvider(),
@@ -305,6 +334,7 @@ class ExecutorCliTests(unittest.TestCase):
         original = output.read_bytes()
 
         with (
+            self._ownership(euid=452, default_uid=452),
             patch(
                 "trading_harness.executor_cli._secret_provider",
                 return_value=FakeSecretProvider(),
@@ -327,6 +357,7 @@ class ExecutorCliTests(unittest.TestCase):
     def test_wrong_grant_prompt_fails_before_keychain_or_file_write(self) -> None:
         output = self.root / "must-not-exist.json"
         with (
+            self._ownership(euid=452, default_uid=452),
             patch(
                 "trading_harness.executor_cli._secret_provider",
                 side_effect=AssertionError("must not load Keychain"),
@@ -348,7 +379,8 @@ class ExecutorCliTests(unittest.TestCase):
 
     def test_attended_halt_acknowledgement_keeps_gate_halted(self) -> None:
         config = load_executor_config(self.config, environ={})
-        state = initialize_testnet_executor_state(config, clock=lambda: AT)
+        with self._ownership():
+            state = initialize_testnet_executor_state(config, clock=lambda: AT)
         state.runtime_store.acquire(instance_id="failed-worker", lease_seconds=2)
         halted = state.runtime_store.engage_manual_halt(
             reason=ManualHaltReason.INTERNAL_ERROR
@@ -360,6 +392,7 @@ class ExecutorCliTests(unittest.TestCase):
         output = StringIO()
         error = StringIO()
         with (
+            self._ownership(euid=452),
             patch(
                 "trading_harness.executor_cli.open_testnet_executor_state",
                 side_effect=AssertionError(
@@ -377,7 +410,8 @@ class ExecutorCliTests(unittest.TestCase):
             )
 
         self.assertEqual(0, result, error.getvalue())
-        updated = open_testnet_executor_state(config).runtime_store.read()
+        with self._ownership():
+            updated = open_testnet_executor_state(config).runtime_store.read()
         self.assertFalse(updated.manual_halt)
         self.assertEqual("halted", updated.effective_risk_gate.value)
 

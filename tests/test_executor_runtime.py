@@ -66,13 +66,13 @@ def config_text(root: Path) -> str:
         directory = root / name
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         directory.chmod(0o700)
-    return f'''schema_version = 2
+    return f'''schema_version = 3
 environment = "testnet"
 venue = "hyperliquid"
 node_id = "runtime-node"
-executor_uid = {os.geteuid()}
-research_uid = {os.geteuid() + 1}
-control_uid = {os.geteuid() + 2}
+executor_uid = 451
+research_uid = 450
+control_uid = 452
 account_id = "runtime-account"
 main_account_address = "0x1111111111111111111111111111111111111111"
 api_wallet_address = "0x2222222222222222222222222222222222222222"
@@ -89,27 +89,31 @@ poll_interval_ms = 1000
 reconcile_interval_ms = 5000
 
 [credential]
-provider = "macos_keychain_generic_password"
-service = "runtime-keychain-service"
-account = "runtime-keychain-account"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-signer"
+account = "hyperliquid-api-wallet"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [approval_credential]
-provider = "macos_keychain_generic_password"
-service = "runtime-approval-service"
-account = "runtime-approval-account"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-approval"
+account = "approval-hmac"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [recovery_credential]
-provider = "macos_keychain_generic_password"
-service = "runtime-recovery-service"
-account = "runtime-recovery-account"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-recovery"
+account = "recovery-hmac"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [grant_credential]
-provider = "macos_keychain_generic_password"
-service = "runtime-grant-service"
-account = "runtime-grant-account"
+provider = "macos_system_keychain_role_helper_v1"
+service = "com.jawndiego.trading-desk.testnet-grant"
+account = "grant-hmac"
+keychain_path = "/Library/Keychains/System.keychain"
 timeout_seconds = 5
 
 [paths]
