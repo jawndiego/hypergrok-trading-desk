@@ -1,9 +1,10 @@
 # TESTNET commissioning and first-write gap register
 
-Status: **offline engine, schema-v11 qualification core, machine plans and
-guest/VM renderers implemented; signer/sender/CLI integration, machine apply,
-network and live qualification incomplete; first harness order write remains
-blocked**.
+Status: **offline engine, schema-v11 qualification core/result coordinator,
+credential-free signer-envelope/injected recovery-verifier contract, machine
+plans and guest/VM renderers implemented; pinned production verifier, SDK
+signer/sender/CLI integration, machine apply, network and live qualification
+incomplete; first harness order write remains blocked**.
 
 This document records the remaining work from a reviewed source commit to the
 first responsible harness-originated Hyperliquid TESTNET order. It is not
@@ -27,7 +28,10 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   renderer exist; operator public-key provenance is still required.
 - A separate TESTNET-only qualification core durably represents the retained
   account/agent snapshot, fixed GTC canary, bound cancel and full-residual
-  attended close. It has no signer, sender, credential or CLI capability.
+  attended close. Its credential-free envelope/injected recovery-verifier
+  contract and offline one-shot/result/query/terminal/crash transitions exist,
+  but no reviewed pinned verifier is wired, submission authority remains
+  compiled off and it has no SDK signer, sender, credential or CLI.
 - Credential-free final-path APFS/ACL/install and storage-guard artifacts exist
   under `deploy/macos/testnet`; none has been applied.
 - A pinned Lima/VZ VM plan exists under `deploy/ubuntu-router/lima`; its apply
@@ -96,9 +100,9 @@ following are code gaps, not operator commands waiting to be discovered:
 
 | Required qualification behavior | Current gap |
 | --- | --- |
-| Far non-marketable GTC canary, exact query and cancel | Typed semantics, reservation and schema-v11 store exist; dedicated signer envelope, sender, result transitions and direct-terminal CLI are absent |
+| Far non-marketable GTC canary, exact query and cancel | Typed envelope plus durable response/crash-unknown, action-bound paired-query and cancel transitions exist offline; pinned production signature recovery, SDK signing, one-shot HTTP sender, submission-authority promotion and direct-terminal CLI are absent |
 | Retained pre-write account/metadata/order snapshot | Exact retained evidence and tamper checks exist; live `userRole` reader and attended artifact export are absent |
-| Ordinary attended reduce-only close, including an unexpected GTC-canary fill | Full-residual canary-close semantics/store exist; signer/sender/CLI and terminal-flat reservation release are absent; general bracket-parent close is intentionally unsupported |
+| Ordinary attended reduce-only close, including an unexpected GTC-canary fill | Full-residual envelope/result/query and terminal-flat source-reservation release exist offline; SDK signer/sender/submission promotion and CLI are absent; general bracket-parent close is intentionally unsupported |
 | WebSocket disconnect/fill/recovery exercise | No WebSocket client or monitor is implemented; current runtime is REST polling |
 | Forward request but drop the real response | No bounded qualification fault injection exists |
 | Router health as an admission capability | No application router-health field or pre-admission guard exists |

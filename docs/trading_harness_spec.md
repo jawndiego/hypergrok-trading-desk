@@ -301,10 +301,18 @@ commands, per-phase signing/submission authority, query evidence and atomic
 notional/loss reservation. Qualification commands serialize against normal
 entry and incident recovery and MUST keep any sending/unknown attempt reserved.
 They MUST NOT be represented as a three-leg bracket or a fabricated recovery
-incident. This durable core grants no venue capability: a later dedicated
-signer envelope, one-shot sender, result-transition coordinator and
-direct-`/dev/tty` executor CLI must independently revalidate the exact action
-before the first live canary. No qualification action may become an MCP tool.
+incident. The dedicated credential-free signer-envelope contract requires an
+injected exact signature-recovery verifier and rechecks TESTNET
+account/API-wallet/action/nonce/wire bindings before persistence. The
+schema-v11 coordinator durably records one-shot response/unknown results,
+point-of-no-return crash unknowns, paired CLOID/OID queries, the bound cancel,
+attended full-residual close and causally ordered terminal-flat reservation
+release. These offline paths grant no venue capability: no reviewed pinned
+production verifier is wired, qualification submission authority remains
+compiled off, and a later SDK 0.24.0 golden-tested verifier/signing adapter,
+one-shot sender and direct-`/dev/tty` executor CLI must be reviewed before the
+first live canary. No verifier may be selected by caller, config or MCP, and no
+qualification action may become an MCP tool.
 
 ## 3. Why HyperGrok Is Unsafe for Mainnet As-Is
 

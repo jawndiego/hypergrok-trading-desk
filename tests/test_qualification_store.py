@@ -17,6 +17,12 @@ from trading_harness.qualification_store import (
     QualificationStore,
     build_qualification_signed_evidence,
 )
+from trading_harness.qualification_signer import (
+    QualificationSignature,
+    QualificationSignerPolicy,
+    QualificationSigningAccount,
+    freeze_signed_qualification_envelope,
+)
 from trading_harness import qualification_store as qualification_store_module
 from trading_harness.testnet_qualification import (
     QUALIFICATION_WORKFLOW_HASH_DOMAIN,
@@ -32,6 +38,7 @@ from tests.test_testnet_qualification import (
     NOW,
     MAIN_ACCOUNT,
     OTHER_ACCOUNT,
+    API_WALLET,
     account_snapshot,
     attempt,
     at,
@@ -50,6 +57,33 @@ class QualificationStoreTests(ExecutionStoreTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.qualification = QualificationStore(self.store)
+
+    def test_legacy_signed_evidence_v1_hash_contract_is_unchanged(self) -> None:
+        legacy = build_qualification_signed_evidence(
+            command_id="legacy-command",
+            phase=QualificationAttemptPhase.PLACE,
+            action_hash=digest("legacy-action"),
+            signing_authority_hash=digest("legacy-authority"),
+            nonce=1,
+            wire_hash=digest("legacy-wire"),
+            signature_hash=digest("legacy-signature"),
+            envelope_hash=digest("legacy-envelope"),
+            signer_binding_hash=digest("legacy-binding"),
+            expires_after_ms=2,
+            signed_at_ms=1,
+        )
+        self.assertEqual(
+            legacy.material()["schema_version"],
+            "testnet_qualification_signed_evidence.v1",
+        )
+        self.assertNotIn("verified_signer_address", legacy.material())
+        self.assertEqual(
+            legacy.evidence_hash,
+            domain_hash(
+                "trading-harness/qualification-signed-evidence/v1",
+                legacy.material(),
+            ),
+        )
 
     def admission_fixture(self, *, command_id: str = "qualification-command-1"):
         evidence = retained()
@@ -86,19 +120,32 @@ class QualificationStoreTests(ExecutionStoreTestCase):
         return evidence, intent, permit, workflow, command
 
     def signed_fixture(self, command, intent, authority_record, *, signed_ms: int = 1_200):
-        return build_qualification_signed_evidence(
-            command_id=command.command_id,
-            phase=QualificationAttemptPhase.PLACE,
-            action_hash=intent.primary_action.action_hash,
-            signing_authority_hash=authority_record.authority_hash,
+        policy = QualificationSignerPolicy(
+            accounts=(
+                QualificationSigningAccount(
+                    account_id=self.store.account_id,
+                    main_account_address=MAIN_ACCOUNT,
+                    api_wallet_address=API_WALLET,
+                ),
+            ),
+            allowed_asset_ids=frozenset({0}),
+        )
+        verifier = lambda request: (
+            request.verify_integrity() or API_WALLET
+        )
+        envelope = freeze_signed_qualification_envelope(
+            intent,
+            intent.primary_action,
+            authority_record,
+            policy,
             nonce=int(at(signed_ms).timestamp() * 1_000),
-            wire_hash=digest("wire"),
-            signature_hash=digest("signature"),
-            envelope_hash=digest("envelope"),
-            signer_binding_hash=digest("signer-binding"),
             expires_after_ms=int(at(5_000).timestamp() * 1_000),
             signed_at_ms=int(at(signed_ms).timestamp() * 1_000),
+            signature=QualificationSignature(r="0x1", s="0x2", v=27),
+            signing_implementation="offline-fixture-v1",
+            signature_verifier=verifier,
         )
+        return envelope, envelope.execution_store_evidence(), policy, verifier
 
     def test_schema_v11_admission_atomically_consumes_and_reserves(self) -> None:
         _, intent, permit, workflow, command = self.admission_fixture()
@@ -275,7 +322,7 @@ class QualificationStoreTests(ExecutionStoreTestCase):
             "claimed",
         )
 
-    def test_digest_only_evidence_never_yields_submission_authority(self) -> None:
+    def test_only_reverified_envelope_can_prepare_and_submission_stays_disabled(self) -> None:
         _, intent, _, _, command = self.admission_fixture()
         claim = self.qualification.claim(
             command.command_id,
@@ -299,11 +346,20 @@ class QualificationStoreTests(ExecutionStoreTestCase):
                 at=at(1_100),
             )
 
-        signed = self.signed_fixture(command, intent, signing)
-        self.qualification.prepare_attempt(
+        envelope, signed, policy, verifier = self.signed_fixture(
+            command, intent, signing
+        )
+        self.assertFalse(hasattr(self.qualification, "prepare_attempt"))
+        self.assertEqual(signed.verified_signer_address, API_WALLET)
+        self.qualification.prepare_envelope_attempt(
             command.command_id,
             attempt_id="qualification-attempt-1",
-            signed=signed,
+            intent=intent,
+            action=intent.primary_action,
+            authority=signing,
+            policy=policy,
+            signed=envelope,
+            signature_verifier=verifier,
             worker_id="qualification-worker",
             fencing_token=claim.fencing_token,
             at=at(1_300),
@@ -452,11 +508,18 @@ class QualificationStoreTests(ExecutionStoreTestCase):
             fencing_token=claim.fencing_token,
             at=at(200),
         )
-        signed = self.signed_fixture(command, intent, signing, signed_ms=300)
-        self.qualification.prepare_attempt(
+        envelope, signed, policy, verifier = self.signed_fixture(
+            command, intent, signing, signed_ms=300
+        )
+        self.qualification.prepare_envelope_attempt(
             command.command_id,
             attempt_id="qualification-attempt-1",
-            signed=signed,
+            intent=intent,
+            action=intent.primary_action,
+            authority=signing,
+            policy=policy,
+            signed=envelope,
+            signature_verifier=verifier,
             worker_id="qualification-worker",
             fencing_token=claim.fencing_token,
             at=at(400),
@@ -570,7 +633,10 @@ class QualificationStoreTests(ExecutionStoreTestCase):
             query_kind="terminal",
             evidence=terminal_query,
             observed_at=at(1_000),
-            account_snapshot=retained(retained_at=at(1_000)),
+            account_snapshot=retained(
+                server_time_ms=int(at(1_000).timestamp() * 1_000),
+                retained_at=at(1_000),
+            ),
         )
 
         # A fresh database proves the point-of-no-return branch independently.
@@ -591,11 +657,18 @@ class QualificationStoreTests(ExecutionStoreTestCase):
             fencing_token=claim.fencing_token,
             at=at(200),
         )
-        signed = self.signed_fixture(command, intent, signing, signed_ms=300)
-        self.qualification.prepare_attempt(
+        envelope, signed, policy, verifier = self.signed_fixture(
+            command, intent, signing, signed_ms=300
+        )
+        self.qualification.prepare_envelope_attempt(
             command.command_id,
             attempt_id="qualification-attempt-1",
-            signed=signed,
+            intent=intent,
+            action=intent.primary_action,
+            authority=signing,
+            policy=policy,
+            signed=envelope,
+            signature_verifier=verifier,
             worker_id="qualification-worker",
             fencing_token=claim.fencing_token,
             at=at(400),

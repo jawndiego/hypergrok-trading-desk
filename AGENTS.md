@@ -54,10 +54,13 @@ This repository builds an agent-runtime-neutral trading research and execution h
 - Read `docs/testnet_commissioning.md` before claiming transaction readiness.
   Machine setup alone is insufficient. The qualification GTC/query/cancel,
   retained snapshot and ordinary-close semantics now have a separate
-  TESTNET-only schema-v11 persistence lane, but SDK signing, HTTP submission,
-  direct-terminal CLI, transport-result transitions, terminal reservation
-  release, WebSocket recovery and bounded response-loss injection remain
-  deliberately disabled.
+  TESTNET-only schema-v11 persistence lane. Its credential-free signer-envelope
+  and injected signature-recovery interfaces plus offline
+  transport/query/terminal/crash transitions exist, including terminal-flat
+  reservation release. No reviewed pinned production signature verifier, SDK
+  signer, HTTP sender or direct-terminal CLI exists; WebSocket recovery and
+  bounded live response-loss injection also remain disabled. Qualification
+  submission authority is still compiled off.
 - Credential-free macOS plans live under `deploy/macos/testnet`. They are
   plan-only by default and do not authorize APFS creation, ACL mutation,
   application installation, `init`, launchd, credentials or venue calls.

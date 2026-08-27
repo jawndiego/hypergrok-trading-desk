@@ -342,6 +342,35 @@ def status_response(
     }
 
 
+def rebound_status_symbol(evidence, symbol: str):
+    identity_hash = qualification.domain_hash(
+        "trading-harness/testnet-qualification-order-identity/v1",
+        {
+            "cloid": evidence.cloid,
+            "oid": evidence.oid,
+            "symbol": symbol,
+            "is_buy": evidence.is_buy,
+            "original_size": canonical(evidence.original_size),
+            "limit_price": canonical(evidence.limit_price),
+            "reduce_only": evidence.reduce_only,
+            "time_in_force": evidence.time_in_force,
+        },
+    )
+    provisional = replace(
+        evidence,
+        symbol=symbol,
+        order_identity_hash=identity_hash,
+        evidence_hash="0" * 64,
+    )
+    return replace(
+        provisional,
+        evidence_hash=qualification.domain_hash(
+            qualification.QUALIFICATION_ORDER_STATUS_HASH_DOMAIN,
+            provisional.material(),
+        ),
+    )
+
+
 def canonical(value: Decimal) -> str:
     text = format(value, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
@@ -526,7 +555,7 @@ class AuthorityAndWorkflowTests(unittest.TestCase):
             status_response(
                 intent.primary_action,
                 status="canceled",
-                remaining="0",
+                remaining=canonical(intent.primary_action.quantity),
                 status_at=at(1_500),
             ),
             intent.primary_action,
@@ -534,12 +563,38 @@ class AuthorityAndWorkflowTests(unittest.TestCase):
             at=at(1_500),
         )
         terminal_snapshot = retained(
-            server_time_ms=SERVER_TIME_MS + 1_500,
+            server_time_ms=int(at(1_500).timestamp() * 1_000),
             retained_at=at(1_500),
+        )
+        partial_terminal = parse_qualification_order_status(
+            status_response(
+                intent.primary_action,
+                status="canceled",
+                remaining="0.001",
+                status_at=at(1_500),
+            ),
+            intent.primary_action,
+            requested_identifier=intent.primary_action.cloid,
+            at=at(1_500),
+        )
+        self.assertTrue(partial_terminal.filled)
+        partial_result = reconcile_canary_terminal(
+            workflow,
+            partial_terminal,
+            retained(
+                positions=[position("0.0024")],
+                server_time_ms=int(at(1_500).timestamp() * 1_000),
+                retained_at=at(1_500),
+            ),
+            at=at(1_500),
+        )
+        self.assertIs(
+            partial_result.state,
+            QualificationWorkflowState.UNEXPECTED_FILL,
         )
         foreign_wallet_snapshot = retain_qualification_snapshot(
             account_snapshot(
-                server_time_ms=SERVER_TIME_MS + 1_500,
+                server_time_ms=int(at(1_500).timestamp() * 1_000),
                 received_at=at(1_500),
             ),
             api_wallet_address=OTHER_ACCOUNT,
@@ -586,6 +641,37 @@ class AuthorityAndWorkflowTests(unittest.TestCase):
         with self.assertRaises(StateConflict):
             record_canary_open_queries(
                 workflow, by_cloid, other_oid, at=at(300)
+            )
+
+    def test_self_rehashed_cross_symbol_query_pair_cannot_rebind_action(self) -> None:
+        intent = canary_intent()
+        selected, authorization = authorized(intent)
+        workflow = record_primary_attempt(
+            start_qualification_workflow(intent, authorization, selected, at=NOW),
+            attempt(
+                QualificationAttemptPhase.PLACE,
+                intent.primary_action.action_hash,
+                attempted_at=at(100),
+            ),
+        )
+        by_cloid = parse_qualification_order_status(
+            status_response(intent.primary_action, status_at=at(200)),
+            intent.primary_action,
+            requested_identifier=intent.primary_action.cloid,
+            at=at(200),
+        )
+        by_oid = parse_qualification_order_status(
+            status_response(intent.primary_action, status_at=at(300)),
+            intent.primary_action,
+            requested_identifier=123,
+            at=at(300),
+        )
+        with self.assertRaisesRegex(StateConflict, "typed action"):
+            record_canary_open_queries(
+                workflow,
+                rebound_status_symbol(by_cloid, "BTC"),
+                rebound_status_symbol(by_oid, "BTC"),
+                at=at(300),
             )
 
     def test_mutated_attempt_fails_even_when_workflow_is_rehashed(self) -> None:
@@ -672,12 +758,12 @@ class AttendedCloseTests(unittest.TestCase):
             at=at(500),
         )
         flat = retained(
-            server_time_ms=SERVER_TIME_MS + 500,
+            server_time_ms=int(at(500).timestamp() * 1_000),
             retained_at=at(500),
         )
         foreign_wallet_flat = retain_qualification_snapshot(
             account_snapshot(
-                server_time_ms=SERVER_TIME_MS + 500,
+                server_time_ms=int(at(500).timestamp() * 1_000),
                 received_at=at(500),
             ),
             api_wallet_address=OTHER_ACCOUNT,
@@ -738,7 +824,7 @@ class AttendedCloseTests(unittest.TestCase):
         )
         residual = retained(
             positions=[position("0.002")],
-            server_time_ms=SERVER_TIME_MS + 500,
+            server_time_ms=int(at(500).timestamp() * 1_000),
             retained_at=at(500),
         )
         result = reconcile_attended_close(

@@ -1695,8 +1695,6 @@ class QualificationOrderStatusEvidence:
         if self.status == "filled":
             return True
         return (
-            self.status == "open"
-            and
             self.original_size is not None
             and self.remaining_size is not None
             and self.remaining_size < self.original_size
@@ -1955,6 +1953,48 @@ def verify_cloid_oid_query_pair(
         or by_oid.status_timestamp_ms < by_cloid.status_timestamp_ms
     ):
         raise StateConflict("CLOID and OID order queries do not identify one order")
+
+
+def verify_qualification_order_status_binding(
+    evidence: QualificationOrderStatusEvidence,
+    action: QualificationOrderAction,
+) -> None:
+    """Independently bind self-hashed status evidence to one typed action."""
+
+    evidence.verify_integrity()
+    action.verify_integrity()
+    if evidence.missing:
+        raise StateConflict("qualification order evidence is not definitive")
+    if (
+        evidence.cloid != action.cloid
+        or evidence.symbol != action.symbol
+        or evidence.is_buy is not action.is_buy
+        or evidence.original_size != action.quantity
+        or evidence.limit_price != action.price_bound
+        or evidence.reduce_only is not action.reduce_only
+        or evidence.time_in_force != action.time_in_force
+        or evidence.oid is None
+        or (
+            evidence.requested_by == "oid"
+            and evidence.requested_identifier != evidence.oid
+        )
+    ):
+        raise StateConflict("qualification order evidence differs from typed action")
+    expected_identity = domain_hash(
+        "trading-harness/testnet-qualification-order-identity/v1",
+        {
+            "cloid": action.cloid,
+            "oid": evidence.oid,
+            "symbol": action.symbol,
+            "is_buy": action.is_buy,
+            "original_size": canonical_decimal(action.quantity),
+            "limit_price": canonical_decimal(action.price_bound),
+            "reduce_only": action.reduce_only,
+            "time_in_force": action.time_in_force,
+        },
+    )
+    if evidence.order_identity_hash != expected_identity:
+        raise StateConflict("qualification order identity differs from typed action")
 
 
 @dataclass(frozen=True, slots=True)
@@ -2356,7 +2396,21 @@ def record_canary_open_queries(
         or workflow.place_attempt is None
     ):
         raise StateConflict("canary is not awaiting its exact open-order queries")
+    verify_qualification_order_status_binding(
+        by_cloid, workflow.intent.primary_action
+    )
+    verify_qualification_order_status_binding(
+        by_oid, workflow.intent.primary_action
+    )
     verify_cloid_oid_query_pair(by_cloid, by_oid)
+    attempted_at_ms = _milliseconds(workflow.place_attempt.attempted_at)
+    if (
+        by_cloid.status_timestamp_ms is None
+        or by_oid.status_timestamp_ms is None
+        or by_cloid.status_timestamp_ms < attempted_at_ms
+        or by_oid.status_timestamp_ms < attempted_at_ms
+    ):
+        raise StateConflict("canary open query predates its place attempt")
     if by_cloid.filled or by_oid.filled:
         state = QualificationWorkflowState.UNEXPECTED_FILL
         reason = "CANARY_FILLED_BEFORE_CANCEL"
@@ -2470,12 +2524,22 @@ def reconcile_canary_terminal(
     ):
         raise StateConflict("canary is not awaiting terminal cancellation evidence")
     terminal_query.verify_integrity()
+    verify_qualification_order_status_binding(
+        terminal_query, workflow.intent.primary_action
+    )
     if terminal_query.cloid != workflow.intent.primary_action.cloid:
         raise StateConflict("terminal query targets another CLOID")
     if terminal_query.missing or not terminal_query.terminal:
         raise StateConflict("canary reconciliation requires terminal order evidence")
     retained.verify_integrity()
     account = _fresh_account(retained.account, at=_utc(at, "at"))
+    if (
+        terminal_query.status_timestamp_ms is None
+        or terminal_query.status_timestamp_ms
+        < _milliseconds(workflow.cancel_attempt.attempted_at)
+        or account.server_time_ms < terminal_query.status_timestamp_ms
+    ):
+        raise StateConflict("terminal canary snapshot predates venue order state")
     if (
         workflow.intent.account_id == ""
         or retained.account.main_account_address
@@ -2537,12 +2601,22 @@ def reconcile_attended_close(
     ):
         raise StateConflict("attended close is not awaiting reconciliation")
     terminal_query.verify_integrity()
+    verify_qualification_order_status_binding(
+        terminal_query, workflow.intent.primary_action
+    )
     if terminal_query.cloid != workflow.intent.primary_action.cloid:
         raise StateConflict("close query targets another CLOID")
     if terminal_query.missing or not terminal_query.terminal:
         raise StateConflict("close reconciliation requires terminal order evidence")
     retained.verify_integrity()
     account = _fresh_account(retained.account, at=_utc(at, "at"))
+    if (
+        terminal_query.status_timestamp_ms is None
+        or terminal_query.status_timestamp_ms
+        < _milliseconds(workflow.close_attempt.attempted_at)
+        or account.server_time_ms < terminal_query.status_timestamp_ms
+    ):
+        raise StateConflict("terminal close snapshot predates venue order state")
     if (
         workflow.intent.account_id == ""
         or retained.account.main_account_address
@@ -2616,5 +2690,6 @@ __all__ = (
     "retain_qualification_snapshot",
     "start_qualification_workflow",
     "verify_cloid_oid_query_pair",
+    "verify_qualification_order_status_binding",
     "verified_qualification_permit",
 )

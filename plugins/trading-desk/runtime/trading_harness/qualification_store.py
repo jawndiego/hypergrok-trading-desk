@@ -21,7 +21,7 @@ from decimal import Decimal
 import hashlib
 import json
 import re
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from .canonical import canonical_decimal, canonical_json, domain_hash
 from .domain import Environment
@@ -34,15 +34,19 @@ from .errors import (
     ValidationError,
 )
 from .execution_store import ExecutionStore
+from .hyperliquid_wire import HyperliquidNetwork
 from .policy import decimal_add, decimal_subtract, exact_decimal
 from .testnet_qualification import (
+    QUALIFICATION_WORKFLOW_HASH_DOMAIN,
     QualificationAction,
+    QualificationActionKind,
     QualificationAttemptEvidence,
     QualificationAttemptPhase,
     QualificationAuthorization,
     QualificationIntent,
     QualificationIntentKind,
     QualificationCancelAction,
+    QualificationCancelScope,
     QualificationOrderAction,
     QualificationOrderStatusEvidence,
     QualificationTransportOutcome,
@@ -56,6 +60,14 @@ from .testnet_qualification import (
     record_canary_open_queries,
     record_primary_attempt,
 )
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .qualification_signer import (
+        QualificationSignatureVerifier,
+        QualificationSignerPolicy,
+        SignedQualificationEnvelope,
+    )
+    from .qualification_transport import QualificationTransportResult
 
 
 _ZERO = Decimal("0")
@@ -78,10 +90,10 @@ _STEP_STATES = frozenset(
     }
 )
 
-# Schema and offline evidence preparation are implemented, but no reviewed
-# signer envelope or transport consumer exists.  This constant is deliberately
-# not configurable: environment variables, CLI arguments, or caller-provided
-# objects cannot enable a half-built post-send workflow.
+# Schema, an offline envelope/verifier contract, and result transitions exist,
+# but no pinned production verifier, signer, or transport consumer exists.
+# This constant is deliberately not configurable: environment variables, CLI
+# arguments, or caller-provided objects cannot enable a half-built live path.
 QUALIFICATION_SUBMISSION_ENABLED = False
 
 
@@ -314,6 +326,35 @@ class QualificationSigningAuthority:
     lease_expires_at: datetime
     authority_hash: str
 
+    def verify_integrity(self) -> None:
+        _identifier(self.command_id, "command_id")
+        if not isinstance(self.phase, QualificationAttemptPhase):
+            raise TypeError("phase must be QualificationAttemptPhase")
+        _hash(self.action_hash, "action_hash")
+        _identifier(self.worker_id, "worker_id")
+        if type(self.fencing_token) is not int or self.fencing_token <= 0:
+            raise ValidationError("signing authority fencing token is invalid")
+        issued = _utc(self.issued_at, "issued_at")
+        expires = _utc(self.lease_expires_at, "lease_expires_at")
+        if not issued < expires:
+            raise ValidationError("signing authority lease is invalid")
+        material = {
+            "schema_version": "testnet_qualification_signing_authority.v1",
+            "command_id": self.command_id,
+            "phase": self.phase.value,
+            "action_hash": self.action_hash,
+            "worker_id": self.worker_id,
+            "fencing_token": self.fencing_token,
+            "issued_at": issued,
+            "lease_expires_at": expires,
+            "environment": "testnet",
+        }
+        if domain_hash(
+            "trading-harness/qualification-signing-authority/v1",
+            material,
+        ) != self.authority_hash:
+            raise ValidationError("signing authority hash differs")
+
 
 @dataclass(frozen=True, slots=True)
 class QualificationSignedEvidence:
@@ -326,12 +367,16 @@ class QualificationSignedEvidence:
     signature_hash: str
     envelope_hash: str
     signer_binding_hash: str
+    verified_signer_address: str | None
+    signature_verifier_implementation: str | None
+    signature_verification_hash: str | None
+    signing_implementation: str | None
     expires_after_ms: int
     signed_at_ms: int
     evidence_hash: str
 
     def material(self) -> dict[str, object]:
-        return {
+        material: dict[str, object] = {
             "schema_version": "testnet_qualification_signed_evidence.v1",
             "command_id": self.command_id,
             "phase": self.phase.value,
@@ -346,6 +391,17 @@ class QualificationSignedEvidence:
             "signed_at_ms": self.signed_at_ms,
             "environment": "testnet",
         }
+        if self.verified_signer_address is not None:
+            material.update(
+                {
+                    "schema_version": "testnet_qualification_signed_evidence.v2",
+                    "verified_signer_address": self.verified_signer_address,
+                    "signature_verifier_implementation": self.signature_verifier_implementation,
+                    "signature_verification_hash": self.signature_verification_hash,
+                    "signing_implementation": self.signing_implementation,
+                }
+            )
+        return material
 
     def verify_integrity(self) -> None:
         _identifier(self.command_id, "command_id")
@@ -361,16 +417,41 @@ class QualificationSignedEvidence:
             "evidence_hash",
         ):
             _hash(getattr(self, field), field)
+        verification_fields = (
+            self.verified_signer_address,
+            self.signature_verifier_implementation,
+            self.signature_verification_hash,
+            self.signing_implementation,
+        )
+        if any(value is None for value in verification_fields):
+            if any(value is not None for value in verification_fields):
+                raise ValidationError("qualification signature verification is partial")
+        else:
+            if not isinstance(self.verified_signer_address, str) or not re.fullmatch(
+                r"0x[0-9a-f]{40}", self.verified_signer_address
+            ):
+                raise ValidationError("verified_signer_address is invalid")
+            _identifier(
+                self.signature_verifier_implementation,
+                "signature_verifier_implementation",
+            )
+            _hash(
+                self.signature_verification_hash,
+                "signature_verification_hash",
+            )
+            _identifier(self.signing_implementation, "signing_implementation")
         for field in ("nonce", "expires_after_ms", "signed_at_ms"):
             value = getattr(self, field)
             if type(value) is not int or value < 0:
                 raise ValidationError(f"{field} must be non-negative")
         if self.signed_at_ms >= self.expires_after_ms:
             raise ValidationError("qualification signature is already expired")
-        if domain_hash(
-            "trading-harness/qualification-signed-evidence/v1",
-            self.material(),
-        ) != self.evidence_hash:
+        hash_domain = (
+            "trading-harness/qualification-signed-evidence/v1"
+            if self.verified_signer_address is None
+            else "trading-harness/qualification-signed-evidence/v2"
+        )
+        if domain_hash(hash_domain, self.material()) != self.evidence_hash:
             raise ValidationError("qualification signed evidence hash differs")
 
 
@@ -404,6 +485,10 @@ def build_qualification_signed_evidence(
     signer_binding_hash: str,
     expires_after_ms: int,
     signed_at_ms: int,
+    verified_signer_address: str | None = None,
+    signature_verifier_implementation: str | None = None,
+    signature_verification_hash: str | None = None,
+    signing_implementation: str | None = None,
 ) -> QualificationSignedEvidence:
     provisional = QualificationSignedEvidence(
         command_id=command_id,
@@ -415,6 +500,10 @@ def build_qualification_signed_evidence(
         signature_hash=signature_hash,
         envelope_hash=envelope_hash,
         signer_binding_hash=signer_binding_hash,
+        verified_signer_address=verified_signer_address,
+        signature_verifier_implementation=signature_verifier_implementation,
+        signature_verification_hash=signature_verification_hash,
+        signing_implementation=signing_implementation,
         expires_after_ms=expires_after_ms,
         signed_at_ms=signed_at_ms,
         evidence_hash="0" * 64,
@@ -422,7 +511,11 @@ def build_qualification_signed_evidence(
     result = replace(
         provisional,
         evidence_hash=domain_hash(
-            "trading-harness/qualification-signed-evidence/v1",
+            (
+                "trading-harness/qualification-signed-evidence/v1"
+                if verified_signer_address is None
+                else "trading-harness/qualification-signed-evidence/v2"
+            ),
             provisional.material(),
         ),
     )
@@ -441,6 +534,7 @@ class QualificationSubmissionAuthority:
     wire_hash: str
     worker_id: str
     fencing_token: int
+    issued_at: datetime
     lease_expires_at: datetime
     authority_hash: str
 
@@ -924,6 +1018,14 @@ class QualificationStore:
             signature_hash=str(row["signature_hash"]),
             envelope_hash=str(row["envelope_hash"]),
             signer_binding_hash=str(row["signer_binding_hash"]),
+            verified_signer_address=payload.get("verified_signer_address"),
+            signature_verifier_implementation=payload.get(
+                "signature_verifier_implementation"
+            ),
+            signature_verification_hash=payload.get(
+                "signature_verification_hash"
+            ),
+            signing_implementation=payload.get("signing_implementation"),
             expires_after_ms=int(row["expires_after_ms"]),
             signed_at_ms=int(row["signed_at_ms"]),
             evidence_hash=str(row["evidence_hash"]),
@@ -1004,6 +1106,92 @@ class QualificationStore:
         if _record_hash("attempt", material) != row["record_hash"]:
             raise StorageError("qualification attempt record hash differs")
         return record
+
+    @classmethod
+    def _submission_authority_from_row(
+        cls,
+        row: Mapping[str, object],
+        attempt: QualificationAttemptRecord,
+    ) -> QualificationSubmissionAuthority:
+        payload = _decode(
+            row["payload_json"],
+            row["content_hash"],
+            field="qualification submission authority",
+        )
+        if not isinstance(payload, dict):
+            raise StorageError("qualification submission authority is not an object")
+        expected = {
+            "schema_version": "testnet_qualification_submission_authority.v1",
+            "command_id": attempt.command_id,
+            "phase": attempt.phase.value,
+            "attempt_id": attempt.attempt_id,
+            "signed_evidence_hash": attempt.signed_evidence_hash,
+            "nonce": attempt.nonce,
+            "action_hash": attempt.action_hash,
+            "wire_hash": attempt.wire_hash,
+            "worker_id": attempt.worker_id,
+            "fencing_token": attempt.fencing_token,
+            "issued_at": str(row["issued_at"]),
+            "lease_expires_at": str(row["lease_expires_at"]),
+            "environment": "testnet",
+        }
+        if payload != expected:
+            raise StorageError("qualification submission authority fields differ")
+        authority_hash = domain_hash(
+            "trading-harness/qualification-submission-authority/v1",
+            payload,
+        )
+        if (
+            row["command_id"] != attempt.command_id
+            or row["phase"] != attempt.phase.value
+            or row["attempt_id"] != attempt.attempt_id
+            or row["signed_evidence_hash"] != attempt.signed_evidence_hash
+            or row["worker_id"] != attempt.worker_id
+            or int(row["fencing_token"]) != attempt.fencing_token
+            or row["authority_hash"] != authority_hash
+            or _record_hash(
+                "submission-authority",
+                {**payload, "content_hash": row["content_hash"]},
+            )
+            != row["record_hash"]
+        ):
+            raise StorageError("qualification submission authority identity differs")
+        issued_at = _parse_time(row["issued_at"], "issued_at")
+        lease_expires_at = _parse_time(
+            row["lease_expires_at"], "lease_expires_at"
+        )
+        if not issued_at < lease_expires_at:
+            raise StorageError("qualification submission authority expiry is invalid")
+        return QualificationSubmissionAuthority(
+            command_id=attempt.command_id,
+            phase=attempt.phase,
+            attempt_id=attempt.attempt_id,
+            signed_evidence_hash=attempt.signed_evidence_hash,
+            nonce=attempt.nonce,
+            action_hash=attempt.action_hash,
+            wire_hash=attempt.wire_hash,
+            worker_id=attempt.worker_id,
+            fencing_token=attempt.fencing_token,
+            issued_at=issued_at,
+            lease_expires_at=lease_expires_at,
+            authority_hash=authority_hash,
+        )
+
+    @staticmethod
+    def _require_exact_workflow(
+        command: QualificationCommandRecord,
+        workflow: QualificationWorkflow,
+    ) -> None:
+        if type(workflow) is not QualificationWorkflow:
+            raise TypeError("workflow must be exact QualificationWorkflow")
+        workflow.verify_integrity()
+        if (
+            workflow.intent.intent_hash != command.intent_hash
+            or workflow.authorization_hash != command.authorization_hash
+            or workflow.workflow_hash != command.workflow_hash
+            or canonical_json(workflow.as_dict()) != command.workflow_json
+        ):
+            raise StateConflict("qualification workflow differs from durable state")
 
     def admit(
         self,
@@ -1345,6 +1533,238 @@ class QualificationStore:
         if row is None:
             raise RecordNotFound("qualification command is not persisted")
         return self._command_from_row(row)
+
+    @staticmethod
+    def _intent_from_payload(payload: object) -> QualificationIntent:
+        if not isinstance(payload, dict):
+            raise StorageError("persisted qualification intent is not an object")
+        primary_payload = payload.get("primary_action")
+        if not isinstance(primary_payload, dict) or not isinstance(
+            primary_payload.get("action"), dict
+        ):
+            raise StorageError("persisted qualification primary action is invalid")
+        try:
+            primary = QualificationOrderAction(
+                kind=QualificationActionKind(primary_payload["kind"]),
+                network=HyperliquidNetwork(primary_payload["network"]),
+                account_id=primary_payload["account_id"],
+                main_account_address=primary_payload["main_account_address"],
+                source_snapshot_hash=primary_payload["source_snapshot_hash"],
+                market_snapshot_hash=primary_payload["market_snapshot_hash"],
+                symbol=primary_payload["symbol"],
+                asset_id=primary_payload["asset_id"],
+                sz_decimals=primary_payload["sz_decimals"],
+                is_buy=primary_payload["is_buy"],
+                quantity=_decimal(primary_payload["quantity"], "quantity"),
+                price_bound=_decimal(
+                    primary_payload["price_bound"], "price_bound"
+                ),
+                source_signed_position=(
+                    None
+                    if primary_payload["source_signed_position"] is None
+                    else _decimal(
+                        primary_payload["source_signed_position"],
+                        "source_signed_position",
+                    )
+                ),
+                reduce_only=primary_payload["reduce_only"],
+                time_in_force=primary_payload["time_in_force"],
+                cloid=primary_payload["cloid"],
+                expires_at_ms=primary_payload["expires_at_ms"],
+                action=dict(primary_payload["action"]),
+                action_hash=primary_payload["action_hash"],
+            )
+            scope_payload = payload.get("cancel_scope")
+            scope = None
+            if scope_payload is not None:
+                if not isinstance(scope_payload, dict):
+                    raise StorageError("persisted qualification cancel scope is invalid")
+                scope = QualificationCancelScope(
+                    account_id=scope_payload["account_id"],
+                    main_account_address=scope_payload["main_account_address"],
+                    symbol=scope_payload["symbol"],
+                    asset_id=scope_payload["asset_id"],
+                    cloid=scope_payload["cloid"],
+                    source_action_hash=scope_payload["source_action_hash"],
+                    scope_hash=scope_payload["scope_hash"],
+                )
+            intent = QualificationIntent(
+                qualification_id=payload["qualification_id"],
+                kind=QualificationIntentKind(payload["kind"]),
+                account_id=payload["account_id"],
+                main_account_address=payload["main_account_address"],
+                api_wallet_address=payload["api_wallet_address"],
+                source_snapshot_hash=payload["source_snapshot_hash"],
+                primary_action=primary,
+                cancel_scope=scope,
+                reserved_loss=_decimal(payload["reserved_loss"], "reserved_loss"),
+                reserved_notional=_decimal(
+                    payload["reserved_notional"], "reserved_notional"
+                ),
+                created_at=_parse_time(payload["created_at"], "created_at"),
+                expires_at=_parse_time(payload["expires_at"], "expires_at"),
+                intent_hash=payload["intent_hash"],
+            )
+            intent.verify_integrity()
+        except (KeyError, TypeError, ValueError, ValidationError, StateConflict) as error:
+            raise StorageError("persisted qualification intent is invalid") from error
+        if canonical_json(intent.as_dict()) != canonical_json(payload):
+            raise StorageError("persisted qualification intent fields differ")
+        return intent
+
+    @staticmethod
+    def _attempt_evidence_from_payload(payload: object):
+        if payload is None:
+            return None
+        if not isinstance(payload, dict):
+            raise StorageError("persisted qualification attempt is not an object")
+        try:
+            evidence = QualificationAttemptEvidence(
+                phase=QualificationAttemptPhase(payload["phase"]),
+                action_hash=payload["action_hash"],
+                nonce=payload["nonce"],
+                wire_hash=payload["wire_hash"],
+                signed_evidence_hash=payload["signed_evidence_hash"],
+                transport_evidence_hash=payload["transport_evidence_hash"],
+                outcome=QualificationTransportOutcome(payload["outcome"]),
+                attempted_at=_parse_time(payload["attempted_at"], "attempted_at"),
+                response_hash=payload["response_hash"],
+                send_count=payload["send_count"],
+                retry_performed=payload["retry_performed"],
+            )
+        except (KeyError, TypeError, ValueError, ValidationError, StateConflict) as error:
+            raise StorageError("persisted qualification attempt is invalid") from error
+        if canonical_json(evidence.as_dict()) != canonical_json(payload):
+            raise StorageError("persisted qualification attempt fields differ")
+        return evidence
+
+    @staticmethod
+    def _order_status_from_payload(payload: object):
+        if payload is None:
+            return None
+        if not isinstance(payload, dict):
+            raise StorageError("persisted qualification order status is not an object")
+
+        def decimal_or_none(field: str):
+            return (
+                None
+                if payload.get(field) is None
+                else _decimal(payload[field], field)
+            )
+
+        try:
+            evidence = QualificationOrderStatusEvidence(
+                requested_identifier=payload["requested_identifier"],
+                requested_by=payload["requested_by"],
+                cloid=payload["cloid"],
+                status=payload["status"],
+                status_timestamp_ms=payload["status_timestamp_ms"],
+                oid=payload["oid"],
+                symbol=payload["symbol"],
+                is_buy=payload["is_buy"],
+                remaining_size=decimal_or_none("remaining_size"),
+                original_size=decimal_or_none("original_size"),
+                limit_price=decimal_or_none("limit_price"),
+                reduce_only=payload["reduce_only"],
+                time_in_force=payload["time_in_force"],
+                order_identity_hash=payload["order_identity_hash"],
+                evidence_hash=payload["evidence_hash"],
+            )
+            evidence.verify_integrity()
+        except (KeyError, TypeError, ValueError, ValidationError, StateConflict) as error:
+            raise StorageError("persisted qualification order status is invalid") from error
+        if canonical_json(evidence.as_dict()) != canonical_json(payload):
+            raise StorageError("persisted qualification order-status fields differ")
+        return evidence
+
+    @staticmethod
+    def _cancel_action_from_payload(payload: object):
+        if payload is None:
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("scope"), dict):
+            raise StorageError("persisted qualification cancel action is invalid")
+        scope_payload = payload["scope"]
+        try:
+            scope = QualificationCancelScope(
+                account_id=scope_payload["account_id"],
+                main_account_address=scope_payload["main_account_address"],
+                symbol=scope_payload["symbol"],
+                asset_id=scope_payload["asset_id"],
+                cloid=scope_payload["cloid"],
+                source_action_hash=scope_payload["source_action_hash"],
+                scope_hash=scope_payload["scope_hash"],
+            )
+            action = QualificationCancelAction(
+                kind=QualificationActionKind(payload["kind"]),
+                network=HyperliquidNetwork(payload["network"]),
+                scope=scope,
+                expires_at_ms=payload["expires_at_ms"],
+                action=dict(payload["action"]),
+                action_hash=payload["action_hash"],
+            )
+            action.verify_integrity()
+        except (KeyError, TypeError, ValueError, ValidationError, StateConflict) as error:
+            raise StorageError("persisted qualification cancel action is invalid") from error
+        if canonical_json(action.as_dict()) != canonical_json(payload):
+            raise StorageError("persisted qualification cancel-action fields differ")
+        return action
+
+    @classmethod
+    def _workflow_from_payload(
+        cls,
+        payload: object,
+        intent: QualificationIntent,
+    ) -> QualificationWorkflow:
+        if not isinstance(payload, dict):
+            raise StorageError("persisted qualification workflow is not an object")
+        try:
+            workflow = QualificationWorkflow(
+                intent=intent,
+                authorization_hash=payload["authorization_hash"],
+                state=QualificationWorkflowState(payload["state"]),
+                place_attempt=cls._attempt_evidence_from_payload(
+                    payload["place_attempt"]
+                ),
+                close_attempt=cls._attempt_evidence_from_payload(
+                    payload["close_attempt"]
+                ),
+                cloid_query=cls._order_status_from_payload(payload["cloid_query"]),
+                oid_query=cls._order_status_from_payload(payload["oid_query"]),
+                cancel_action=cls._cancel_action_from_payload(
+                    payload["cancel_action"]
+                ),
+                cancel_attempt=cls._attempt_evidence_from_payload(
+                    payload["cancel_attempt"]
+                ),
+                terminal_query=cls._order_status_from_payload(
+                    payload["terminal_query"]
+                ),
+                terminal_snapshot_hash=payload["terminal_snapshot_hash"],
+                reason_code=payload["reason_code"],
+                revision=payload["revision"],
+                updated_at=_parse_time(payload["updated_at"], "updated_at"),
+                workflow_hash=payload["workflow_hash"],
+            )
+            workflow.verify_integrity()
+        except (KeyError, TypeError, ValueError, ValidationError, StateConflict) as error:
+            raise StorageError("persisted qualification workflow is invalid") from error
+        if canonical_json(workflow.as_dict()) != canonical_json(payload):
+            raise StorageError("persisted qualification workflow fields differ")
+        return workflow
+
+    def load_workflow(self, command_id: str) -> QualificationWorkflow:
+        """Strictly reconstruct one workflow from its hash-checked durable row."""
+
+        command = self.get_command(command_id)
+        try:
+            intent_payload = json.loads(command.intent_json)
+            workflow_payload = json.loads(command.workflow_json)
+        except (TypeError, ValueError, RecursionError) as error:
+            raise StorageError("persisted qualification JSON is invalid") from error
+        intent = self._intent_from_payload(intent_payload)
+        workflow = self._workflow_from_payload(workflow_payload, intent)
+        self._require_exact_workflow(command, workflow)
+        return workflow
 
     def list_commands(self) -> tuple[QualificationCommandRecord, ...]:
         connection = self.execution_store._connect()  # type: ignore[attr-defined]
@@ -1830,7 +2250,7 @@ class QualificationStore:
             "updated_at": _time(updated_at),
         }
 
-    def prepare_attempt(
+    def _persist_verified_envelope_attempt(
         self,
         command_id: str,
         *,
@@ -1840,7 +2260,7 @@ class QualificationStore:
         fencing_token: int,
         at: datetime,
     ) -> None:
-        """Persist the exact signed evidence and attempt before send authority."""
+        """Persist evidence already reverified by ``prepare_envelope_attempt``."""
 
         checked_command = _identifier(command_id, "command_id")
         checked_attempt = _identifier(attempt_id, "attempt_id")
@@ -1975,6 +2395,78 @@ class QualificationStore:
                 attempt_count=outbox.attempt_count + 1,
             )
 
+    def prepare_envelope_attempt(
+        self,
+        command_id: str,
+        *,
+        attempt_id: str,
+        intent: QualificationIntent,
+        action: QualificationAction,
+        authority: QualificationSigningAuthority,
+        policy: QualificationSignerPolicy,
+        signed: SignedQualificationEnvelope,
+        signature_verifier: QualificationSignatureVerifier,
+        worker_id: str,
+        fencing_token: int,
+        at: datetime,
+    ) -> QualificationSignedEvidence:
+        """Verify the dedicated signer envelope, then persist digest evidence.
+
+        This adds no signing or send capability.  It closes the former
+        digest-only gap by requiring the full frozen wire and independently
+        revalidating its typed action, account/API-wallet, lease and policy
+        bindings before the existing schema-v11 evidence is admitted.
+        """
+
+        from .qualification_signer import (
+            QualificationSignerPolicy,
+            SignedQualificationEnvelope,
+        )
+
+        checked_command = _identifier(command_id, "command_id")
+        if type(intent) is not QualificationIntent:
+            raise TypeError("intent must be exact QualificationIntent")
+        if not isinstance(action, (QualificationOrderAction, QualificationCancelAction)):
+            raise TypeError("action must be a typed QualificationAction")
+        if type(authority) is not QualificationSigningAuthority:
+            raise TypeError("authority must be exact QualificationSigningAuthority")
+        if type(policy) is not QualificationSignerPolicy:
+            raise TypeError("policy must be exact QualificationSignerPolicy")
+        if type(signed) is not SignedQualificationEnvelope:
+            raise TypeError("signed must be exact SignedQualificationEnvelope")
+        intent.verify_integrity()
+        action.verify_integrity()
+        signed.verify_binding(
+            intent=intent,
+            action=action,
+            authority=authority,
+            policy=policy,
+            signature_verifier=signature_verifier,
+        )
+        command = self.get_command(checked_command)
+        step = self.get_step(checked_command, signed.phase)
+        if (
+            signed.command_id != checked_command
+            or command.intent_json != canonical_json(intent.as_dict())
+            or command.intent_hash != intent.intent_hash
+            or step.action_hash != action.action_hash
+            or step.action_json != canonical_json(action.as_dict())
+            or authority.command_id != checked_command
+            or authority.worker_id != worker_id
+            or authority.fencing_token != fencing_token
+        ):
+            raise StateConflict("qualification signer envelope differs from durable command")
+        evidence = signed.execution_store_evidence()
+        self._persist_verified_envelope_attempt(
+            checked_command,
+            attempt_id=attempt_id,
+            signed=evidence,
+            worker_id=worker_id,
+            fencing_token=fencing_token,
+            at=at,
+        )
+        return evidence
+
     def require_submission_authority(
         self,
         command_id: str,
@@ -2053,6 +2545,11 @@ class QualificationStore:
                 or signed.nonce != attempt.nonce
                 or signed.wire_hash != attempt.wire_hash
                 or signed.signing_authority_hash != signing_row["authority_hash"]
+                or signed.verified_signer_address is None
+                or signed.signature_verifier_implementation
+                != "hyperliquid-eip712-recovery-v1"
+                or signed.signature_verification_hash is None
+                or signed.signing_implementation is None
                 or signing_row["action_hash"] != step.action_hash
                 or signing_row["worker_id"] != checked_worker
                 or int(signing_row["fencing_token"]) != fencing_token
@@ -2067,8 +2564,441 @@ class QualificationStore:
                 )
             raise StateConflict(
                 "qualification submission is disabled until an authenticated "
-                "signer envelope and complete post-send workflow are reviewed"
+                "sender and complete post-send workflow are promoted"
             )
+
+    @staticmethod
+    def _transport_record_material(
+        result: QualificationTransportResult,
+        *,
+        recorded_at: datetime,
+        content_hash: str,
+    ) -> dict[str, object]:
+        return {
+            **result.as_dict(),
+            "recorded_at": _time(recorded_at),
+            "content_hash": content_hash,
+        }
+
+    def _insert_transport_result_locked(
+        self,
+        connection,
+        result: QualificationTransportResult,
+        *,
+        recorded_at: datetime,
+    ) -> None:
+        existing = connection.execute(
+            """
+            SELECT 1 FROM execution_qualification_transport_evidence
+            WHERE command_id = ? AND phase = ?
+            """,
+            (result.command_id, result.phase.value),
+        ).fetchone()
+        if existing is not None:
+            raise StateConflict("qualification phase already has transport evidence")
+        payload_json, content_hash = _payload(result.as_dict())
+        record_material = self._transport_record_material(
+            result,
+            recorded_at=recorded_at,
+            content_hash=content_hash,
+        )
+        connection.execute(
+            """
+            INSERT INTO execution_qualification_transport_evidence (
+                evidence_hash, command_id, phase, attempt_id,
+                signed_evidence_hash, endpoint, attempted_at_ms, outcome,
+                http_status, detail_code, response_hash,
+                transport_attempt_hash, send_count, retry_performed,
+                recorded_at, payload_json, content_hash, record_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?)
+            """,
+            (
+                result.evidence_hash,
+                result.command_id,
+                result.phase.value,
+                result.attempt_id,
+                result.signed_evidence_hash,
+                result.endpoint,
+                result.attempted_at_ms,
+                result.outcome.value,
+                result.http_status,
+                result.detail_code,
+                result.response_hash,
+                result.transport_attempt_hash,
+                _time(recorded_at),
+                payload_json,
+                content_hash,
+                _record_hash("transport-evidence", record_material),
+            ),
+        )
+
+    @classmethod
+    def _crash_unknown_workflow(
+        cls,
+        command: QualificationCommandRecord,
+        evidence: QualificationAttemptEvidence,
+    ) -> QualificationWorkflow:
+        try:
+            intent_payload = json.loads(command.intent_json)
+            workflow_payload = json.loads(command.workflow_json)
+        except (TypeError, ValueError, RecursionError) as error:
+            raise StorageError("crashed qualification JSON is invalid") from error
+        intent = cls._intent_from_payload(intent_payload)
+        current = cls._workflow_from_payload(workflow_payload, intent)
+        if evidence.phase is QualificationAttemptPhase.PLACE:
+            updated = record_primary_attempt(current, evidence)
+        elif evidence.phase is QualificationAttemptPhase.CLOSE:
+            updated = record_primary_attempt(current, evidence)
+        elif evidence.phase is QualificationAttemptPhase.CANCEL:
+            updated = record_canary_cancel_attempt(current, evidence)
+        else:  # pragma: no cover
+            raise StorageError("crashed qualification phase is unsupported")
+        return updated
+
+    @classmethod
+    def _transport_from_row(cls, row: Mapping[str, object]):
+        from .qualification_transport import QualificationTransportResult
+
+        payload = _decode(
+            row["payload_json"],
+            row["content_hash"],
+            field="qualification transport evidence",
+        )
+        if not isinstance(payload, dict):
+            raise StorageError("qualification transport evidence is not an object")
+        try:
+            result = QualificationTransportResult(
+                command_id=payload["command_id"],
+                phase=QualificationAttemptPhase(payload["phase"]),
+                attempt_id=payload["attempt_id"],
+                signed_evidence_hash=payload["signed_evidence_hash"],
+                submission_authority_hash=payload["submission_authority_hash"],
+                endpoint=payload["endpoint"],
+                nonce=payload["nonce"],
+                wire_hash=payload["wire_hash"],
+                signed_envelope_hash=payload["signed_envelope_hash"],
+                signer_binding_hash=payload["signer_binding_hash"],
+                verified_signer_address=payload["verified_signer_address"],
+                signature_verifier_implementation=payload[
+                    "signature_verifier_implementation"
+                ],
+                signature_verification_hash=payload[
+                    "signature_verification_hash"
+                ],
+                signing_implementation=payload["signing_implementation"],
+                attempted_at_ms=payload["attempted_at_ms"],
+                outcome=QualificationTransportOutcome(payload["outcome"]),
+                http_status=payload["http_status"],
+                detail_code=payload["detail_code"],
+                response_hash=payload["response_hash"],
+                transport_attempt_hash=payload["transport_attempt_hash"],
+                evidence_hash=payload["evidence_hash"],
+                send_count=payload["send_count"],
+                retry_performed=payload["retry_performed"],
+                requires_reconciliation=payload["requires_reconciliation"],
+            )
+            result.verify_integrity()
+        except (KeyError, TypeError, ValueError, ValidationError) as error:
+            raise StorageError("qualification transport evidence is invalid") from error
+        if payload != result.as_dict():
+            raise StorageError("qualification transport payload fields differ")
+        if (
+            row["evidence_hash"] != result.evidence_hash
+            or row["command_id"] != result.command_id
+            or row["phase"] != result.phase.value
+            or row["attempt_id"] != result.attempt_id
+            or row["signed_evidence_hash"] != result.signed_evidence_hash
+            or row["endpoint"] != result.endpoint
+            or int(row["attempted_at_ms"]) != result.attempted_at_ms
+            or row["outcome"] != result.outcome.value
+            or row["http_status"] != result.http_status
+            or row["detail_code"] != result.detail_code
+            or row["response_hash"] != result.response_hash
+            or row["transport_attempt_hash"] != result.transport_attempt_hash
+            or int(row["send_count"]) != 1
+            or int(row["retry_performed"]) != 0
+            or _record_hash(
+                "transport-evidence",
+                cls._transport_record_material(
+                    result,
+                    recorded_at=_parse_time(row["recorded_at"], "recorded_at"),
+                    content_hash=str(row["content_hash"]),
+                ),
+            )
+            != row["record_hash"]
+        ):
+            raise StorageError("qualification transport record differs")
+        return result
+
+    def get_transport_result(
+        self,
+        command_id: str,
+        phase: QualificationAttemptPhase,
+    ):
+        checked_command = _identifier(command_id, "command_id")
+        if not isinstance(phase, QualificationAttemptPhase):
+            raise TypeError("phase must be QualificationAttemptPhase")
+        connection = self.execution_store._connect()  # type: ignore[attr-defined]
+        try:
+            row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_transport_evidence
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked_command, phase.value),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            raise RecordNotFound("qualification transport evidence is missing")
+        return self._transport_from_row(row)
+
+    def record_transport_result(
+        self,
+        command_id: str,
+        *,
+        current_workflow: QualificationWorkflow,
+        result: QualificationTransportResult,
+        at: datetime,
+    ) -> QualificationWorkflow:
+        """Durably consume one future sender result and require read reconciliation.
+
+        Production cannot currently reach this state: the only method that
+        could insert its prerequisite submission authority remains compiled
+        off.  Once that future point of no return exists, this transition has
+        no retry branch and records both received and unknown outcomes.
+        """
+
+        from .qualification_transport import QualificationTransportResult
+
+        checked_command = _identifier(command_id, "command_id")
+        if type(result) is not QualificationTransportResult:
+            raise TypeError("result must be exact QualificationTransportResult")
+        result.verify_integrity()
+        if result.command_id != checked_command:
+            raise StateConflict("qualification transport targets another command")
+        checked_at = _utc(at, "at")
+        attempted_at = _EPOCH + timedelta(milliseconds=result.attempted_at_ms)
+        if checked_at < attempted_at:
+            raise StateConflict("qualification result was recorded before its attempt")
+        attempt_action_hash = current_workflow.intent.primary_action.action_hash
+        if result.phase is QualificationAttemptPhase.CANCEL:
+            if current_workflow.cancel_action is None:
+                raise StateConflict("qualification cancel workflow lacks its action")
+            attempt_action_hash = current_workflow.cancel_action.action_hash
+        evidence = QualificationAttemptEvidence(
+            phase=result.phase,
+            action_hash=attempt_action_hash,
+            nonce=result.nonce,
+            wire_hash=result.wire_hash,
+            signed_evidence_hash=result.signed_evidence_hash,
+            transport_evidence_hash=result.evidence_hash,
+            outcome=result.outcome,
+            attempted_at=attempted_at,
+            response_hash=result.response_hash,
+        )
+        if result.phase is QualificationAttemptPhase.CANCEL:
+            next_workflow = record_canary_cancel_attempt(current_workflow, evidence)
+        else:
+            next_workflow = record_primary_attempt(current_workflow, evidence)
+
+        payload_json, content_hash = _payload(result.as_dict())
+        with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
+            command_row = connection.execute(
+                "SELECT * FROM execution_qualification_commands WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            outbox_row = connection.execute(
+                "SELECT * FROM execution_qualification_outbox WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            step_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_steps
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked_command, result.phase.value),
+            ).fetchone()
+            attempt_row = connection.execute(
+                "SELECT * FROM execution_qualification_attempts WHERE attempt_id = ?",
+                (result.attempt_id,),
+            ).fetchone()
+            if None in (command_row, outbox_row, step_row, attempt_row):
+                raise RecordNotFound("qualification sending state is incomplete")
+            command = self._command_from_row(command_row)
+            outbox = self._outbox_from_row(outbox_row)
+            step = self._step_from_row(step_row)
+            attempt = self._attempt_from_row(attempt_row)
+            self._require_exact_workflow(command, current_workflow)
+            signed_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_signed_evidence
+                WHERE evidence_hash = ?
+                """,
+                (attempt.signed_evidence_hash,),
+            ).fetchone()
+            submission_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_submission_authorities
+                WHERE attempt_id = ?
+                """,
+                (attempt.attempt_id,),
+            ).fetchone()
+            if signed_row is None or submission_row is None:
+                raise StateConflict("qualification result lacks durable send authority")
+            signed = self._signed_from_row(signed_row)
+            submission = self._submission_authority_from_row(
+                submission_row, attempt
+            )
+            if (
+                command.state != "claimed"
+                or command.current_phase != result.phase.value
+                or outbox.state != "claimed"
+                or outbox.current_attempt_id != result.attempt_id
+                or step.state != "sending"
+                or attempt.state != "sending"
+                or attempt.command_id != checked_command
+                or attempt.phase is not result.phase
+                or attempt.transport_evidence_hash is not None
+                or signed.evidence_hash != result.signed_evidence_hash
+                or signed.nonce != result.nonce
+                or signed.wire_hash != result.wire_hash
+                or signed.envelope_hash != result.signed_envelope_hash
+                or signed.signer_binding_hash != result.signer_binding_hash
+                or signed.verified_signer_address
+                != result.verified_signer_address
+                or signed.signature_verifier_implementation
+                != result.signature_verifier_implementation
+                or signed.signature_verification_hash
+                != result.signature_verification_hash
+                or signed.signing_implementation
+                != result.signing_implementation
+                or submission.authority_hash != result.submission_authority_hash
+                or submission.worker_id != attempt.worker_id
+                or submission.fencing_token != attempt.fencing_token
+                or result.attempted_at_ms < _milliseconds(submission.issued_at)
+                or result.attempted_at_ms
+                >= _milliseconds(submission.lease_expires_at)
+                or evidence.action_hash != step.action_hash
+                or current_workflow.intent.account_id != self.execution_store.account_id
+            ):
+                raise StateConflict("qualification transport differs from point of no return")
+            existing = connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_transport_evidence
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked_command, result.phase.value),
+            ).fetchone()
+            if existing is not None:
+                raise StateConflict("qualification phase already has transport evidence")
+            record_material = self._transport_record_material(
+                result,
+                recorded_at=checked_at,
+                content_hash=content_hash,
+            )
+            connection.execute(
+                """
+                INSERT INTO execution_qualification_transport_evidence (
+                    evidence_hash, command_id, phase, attempt_id,
+                    signed_evidence_hash, endpoint, attempted_at_ms, outcome,
+                    http_status, detail_code, response_hash,
+                    transport_attempt_hash, send_count, retry_performed,
+                    recorded_at, payload_json, content_hash, record_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?)
+                """,
+                (
+                    result.evidence_hash,
+                    checked_command,
+                    result.phase.value,
+                    result.attempt_id,
+                    result.signed_evidence_hash,
+                    result.endpoint,
+                    result.attempted_at_ms,
+                    result.outcome.value,
+                    result.http_status,
+                    result.detail_code,
+                    result.response_hash,
+                    result.transport_attempt_hash,
+                    _time(checked_at),
+                    payload_json,
+                    content_hash,
+                    _record_hash("transport-evidence", record_material),
+                ),
+            )
+            attempt_material = self._attempt_material(
+                attempt_id=attempt.attempt_id,
+                command_id=attempt.command_id,
+                phase=attempt.phase,
+                worker_id=attempt.worker_id,
+                fencing_token=attempt.fencing_token,
+                signed_evidence_hash=attempt.signed_evidence_hash,
+                transport_evidence_hash=result.evidence_hash,
+                nonce=attempt.nonce,
+                action_hash=attempt.action_hash,
+                wire_hash=attempt.wire_hash,
+                state=result.outcome.value,
+                prepared_at=attempt.prepared_at,
+                updated_at=checked_at,
+            )
+            changed = connection.execute(
+                """
+                UPDATE execution_qualification_attempts SET
+                    transport_evidence_hash = ?, state = ?, updated_at = ?,
+                    record_hash = ?
+                WHERE attempt_id = ? AND state = 'sending'
+                  AND transport_evidence_hash IS NULL
+                """,
+                (
+                    result.evidence_hash,
+                    result.outcome.value,
+                    _time(checked_at),
+                    _record_hash("attempt", attempt_material),
+                    attempt.attempt_id,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise StateConflict("qualification attempt result raced another writer")
+            self._write_step_locked(
+                connection,
+                step,
+                state=result.outcome.value,
+                at=checked_at,
+            )
+            self._write_command_locked(
+                connection,
+                command,
+                state="reconciling",
+                current_phase=result.phase.value,
+                at=checked_at,
+                workflow=next_workflow,
+            )
+            self._write_outbox_locked(
+                connection,
+                outbox,
+                state="reconciling",
+                at=checked_at,
+                worker_id=None,
+                fencing_token=outbox.fencing_token,
+                claimed_at=None,
+                lease_expires_at=None,
+                current_attempt_id=attempt.attempt_id,
+                attempt_count=outbox.attempt_count,
+            )
+            self.execution_store._append_event_locked(  # type: ignore[attr-defined]
+                connection,
+                command_id=None,
+                event_type="qualification_transport_recorded",
+                occurred_at=checked_at,
+                payload={
+                    "qualification_command_id": checked_command,
+                    "phase": result.phase.value,
+                    "outcome": result.outcome.value,
+                    "send_count": 1,
+                    "retry_performed": False,
+                },
+            )
+        return next_workflow
 
     def _preempt_for_account_safety_locked(
         self,
@@ -2337,7 +3267,7 @@ class QualificationStore:
                 ).fetchone()
                 submission = connection.execute(
                     """
-                    SELECT 1 FROM execution_qualification_submission_authorities
+                    SELECT * FROM execution_qualification_submission_authorities
                     WHERE command_id = ? AND phase = ?
                     """,
                     (command.command_id, phase.value),
@@ -2412,44 +3342,80 @@ class QualificationStore:
                     changed_count += 1
                     continue
 
-                if attempt is not None and (
-                    attempt["state"] in {"sending", "response_received", "unknown"}
-                    or submission is not None
-                ):
-                    state = str(attempt["state"])
-                    if state in {"prepared", "sending"}:
-                        attempt_material = self._attempt_material(
-                            attempt_id=str(attempt["attempt_id"]),
-                            command_id=command.command_id,
-                            phase=phase,
-                            worker_id=str(attempt["worker_id"]),
-                            fencing_token=int(attempt["fencing_token"]),
-                            signed_evidence_hash=str(attempt["signed_evidence_hash"]),
-                            transport_evidence_hash=(
-                                None
-                                if attempt["transport_evidence_hash"] is None
-                                else str(attempt["transport_evidence_hash"])
-                            ),
-                            nonce=int(attempt["nonce"]),
-                            action_hash=str(attempt["action_hash"]),
-                            wire_hash=str(attempt["wire_hash"]),
-                            state="unknown",
-                            prepared_at=_parse_time(
-                                attempt["prepared_at"], "prepared_at"
-                            ),
-                            updated_at=checked_at,
+                if attempt is not None and attempt_record.state == "sending":
+                    if submission is None or step.state != "sending":
+                        raise StorageError(
+                            "sending qualification lacks atomic submission authority"
                         )
-                        connection.execute(
-                            """
-                            UPDATE execution_qualification_attempts SET
-                                state = 'unknown', updated_at = ?, record_hash = ?
-                            WHERE attempt_id = ?
-                            """,
-                            (
-                                _time(checked_at),
-                                _record_hash("attempt", attempt_material),
-                                attempt["attempt_id"],
-                            ),
+                    submission_authority = self._submission_authority_from_row(
+                        submission,
+                        attempt_record,
+                    )
+                    from .qualification_transport import (
+                        freeze_point_of_no_return_crash_result,
+                    )
+
+                    send_started_ms = _milliseconds(
+                        submission_authority.issued_at
+                    )
+                    crash_result = freeze_point_of_no_return_crash_result(
+                        signed_record,
+                        submission_authority,
+                        attempted_at_ms=send_started_ms,
+                    )
+                    self._insert_transport_result_locked(
+                        connection,
+                        crash_result,
+                        recorded_at=checked_at,
+                    )
+                    crash_evidence = QualificationAttemptEvidence(
+                        phase=phase,
+                        action_hash=attempt_record.action_hash,
+                        nonce=attempt_record.nonce,
+                        wire_hash=attempt_record.wire_hash,
+                        signed_evidence_hash=attempt_record.signed_evidence_hash,
+                        transport_evidence_hash=crash_result.evidence_hash,
+                        outcome=QualificationTransportOutcome.UNKNOWN,
+                        attempted_at=submission_authority.issued_at,
+                        response_hash=None,
+                    )
+                    crash_workflow = self._crash_unknown_workflow(
+                        command,
+                        crash_evidence,
+                    )
+                    attempt_material = self._attempt_material(
+                        attempt_id=attempt_record.attempt_id,
+                        command_id=attempt_record.command_id,
+                        phase=attempt_record.phase,
+                        worker_id=attempt_record.worker_id,
+                        fencing_token=attempt_record.fencing_token,
+                        signed_evidence_hash=attempt_record.signed_evidence_hash,
+                        transport_evidence_hash=crash_result.evidence_hash,
+                        nonce=attempt_record.nonce,
+                        action_hash=attempt_record.action_hash,
+                        wire_hash=attempt_record.wire_hash,
+                        state="unknown",
+                        prepared_at=attempt_record.prepared_at,
+                        updated_at=checked_at,
+                    )
+                    changed = connection.execute(
+                        """
+                        UPDATE execution_qualification_attempts SET
+                            transport_evidence_hash = ?, state = 'unknown',
+                            updated_at = ?, record_hash = ?
+                        WHERE attempt_id = ? AND state = 'sending'
+                          AND transport_evidence_hash IS NULL
+                        """,
+                        (
+                            crash_result.evidence_hash,
+                            _time(checked_at),
+                            _record_hash("attempt", attempt_material),
+                            attempt_record.attempt_id,
+                        ),
+                    )
+                    if changed.rowcount != 1:
+                        raise StateConflict(
+                            "qualification crash normalization raced another writer"
                         )
                     self._write_step_locked(
                         connection, step, state="unknown", at=checked_at
@@ -2460,6 +3426,7 @@ class QualificationStore:
                         state="reconciling",
                         current_phase=phase.value,
                         at=checked_at,
+                        workflow=crash_workflow,
                     )
                     self._write_outbox_locked(
                         connection,
@@ -2470,13 +3437,34 @@ class QualificationStore:
                         fencing_token=outbox.fencing_token,
                         claimed_at=None,
                         lease_expires_at=None,
-                        current_attempt_id=(
-                            None if attempt is None else str(attempt["attempt_id"])
-                        ),
+                        current_attempt_id=attempt_record.attempt_id,
                         attempt_count=outbox.attempt_count,
+                    )
+                    self.execution_store._append_event_locked(  # type: ignore[attr-defined]
+                        connection,
+                        command_id=None,
+                        event_type="qualification_point_of_no_return_crash_unknown",
+                        occurred_at=checked_at,
+                        payload={
+                            "qualification_command_id": command.command_id,
+                            "phase": phase.value,
+                            "transport_evidence_hash": crash_result.evidence_hash,
+                            "retry_performed": False,
+                        },
                     )
                     changed_count += 1
                     continue
+                if submission is not None or (
+                    attempt is not None
+                    and attempt_record.state in {
+                        "sending",
+                        "response_received",
+                        "unknown",
+                    }
+                ):
+                    raise StorageError(
+                        "qualification claim has a non-atomic send/result state"
+                    )
 
                 # Signing authority with no durable attempt, an expired action,
                 # or a prepared attempt without submission authority is proven
@@ -2519,6 +3507,46 @@ class QualificationStore:
                 changed_count += 1
         return changed_count
 
+    @staticmethod
+    def _verify_query_against_durable_action(
+        intent_payload: Mapping[str, object],
+        evidence: QualificationOrderStatusEvidence,
+    ) -> None:
+        primary = intent_payload.get("primary_action")
+        if not isinstance(primary, dict) or evidence.missing or evidence.oid is None:
+            raise StateConflict("qualification query lacks a definitive durable action")
+        if (
+            evidence.cloid != primary.get("cloid")
+            or evidence.symbol != primary.get("symbol")
+            or evidence.is_buy is not primary.get("is_buy")
+            or evidence.original_size is None
+            or canonical_decimal(evidence.original_size) != primary.get("quantity")
+            or evidence.limit_price is None
+            or canonical_decimal(evidence.limit_price) != primary.get("price_bound")
+            or evidence.reduce_only is not primary.get("reduce_only")
+            or evidence.time_in_force != primary.get("time_in_force")
+            or (
+                evidence.requested_by == "oid"
+                and evidence.requested_identifier != evidence.oid
+            )
+        ):
+            raise StateConflict("qualification query economics differ from durable action")
+        expected_identity = domain_hash(
+            "trading-harness/testnet-qualification-order-identity/v1",
+            {
+                "cloid": primary.get("cloid"),
+                "oid": evidence.oid,
+                "symbol": primary.get("symbol"),
+                "is_buy": primary.get("is_buy"),
+                "original_size": primary.get("quantity"),
+                "limit_price": primary.get("price_bound"),
+                "reduce_only": primary.get("reduce_only"),
+                "time_in_force": primary.get("time_in_force"),
+            },
+        )
+        if evidence.order_identity_hash != expected_identity:
+            raise StateConflict("qualification query identity differs from durable action")
+
     def record_query_evidence(
         self,
         command_id: str,
@@ -2553,6 +3581,14 @@ class QualificationStore:
         if not isinstance(account_snapshot, RetainedQualificationSnapshot):
             raise TypeError("account_snapshot must be RetainedQualificationSnapshot")
         account_snapshot.verify_integrity()
+        if query_kind == "terminal" and (
+            evidence.status_timestamp_ms is None
+            or account_snapshot.account.server_time_ms
+            < evidence.status_timestamp_ms
+        ):
+            raise StateConflict(
+                "terminal account watermark predates venue order status"
+            )
         if abs(
             _milliseconds(checked_at)
             - _milliseconds(account_snapshot.retained_at)
@@ -2596,7 +3632,51 @@ class QualificationStore:
             command = self._command_from_row(command_row)
             if command.state not in {"reconciling", "halted"}:
                 raise StateConflict("qualification command is not awaiting read evidence")
+            if command.state == "reconciling":
+                workflow_payload = json.loads(command.workflow_json)
+                expected_query_kinds = {
+                    (
+                        "place",
+                        QualificationWorkflowState.PLACE_PENDING_QUERY.value,
+                    ): {"open_by_cloid", "open_by_oid"},
+                    (
+                        "cancel",
+                        QualificationWorkflowState.CANCEL_PENDING_QUERY.value,
+                    ): {"terminal"},
+                    (
+                        "close",
+                        QualificationWorkflowState.CLOSE_PENDING_QUERY.value,
+                    ): {"terminal"},
+                }.get((command.current_phase, workflow_payload.get("state")))
+                if expected_query_kinds is None or query_kind not in expected_query_kinds:
+                    raise StateConflict(
+                        "qualification query kind is premature for durable workflow"
+                    )
+                transport_row = connection.execute(
+                    """
+                    SELECT * FROM execution_qualification_transport_evidence
+                    WHERE command_id = ? AND phase = ?
+                    """,
+                    (checked_command, command.current_phase),
+                ).fetchone()
+                if transport_row is None:
+                    raise StorageError(
+                        "qualification query lacks its one-shot transport evidence"
+                    )
+                transport = self._transport_from_row(transport_row)
+                if (
+                    _milliseconds(checked_at) < transport.attempted_at_ms
+                    or evidence.status_timestamp_ms is None
+                    or evidence.status_timestamp_ms < transport.attempted_at_ms
+                ):
+                    raise StateConflict(
+                        "qualification query predates its exact send attempt"
+                    )
             intent_payload = json.loads(command.intent_json)
+            self._verify_query_against_durable_action(
+                intent_payload,
+                evidence,
+            )
             primary = intent_payload.get("primary_action")
             if (
                 intent_payload.get("account_id") != self.execution_store.account_id
@@ -2686,6 +3766,468 @@ class QualificationStore:
                 ),
             )
         return evidence
+
+    def _require_query_locked(
+        self,
+        connection,
+        *,
+        command: QualificationCommandRecord,
+        query_kind: str,
+        evidence: QualificationOrderStatusEvidence,
+        snapshot: RetainedQualificationSnapshot | None = None,
+    ) -> str:
+        row = connection.execute(
+            """
+            SELECT * FROM execution_qualification_queries
+            WHERE command_id = ? AND query_kind = ?
+            """,
+            (command.command_id, query_kind),
+        ).fetchone()
+        if row is None:
+            raise RecordNotFound("qualification query evidence is missing")
+        payload = _decode(
+            row["payload_json"],
+            row["content_hash"],
+            field="qualification query evidence",
+        )
+        if not isinstance(payload, dict):
+            raise StorageError("qualification query evidence is not an object")
+        material = {
+            "evidence_hash": evidence.evidence_hash,
+            "command_id": command.command_id,
+            "query_kind": query_kind,
+            "order_identity_hash": evidence.order_identity_hash,
+            "account_snapshot_hash": row["account_snapshot_hash"],
+            "observed_at": row["observed_at"],
+            "content_hash": row["content_hash"],
+        }
+        if (
+            row["evidence_hash"] != evidence.evidence_hash
+            or row["command_id"] != command.command_id
+            or row["query_kind"] != query_kind
+            or row["order_identity_hash"] != evidence.order_identity_hash
+            or payload.get("schema_version")
+            != "testnet_qualification_query_evidence.v1"
+            or payload.get("query_kind") != query_kind
+            or payload.get("order_status") != evidence.as_dict()
+            or payload.get("account_snapshot_hash") != row["account_snapshot_hash"]
+            or payload.get("observed_at") != row["observed_at"]
+            or payload.get("read_only") is not True
+            or _record_hash("query", material) != row["record_hash"]
+        ):
+            raise StorageError("qualification query evidence differs")
+        snapshot_row = connection.execute(
+            """
+            SELECT * FROM execution_qualification_snapshots
+            WHERE snapshot_hash = ?
+            """,
+            (row["account_snapshot_hash"],),
+        ).fetchone()
+        if snapshot_row is None:
+            raise StorageError("qualification query lost its account snapshot")
+        snapshot_payload = _decode(
+            snapshot_row["payload_json"],
+            snapshot_row["content_hash"],
+            field="qualification query account snapshot",
+        )
+        intent_payload = json.loads(command.intent_json)
+        self._verify_query_against_durable_action(intent_payload, evidence)
+        snapshot_material = {
+            "snapshot_hash": snapshot_row["snapshot_hash"],
+            "account_id": snapshot_row["account_id"],
+            "main_account_address": snapshot_row["main_account_address"],
+            "api_wallet_address": snapshot_row["api_wallet_address"],
+            "account_server_time_ms": snapshot_row["account_server_time_ms"],
+            "retained_at": snapshot_row["retained_at"],
+            "content_hash": snapshot_row["content_hash"],
+        }
+        if (
+            snapshot_row["account_id"] != self.execution_store.account_id
+            or snapshot_row["main_account_address"]
+            != intent_payload.get("main_account_address")
+            or snapshot_row["api_wallet_address"]
+            != intent_payload.get("api_wallet_address")
+            or not isinstance(snapshot_payload, dict)
+            or _record_hash("snapshot", snapshot_material)
+            != snapshot_row["record_hash"]
+        ):
+            raise StorageError("qualification query account binding differs")
+        if snapshot is not None:
+            snapshot.verify_integrity()
+            if (
+                snapshot.snapshot_hash != snapshot_row["snapshot_hash"]
+                or canonical_json(snapshot.as_dict()) != snapshot_row["payload_json"]
+            ):
+                raise StateConflict("terminal snapshot differs from retained query evidence")
+        return str(snapshot_row["snapshot_hash"])
+
+    def advance_canary_open_queries(
+        self,
+        command_id: str,
+        *,
+        current_workflow: QualificationWorkflow,
+        by_cloid: QualificationOrderStatusEvidence,
+        by_oid: QualificationOrderStatusEvidence,
+        at: datetime,
+    ) -> QualificationWorkflow:
+        """Commit the paired order identity result without authorizing a cancel."""
+
+        checked_command = _identifier(command_id, "command_id")
+        checked_at = _utc(at, "at")
+        next_workflow = record_canary_open_queries(
+            current_workflow,
+            by_cloid,
+            by_oid,
+            at=checked_at,
+        )
+        cancelable = next_workflow.state is QualificationWorkflowState.OPEN_VERIFIED
+        if next_workflow.state is QualificationWorkflowState.UNEXPECTED_FILL:
+            cancelable = bool(
+                by_cloid.status == by_oid.status == "open"
+                and by_cloid.remaining_size is not None
+                and by_cloid.remaining_size > _ZERO
+                and by_oid.remaining_size == by_cloid.remaining_size
+            )
+        target_command = "reconciling" if cancelable else (
+            "halted"
+            if next_workflow.state is QualificationWorkflowState.HALTED_UNRESOLVED
+            else "terminal"
+        )
+        target_phase = "place" if cancelable else (
+            "halted" if target_command == "halted" else "complete"
+        )
+        with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
+            command_row = connection.execute(
+                "SELECT * FROM execution_qualification_commands WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            outbox_row = connection.execute(
+                "SELECT * FROM execution_qualification_outbox WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            step_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_steps
+                WHERE command_id = ? AND phase = 'place'
+                """,
+                (checked_command,),
+            ).fetchone()
+            if command_row is None or outbox_row is None or step_row is None:
+                raise RecordNotFound("canary query workflow state is incomplete")
+            command = self._command_from_row(command_row)
+            outbox = self._outbox_from_row(outbox_row)
+            step = self._step_from_row(step_row)
+            self._require_exact_workflow(command, current_workflow)
+            if (
+                command.kind is not QualificationIntentKind.GTC_PLACE_QUERY_CANCEL
+                or command.state != "reconciling"
+                or command.current_phase != "place"
+                or outbox.state != "reconciling"
+                or step.state not in {"response_received", "unknown"}
+            ):
+                raise StateConflict("canary is not awaiting paired open queries")
+            self._require_query_locked(
+                connection,
+                command=command,
+                query_kind="open_by_cloid",
+                evidence=by_cloid,
+            )
+            self._require_query_locked(
+                connection,
+                command=command,
+                query_kind="open_by_oid",
+                evidence=by_oid,
+            )
+            self._write_step_locked(
+                connection, step, state="reconciled", at=checked_at
+            )
+            self._write_command_locked(
+                connection,
+                command,
+                state=target_command,
+                current_phase=target_phase,
+                at=checked_at,
+                workflow=next_workflow,
+                terminal=target_command in {"terminal", "halted"},
+            )
+            self._write_outbox_locked(
+                connection,
+                outbox,
+                state=target_command,
+                at=checked_at,
+                worker_id=None,
+                fencing_token=outbox.fencing_token,
+                claimed_at=None,
+                lease_expires_at=None,
+                current_attempt_id=outbox.current_attempt_id,
+                attempt_count=outbox.attempt_count,
+            )
+        return next_workflow
+
+    def queue_canary_cancel(
+        self,
+        command_id: str,
+        *,
+        current_workflow: QualificationWorkflow,
+        at: datetime,
+    ) -> tuple[QualificationWorkflow, QualificationCancelAction]:
+        """Materialize exactly one bound cancel step after both query forms."""
+
+        checked_command = _identifier(command_id, "command_id")
+        checked_at = _utc(at, "at")
+        next_workflow, action = prepare_canary_cancel(
+            current_workflow,
+            at=checked_at,
+        )
+        action_json, action_content_hash = _payload(action.as_dict())
+        with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
+            command_row = connection.execute(
+                "SELECT * FROM execution_qualification_commands WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            outbox_row = connection.execute(
+                "SELECT * FROM execution_qualification_outbox WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            place_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_steps
+                WHERE command_id = ? AND phase = 'place'
+                """,
+                (checked_command,),
+            ).fetchone()
+            if command_row is None or outbox_row is None or place_row is None:
+                raise RecordNotFound("canary cancel source state is incomplete")
+            command = self._command_from_row(command_row)
+            outbox = self._outbox_from_row(outbox_row)
+            place_step = self._step_from_row(place_row)
+            self._require_exact_workflow(command, current_workflow)
+            existing = connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_steps
+                WHERE command_id = ? AND phase = 'cancel'
+                """,
+                (checked_command,),
+            ).fetchone()
+            if (
+                command.state != "reconciling"
+                or command.current_phase != "place"
+                or outbox.state != "reconciling"
+                or place_step.state != "reconciled"
+                or existing is not None
+                or outbox.attempt_count != 1
+            ):
+                raise StateConflict("canary cancel step is not uniquely queueable")
+            step = QualificationStepRecord(
+                command_id=checked_command,
+                phase=QualificationAttemptPhase.CANCEL,
+                action_hash=action.action_hash,
+                action_json=action_json,
+                expires_at_ms=action.expires_at_ms,
+                state="ready",
+                created_at=checked_at,
+                updated_at=checked_at,
+            )
+            connection.execute(
+                """
+                INSERT INTO execution_qualification_steps (
+                    command_id, phase, action_hash, action_json,
+                    action_content_hash, expires_at_ms, state, created_at,
+                    updated_at, record_hash
+                ) VALUES (?, 'cancel', ?, ?, ?, ?, 'ready', ?, ?, ?)
+                """,
+                (
+                    checked_command,
+                    action.action_hash,
+                    action_json,
+                    action_content_hash,
+                    action.expires_at_ms,
+                    _time(checked_at),
+                    _time(checked_at),
+                    _record_hash("step", self._step_material(step)),
+                ),
+            )
+            self._write_command_locked(
+                connection,
+                command,
+                state="queued",
+                current_phase="cancel",
+                at=checked_at,
+                workflow=next_workflow,
+            )
+            self._write_outbox_locked(
+                connection,
+                outbox,
+                state="queued",
+                at=checked_at,
+                worker_id=None,
+                fencing_token=outbox.fencing_token,
+                claimed_at=None,
+                lease_expires_at=None,
+                current_attempt_id=None,
+                attempt_count=outbox.attempt_count,
+            )
+        return next_workflow, action
+
+    def finish_terminal_reconciliation(
+        self,
+        command_id: str,
+        *,
+        current_workflow: QualificationWorkflow,
+        terminal_query: QualificationOrderStatusEvidence,
+        retained: RetainedQualificationSnapshot,
+        at: datetime,
+    ) -> QualificationWorkflow:
+        """Commit terminal query/account evidence and release only proven-flat risk."""
+
+        checked_command = _identifier(command_id, "command_id")
+        checked_at = _utc(at, "at")
+        if current_workflow.intent.kind is QualificationIntentKind.GTC_PLACE_QUERY_CANCEL:
+            next_workflow = reconcile_canary_terminal(
+                current_workflow,
+                terminal_query,
+                retained,
+                at=checked_at,
+            )
+        else:
+            next_workflow = reconcile_attended_close(
+                current_workflow,
+                terminal_query,
+                retained,
+                at=checked_at,
+            )
+        target_state = (
+            "halted"
+            if next_workflow.state is QualificationWorkflowState.HALTED_UNRESOLVED
+            else "terminal"
+        )
+        with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
+            command_row = connection.execute(
+                "SELECT * FROM execution_qualification_commands WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            outbox_row = connection.execute(
+                "SELECT * FROM execution_qualification_outbox WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            if command_row is None or outbox_row is None:
+                raise RecordNotFound("terminal qualification state is incomplete")
+            command = self._command_from_row(command_row)
+            outbox = self._outbox_from_row(outbox_row)
+            self._require_exact_workflow(command, current_workflow)
+            phase = QualificationAttemptPhase(command.current_phase)
+            step_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_steps
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked_command, phase.value),
+            ).fetchone()
+            if step_row is None:
+                raise StorageError("terminal qualification lacks its current step")
+            step = self._step_from_row(step_row)
+            if (
+                command.state != "reconciling"
+                or outbox.state != "reconciling"
+                or step.state not in {"response_received", "unknown"}
+                or phase not in {
+                    QualificationAttemptPhase.CANCEL,
+                    QualificationAttemptPhase.CLOSE,
+                }
+            ):
+                raise StateConflict("qualification is not terminal-query reconcilable")
+            snapshot_hash = self._require_query_locked(
+                connection,
+                command=command,
+                query_kind="terminal",
+                evidence=terminal_query,
+                snapshot=retained,
+            )
+            if snapshot_hash != retained.snapshot_hash:
+                raise StateConflict("terminal workflow snapshot hash differs")
+
+            release_current = False
+            if (
+                command.kind is QualificationIntentKind.GTC_PLACE_QUERY_CANCEL
+                and next_workflow.state is QualificationWorkflowState.COMPLETE
+            ):
+                self._release_reservation_locked(
+                    connection, command, at=checked_at
+                )
+                release_current = True
+            elif (
+                command.kind
+                is QualificationIntentKind.ATTENDED_REDUCE_ONLY_CLOSE
+                and next_workflow.state is QualificationWorkflowState.COMPLETE
+            ):
+                source_rows = connection.execute(
+                    """
+                    SELECT * FROM execution_qualification_commands
+                    WHERE kind = 'gtc_place_query_cancel'
+                      AND reservation_released = 0
+                      AND reserved_notional != '0'
+                    ORDER BY created_at, command_id
+                    """
+                ).fetchall()
+                if len(source_rows) != 1:
+                    raise StorageError("flat close has no unique canary reservation")
+                source = self._command_from_row(source_rows[0])
+                self._release_reservation_locked(
+                    connection, source, at=checked_at
+                )
+                self._write_command_locked(
+                    connection,
+                    source,
+                    state=source.state,
+                    current_phase=source.current_phase,
+                    at=checked_at,
+                    reservation_released=True,
+                )
+
+            self._write_step_locked(
+                connection, step, state="reconciled", at=checked_at
+            )
+            self._write_command_locked(
+                connection,
+                command,
+                state=target_state,
+                current_phase=("halted" if target_state == "halted" else "complete"),
+                at=checked_at,
+                workflow=next_workflow,
+                terminal=True,
+                reservation_released=(
+                    True if release_current else command.reservation_released
+                ),
+            )
+            self._write_outbox_locked(
+                connection,
+                outbox,
+                state=target_state,
+                at=checked_at,
+                worker_id=None,
+                fencing_token=outbox.fencing_token,
+                claimed_at=None,
+                lease_expires_at=None,
+                current_attempt_id=outbox.current_attempt_id,
+                attempt_count=outbox.attempt_count,
+            )
+            self.execution_store._append_event_locked(  # type: ignore[attr-defined]
+                connection,
+                command_id=None,
+                event_type="qualification_terminal_reconciled",
+                occurred_at=checked_at,
+                payload={
+                    "qualification_command_id": checked_command,
+                    "workflow_state": next_workflow.state.value,
+                    "reservation_released": release_current
+                    or (
+                        command.kind
+                        is QualificationIntentKind.ATTENDED_REDUCE_ONLY_CLOSE
+                        and next_workflow.state is QualificationWorkflowState.COMPLETE
+                    ),
+                },
+            )
+        return next_workflow
 
 
 __all__ = (

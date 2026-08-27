@@ -1,8 +1,9 @@
 # Hyperliquid testnet qualification
 
-Status: **offline capital core and schema-v11 qualification persistence
-implemented; qualification signer/sender/CLI, commissioning and live-workflow
-gaps remain; live venue qualification not run**.
+Status: **offline capital core, credential-free signer-envelope/injected
+recovery-verifier contract and schema-v11 result/workflow persistence
+implemented; pinned production verifier, SDK signer, sender, CLI,
+commissioning and live-workflow gaps remain; live venue qualification not run**.
 
 The TESTNET execution functions are real and armed when the isolated worker is
 explicitly constructed. No account, API wallet or worker service is configured
@@ -125,16 +126,20 @@ sidecar files and stop for a separately reviewed migration.
 
 The target live sequence below is intentionally stronger than the currently
 exposed CLI. Do not skip its first steps by sending the already-armed bracket.
-The GTC/cancel/close semantics and durable schema-v11 authority lane now exist,
-but they expose no signer, sender, credential or CLI capability. The following
-live integrations and observable tests remain:
+The GTC/cancel/close semantics, dedicated signer-envelope validator and durable
+schema-v11 result coordinator now exist. The validator accepts only the fixed
+injected recovery-verifier interface; no reviewed pinned production verifier
+is wired or golden-tested yet. They expose no SDK signing, sender, credential
+or CLI capability, and submission authority remains compiled off. The
+following live integrations and observable tests remain:
 
-- a dedicated signer/sender/result-transition/TTY CLI for the narrow attended
-  TESTNET-only GTC canary/query/cancel core;
+- a fixed, non-configurable SDK 0.24.0 golden-tested signature-recovery
+  implementation, dedicated SDK signing adapter, one-shot sender and TTY CLI
+  for the narrow attended TESTNET-only GTC canary/query/cancel core;
 - a live `userRole` reader and operator-facing retained
   account/metadata/order artifact export;
-- signer/sender/terminal-flat reservation release for the ordinary attended
-  bounded reduce-only canary close;
+- live SDK signer/sender integration for the ordinary attended bounded
+  reduce-only canary close; its offline terminal-flat release is implemented;
 - WebSocket monitoring and disconnect/fill/REST recovery;
 - bounded fault injection that forwards one exact request while dropping its
   response;
@@ -143,9 +148,10 @@ live integrations and observable tests remain:
 - installed and empirically qualified free-space shutdown guards plus a
   deterministic qualification artifact builder/signing workflow.
 
-The live signer still accepts only the mandatory three-leg `normalTpsl` group
-with IOC entry, and runtime monitoring is REST polling. Machine setup and
-credentials alone therefore do not make the
+The currently armed live signer still accepts only the mandatory three-leg
+`normalTpsl` group with IOC entry; the qualification envelope/recovery-verifier
+layer is an offline contract only, and runtime monitoring is REST polling.
+Machine setup and credentials alone therefore do not make the
 first harness order write responsible. API-wallet `approveAgent` registration
 is a separate attended out-of-band account-provisioning write, not harness
 order qualification. See
@@ -159,7 +165,11 @@ Before connecting the signer process, retain passing evidence for:
 2. one-time approval and one nonterminal command for the dedicated account;
 3. concurrent nonce uniqueness and restart/clock rollback;
 4. official SDK 0.24.0 golden signer recovery;
-5. persist-before-send and one-shot unknown-outcome behavior;
+5. persist-before-send and one-shot unknown-outcome behavior, including the
+   qualification lane's exact account/API-wallet envelope, one action/nonce/wire
+   per phase, response-loss and post-authority crash reconciliation with no
+   retry, paired CLOID/OID action/economic identity, bound cancel, and
+   venue-watermark-ordered terminal-flat canary reservation release;
 6. full, partial and unfilled paper IOC cases;
 7. rejected/disappearing/undersized stop detection;
 8. reduce-only close, owned-CLOID cancel and same-nonce noop construction;
