@@ -104,19 +104,22 @@ class PublisherCase(unittest.TestCase):
             }[right]
 
         def path_lstat(path: Path):
-            metadata = Path(path).lstat()
             selected = Path(path)
             if selected in {
                 Path("/private"),
                 Path("/private/var"),
                 Path("/private/var/db"),
             }:
+                # Linux CI has no /private hierarchy. Project the reviewed
+                # Darwin identity from one stable temporary directory inode.
+                metadata = self.root.lstat()
                 return _StatProxy(
                     metadata,
                     st_uid=0,
                     st_gid=0,
                     st_mode=stat.S_IFDIR | 0o755,
                 )
+            metadata = selected.lstat()
             if selected == self.root:
                 return metadata
             if selected.is_relative_to(self.root):

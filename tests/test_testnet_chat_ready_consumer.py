@@ -297,7 +297,9 @@ class TestnetChatReadyScannerTests(unittest.TestCase):
         marker.unlink()
         marker.symlink_to(target)
 
-        with self.assertRaisesRegex(StateConflict, "empty mode-0400"):
+        # Darwin reaches the exact marker metadata check; Linux rejects the
+        # non-regular directory entry earlier. Both are the required outcome.
+        with self.assertRaises(StateConflict):
             self.fixture.scan()
 
         marker.unlink()
