@@ -1,0 +1,230 @@
+{
+  "schema_version": "testnet_chat_issuance_provenance_plan.v1",
+  "artifact_kind": "inert-example",
+  "plan_only": true,
+  "testnet_only": true,
+  "mainnet_authorized": false,
+  "capability_flags": {
+    "apply_enabled": false,
+    "identity_creation_enabled": false,
+    "installation_enabled": false,
+    "collector_runtime_enabled": false,
+    "collector_network_enabled": false,
+    "credential_access_enabled": false,
+    "key_use_enabled": false,
+    "venue_write_enabled": false,
+    "proposal_issuance_enabled": false,
+    "presentation_enabled": false,
+    "broker_listener_enabled": false,
+    "executor_registration_enabled": false
+  },
+  "existing_identities": {
+    "unchanged": true,
+    "research": {
+      "uid": 450,
+      "gid": 450
+    },
+    "executor": {
+      "uid": 451,
+      "gid": 451
+    },
+    "control": {
+      "uid": 452,
+      "gid": 452
+    }
+  },
+  "proposed_collector_identity": {
+    "account_name": "trading-public-collector",
+    "uid": 453,
+    "gid": 453,
+    "created": false,
+    "creation_authorized": false,
+    "login_enabled": false,
+    "home_directory": null,
+    "shared_group_membership": false
+  },
+  "collector_contract": {
+    "environment": "testnet",
+    "venue": "hyperliquid",
+    "request_method": "POST",
+    "fixed_endpoint": "https://api.hyperliquid-testnet.xyz/info",
+    "allowed_request_families": [
+      "clearinghouseState",
+      "meta",
+      "l2Book"
+    ],
+    "forbidden_endpoint": "https://api.hyperliquid-testnet.xyz/exchange",
+    "endpoint_argument_allowed": false,
+    "environment_argument_allowed": false,
+    "account_argument_allowed": false,
+    "arbitrary_request_type_allowed": false,
+    "response_is_authority_by_itself": false,
+    "credential_access": false,
+    "signer_access": false,
+    "executor_database_access": false,
+    "control_database_write_access": false,
+    "venue_write_access": false
+  },
+  "evidence_namespaces": {
+    "full_source_root": "/private/var/db/trading-desk-testnet-chat-issuance-evidence",
+    "quote_projection_root": "/private/var/db/trading-desk-testnet-chat-account-quotes",
+    "grant_receipt_root": "/private/var/db/trading-desk-testnet-chat-grant-receipts",
+    "executor_registration_root": "/private/var/db/trading-desk-testnet-chat-executor-registration",
+    "path_shape": "<root>/<config-hash>/<artifact-hash>.json",
+    "temporary_name_shape": ".<artifact-hash>.json.pending",
+    "create_only": true,
+    "overwrite_allowed": false,
+    "automatic_deletion_allowed": false,
+    "durability": [
+      "canonical bytes written to hidden create-exclusive inode",
+      "file data and metadata full-synchronized",
+      "exact ACL applied and verified",
+      "exclusive no-replace final publication",
+      "final file re-opened and full-synchronized",
+      "parent directory full-synchronized"
+    ]
+  },
+  "account_evidence": {
+    "producer_uid": 453,
+    "producer_gid": 453,
+    "full_source_directory_mode": "0700",
+    "full_source_file_mode": "0400",
+    "full_source_directory_acl": [
+      "uid-452 search-only"
+    ],
+    "full_source_file_acl": [
+      "uid-452 read-only"
+    ],
+    "quote_projection_directory_acl": [
+      "uid-450 search-only",
+      "uid-452 search-only"
+    ],
+    "quote_projection_file_acl": [
+      "uid-450 read-only",
+      "uid-452 read-only"
+    ],
+    "required_full_source_fields": [
+      "canonical Hyperliquid account snapshot",
+      "venue snapshot hash",
+      "account-risk limits and limits hash",
+      "instrument symbol",
+      "daily-loss used",
+      "open-risk used",
+      "derived account-risk snapshot",
+      "derived account evidence hash",
+      "collector generation",
+      "observed and received timestamps",
+      "fixed endpoint and request-type evidence"
+    ],
+    "recompute_required": true,
+    "quote_projection_binds_full_source_hash": true,
+    "quote_service_required_hash_field": "account_evidence_hash",
+    "broker_required_hash_field": "account_evidence_hash",
+    "same_hash_required_for_quote_and_broker": true,
+    "free_account_snapshot_input_allowed": false
+  },
+  "market_evidence": {
+    "producer_uid": 453,
+    "producer_gid": 453,
+    "directory_mode": "0700",
+    "file_mode": "0400",
+    "directory_acl": [
+      "uid-452 search-only"
+    ],
+    "file_acl": [
+      "uid-452 read-only"
+    ],
+    "fixed_request_family": "l2Book",
+    "maximum_age_seconds": 5,
+    "future_dated_allowed": false,
+    "instrument_plan_match_required": true,
+    "entry_crossability_required": true,
+    "visible_size_check_required": true,
+    "collector_source_hash_recompute_required": true,
+    "free_market_mapping_input_allowed": false
+  },
+  "grant_provenance": {
+    "current_option": "root-attended-preverification-receipt",
+    "future_option": "public-key-verifiable-grant",
+    "broker_hmac_access": false,
+    "broker_key_access": false,
+    "receipt_owner_uid": 0,
+    "receipt_owner_gid": 0,
+    "receipt_file_mode": "0400",
+    "receipt_acl": [
+      "uid-452 read-only"
+    ],
+    "receipt_required_fields": [
+      "signed grant artifact hash",
+      "trusted grant hash and complete scope",
+      "config and policy hashes",
+      "verifier code hash",
+      "verifier generation",
+      "verification timestamp",
+      "grant expiry"
+    ],
+    "receipt_create_only": true,
+    "receipt_overwrite_allowed": false,
+    "free_trusted_grant_input_allowed": false
+  },
+  "executor_preregistration": {
+    "required_before_proposal_display": true,
+    "producer_uid": 451,
+    "producer_gid": 451,
+    "directory_mode": "0700",
+    "file_mode": "0400",
+    "directory_acl": [
+      "uid-452 search-only"
+    ],
+    "file_acl": [
+      "uid-452 read-only"
+    ],
+    "receipt_required_fields": [
+      "config hash",
+      "account and API-wallet binding hash",
+      "ticket ID and ticket hash",
+      "plan hash",
+      "trusted infrastructure grant hash",
+      "policy hash",
+      "execution-store identity hash",
+      "registration timestamp",
+      "ticket and grant expiry"
+    ],
+    "broker_executor_database_access": false,
+    "registration_receipt_is_execution_authority": false,
+    "free_registration_receipt_input_allowed": false
+  },
+  "issuance_orchestration": {
+    "issuer_process_uid": 452,
+    "active_broker_session_object_required": true,
+    "caller_session_hash_allowed": false,
+    "same_process_listener_generation_required": true,
+    "stop_issuance_before_listener_close": true,
+    "account_evidence_reload_by_hash_required": true,
+    "market_evidence_reload_by_hash_required": true,
+    "grant_receipt_reload_required": true,
+    "executor_preregistration_reload_required": true,
+    "proposal_display_after_all_revalidation": true,
+    "mainnet_path_present": false
+  },
+  "store_api_constraints": {
+    "public_free_payload_write_api_allowed": false,
+    "caller_supplied_account_object_allowed": false,
+    "caller_supplied_market_object_allowed": false,
+    "caller_supplied_trusted_grant_allowed": false,
+    "caller_supplied_registration_receipt_allowed": false,
+    "read_by_canonical_id_or_hash_only": true,
+    "write_requires_os_authenticated_collector_or_verifier": true,
+    "cross_identity_mutation_allowed": false
+  },
+  "promotion_blockers": [
+    "UID/GID 453 does not exist and creation is not authorized",
+    "collector runtime and fixed info-only network policy are not installed",
+    "collector-to-control and account-quote artifact ACLs are not commissioned",
+    "full account-source and fresh market evidence stores do not exist",
+    "root-attended grant verification receipt pipeline does not exist",
+    "executor ticket/grant preregistration receipt pipeline does not exist",
+    "same-process active-session issuer composition is not enabled",
+    "live negative ACL, crash, freshness, replay, and reboot proofs are absent"
+  ]
+}

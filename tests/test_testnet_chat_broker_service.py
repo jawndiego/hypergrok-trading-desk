@@ -17,7 +17,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from trading_harness.errors import StorageError, ValidationError
 from trading_harness.testnet_chat_approval_store import TestnetChatApprovalStore
@@ -329,6 +329,33 @@ class FakeListener:
 
 
 class SequentialServiceTests(unittest.TestCase):
+    def test_enabled_composition_repairs_publications_before_listener_creation(self) -> None:
+        callback = MagicMock()
+        callback.reconcile_approved_startup.side_effect = RuntimeError(
+            "injected startup repair failure"
+        )
+        with (
+            patch.object(service_module, "verify_fixed_service_preflight"),
+            patch.object(service_module, "TestnetChatApprovalStore", return_value=object()),
+            patch.object(service_module, "load_executor_config", return_value=object()),
+            patch.object(
+                service_module,
+                "testnet_chat_execution_scope_from_config",
+                return_value=object(),
+            ),
+            patch.object(service_module, "TestnetChatHandoffPublisher", return_value=object()),
+            patch.object(
+                service_module,
+                "TestnetChatApprovalPublisherCallback",
+                return_value=callback,
+            ),
+            patch.object(service_module, "_create_fixed_listener") as listener,
+            self.assertRaisesRegex(RuntimeError, "startup repair failure"),
+        ):
+            service_module._run_enabled_service()
+        callback.reconcile_approved_startup.assert_called_once_with()
+        listener.assert_not_called()
+
     def test_sequential_loop_counts_results_and_never_retries_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory).resolve() / "approval.sqlite3"
@@ -359,7 +386,7 @@ class SequentialServiceTests(unittest.TestCase):
                 summary = serve_testnet_chat_broker_sequentially(
                     listener,
                     session=broker_session(),
-                    store=store,
+                    commit_approval=store.approve_trade_proposal,
                     stop_event=stop,
                     clock=lambda: NOW,
                 )
@@ -393,7 +420,7 @@ class SequentialServiceTests(unittest.TestCase):
                 serve_testnet_chat_broker_sequentially(
                     listener,
                     session=broker_session(),
-                    store=store,
+                    commit_approval=store.approve_trade_proposal,
                     stop_event=stop,
                     clock=lambda: NOW,
                 )

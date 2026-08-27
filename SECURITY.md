@@ -34,6 +34,17 @@ Use this fork's GitHub **Report a vulnerability** flow to open a private securit
   credential, executor state, repository mount or authority. Its
   `local_nat_lab` profile keeps the existing public IP and cannot prevent a
   macOS process from bypassing the VM; it is not a VPN or capital boundary.
+- Normal entry now has a default-unavailable, short-lived two-sample
+  `local_nat_lab` route gate at readiness, before account/market reads and in
+  the final pre-authority guard. Reader clock rollback/expiry is rejected and
+  the final post-read sample requires the full two-second PRE_SEND TTL of
+  remaining evidence life. A preparer-time route denial can only requeue the
+  same active claim before any attempt/authority; independent maintenance
+  normalizes expired claims and releases queued risk at the earliest
+  ticket/leg expiry. The evidence keeps PF, remote-exit,
+  VPN-qualified, credential, write and mainnet claims false. No trusted live
+  collector or durable preflight/attempt binding exists, and recovery does not
+  depend on this entry gate.
 - Capital HTTP clients ignore ambient urllib proxy discovery, and executor
   config rejects proxy, CA-bundle and TLS-key-log environment variables. Route
   selection and trust roots may not be silently replaced by a login shell.
@@ -174,11 +185,14 @@ fresh same-CLOID cancel-successor semantics have a separate TESTNET-only
 durable core, pinned SDK signer/recovery verifier, dormant sender and bounded
 foreground lifecycle; submission remains compiled off. The chat proposal CAS,
 mutually peer-checked protocol/client, stdio MCP, typed issuer/presentation,
-verified handoff reader and schema-v13-v16 admission/fencing boundaries likewise
-remain offline. They still lack authenticated account/market collector
-composition, same-process issuer/listener lifecycle, installed presentation and
-handoff publishers/consumers, exact named ACLs, Keychain qualification and live
-end-to-end evidence. The first harness order write is forbidden until these and
+artifact-first UID-452 handoff publisher, ID-only ready index, startup repair,
+dormant cached UID-451 consumer, verified reader and schema-v13-v16
+admission/fencing boundaries likewise remain offline with false gates. They
+still lack authenticated account/market/grant provenance, same-process active-
+session issuer/listener composition, installed presentation/handoff/ready paths
+and exact ACLs, Keychain qualification, ready-marker archival/GC before 1,024
+entries, and live end-to-end evidence. The first harness order write is
+forbidden until these and
 the commissioning sequence in
 [`docs/testnet_commissioning.md`](docs/testnet_commissioning.md) are closed.
 
@@ -193,9 +207,10 @@ The normative requirements are in [`docs/trading_harness_spec.md`](docs/trading_
   prerequisite and still must occur outside agents/chat/repository.
 - Treating the local testnet HMAC approval helper as suitable for mainnet; mainnet requires a later independently reviewed hardware-backed/asymmetric authority.
 - Enabling the TESTNET chat MCP/broker before its fixed listener, socket/state/
-  presentation/handoff ACLs, authenticated collectors, same-process issuance,
-  installed handoff publisher/consumer and live schema-v14 send-time identity
-  and outcome fences are commissioned; using it for mainnet is always forbidden.
+  presentation/handoff/ready ACLs, authenticated account/market/grant
+  provenance, same-process active-session issuance, installed offline
+  publisher/consumer with marker archival, and live schema-v14 send-time
+  identity/outcome fences are commissioned; using it for mainnet is forbidden.
 - Loading an API-wallet or main-wallet key.
 - Transfers, withdrawals, bridges, vault/subaccount fund movement, builder fees, or staking actions.
 - Enabling an adapter by environment variable alone.

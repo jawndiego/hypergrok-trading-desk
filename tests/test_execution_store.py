@@ -15,7 +15,7 @@ import unittest
 import trading_harness.execution_store as execution_store_module
 
 from trading_harness.analysis import TechnicalBias, TechnicalSnapshot
-from trading_harness.canonical import canonical_json, domain_hash
+from trading_harness.canonical import canonical_data, canonical_json, domain_hash
 from trading_harness.assessment import (
     ProfitabilityGate,
     ProfitabilityStatus,
@@ -2328,6 +2328,485 @@ class OutboxCrashAndReplayTests(ExecutionStoreTestCase):
         assert reclaimed is not None
         self.assertEqual(2, reclaimed.fencing_token)
         self.assertEqual("worker-next", reclaimed.worker_id)
+
+    def test_route_defer_requeues_exact_claim_and_retains_authority_and_risk(self) -> None:
+        ticket, approval = self.admit_one()
+        reserved = self.store.get_reserved_exposure()
+        claim = self.store.claim_next(
+            "route-worker",
+            at=NOW + timedelta(seconds=1),
+            lease_seconds=10,
+        )
+        assert claim is not None
+
+        deferred = self.store.defer_unsent_claim(
+            "command-1",
+            reason="ROUTE_HEALTH_UNAVAILABLE",
+            at=NOW + timedelta(seconds=2),
+            worker_id="route-worker",
+            fencing_token=claim.fencing_token,
+        )
+
+        self.assertEqual("queued", deferred.state)
+        outbox = self.store.get_outbox("command-1")
+        self.assertEqual("queued", outbox.state)
+        self.assertIsNone(outbox.worker_id)
+        self.assertIsNone(outbox.claimed_at)
+        self.assertIsNone(outbox.lease_expires_at)
+        self.assertIsNone(outbox.current_attempt_id)
+        self.assertEqual(0, outbox.attempt_count)
+        self.assertEqual(claim.fencing_token, outbox.fencing_token)
+        self.assertEqual(reserved, self.store.get_reserved_exposure())
+        self.assertEqual("consumed", self.store.approval_state(approval.approval_id))
+        self.assertEqual(ticket.ticket_hash, deferred.ticket_hash)
+        with sqlite3.connect(self.path) as connection:
+            ticket_state = connection.execute(
+                "SELECT state FROM execution_tickets WHERE ticket_hash = ?",
+                (ticket.ticket_hash,),
+            ).fetchone()[0]
+        self.assertEqual("consumed", ticket_state)
+        event = self.store.list_events("command-1")[-1]
+        self.assertEqual("unsent_claim_deferred", event.event_type)
+        self.assertIn("ROUTE_HEALTH_UNAVAILABLE", event.payload_json)
+        self.assertIn('"venue_write_attempted":false', event.payload_json)
+
+        reclaimed = self.store.claim_next(
+            "route-worker-2",
+            at=NOW + timedelta(seconds=3),
+            lease_seconds=10,
+        )
+        assert reclaimed is not None
+        self.assertEqual(claim.fencing_token + 1, reclaimed.fencing_token)
+        self.assertEqual("route-worker-2", reclaimed.worker_id)
+
+    def test_route_defer_refuses_wrong_fence_reason_and_any_prepared_attempt(self) -> None:
+        ticket, _ = self.admit_one()
+        claim = self.store.claim_next(
+            "route-worker",
+            at=NOW + timedelta(seconds=1),
+            lease_seconds=3_600,
+        )
+        assert claim is not None
+        before = (
+            self.store.get_command("command-1"),
+            self.store.get_outbox("command-1"),
+            self.store.get_reserved_exposure(),
+        )
+        for reason, worker, token in (
+            ("ROUTE_HEALTH_UNAVAILABLE", "wrong-worker", claim.fencing_token),
+            ("ROUTE_HEALTH_UNAVAILABLE", "route-worker", claim.fencing_token + 1),
+            ("DISPATCH_PREFLIGHT_DENIED", "route-worker", claim.fencing_token),
+        ):
+            with self.subTest(reason=reason, worker=worker, token=token):
+                with self.assertRaises((StateConflict, ValidationError)):
+                    self.store.defer_unsent_claim(
+                        "command-1",
+                        reason=reason,
+                        at=NOW + timedelta(seconds=2),
+                        worker_id=worker,
+                        fencing_token=token,
+                    )
+                self.assertEqual(
+                    before,
+                    (
+                        self.store.get_command("command-1"),
+                        self.store.get_outbox("command-1"),
+                        self.store.get_reserved_exposure(),
+                    ),
+                )
+        with self.assertRaisesRegex(StateConflict, "expired or mismatched"):
+            self.store.defer_unsent_claim(
+                "command-1",
+                reason="ROUTE_HEALTH_UNAVAILABLE",
+                at=ticket.expires_at,
+                worker_id="route-worker",
+                fencing_token=claim.fencing_token,
+            )
+        self.assertEqual(
+            before,
+            (
+                self.store.get_command("command-1"),
+                self.store.get_outbox("command-1"),
+                self.store.get_reserved_exposure(),
+            ),
+        )
+
+        preflight = self.register_preflight(ticket)
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id="command-1",
+            worker_id="route-worker",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
+        )
+        signed = self.make_signed_evidence(
+            preflight,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
+        self.store.prepare_attempt(
+            "command-1",
+            "route-worker",
+            claim.fencing_token,
+            attempt_id="route-attempt",
+            preflight_hash=preflight.preflight_hash,
+            signed_evidence=signed,
+            nonce=signed.nonce,
+            action_hash=signed.action_hash,
+            wire_hash=signed.wire_hash,
+            at=NOW + timedelta(seconds=2, milliseconds=200),
+        )
+        after_attempt = (
+            self.store.get_command("command-1"),
+            self.store.get_outbox("command-1"),
+            self.store.get_reserved_exposure(),
+        )
+        with self.assertRaisesRegex(StateConflict, "attempt or submission authority"):
+            self.store.defer_unsent_claim(
+                "command-1",
+                reason="ROUTE_HEALTH_INVALID",
+                at=NOW + timedelta(seconds=2, milliseconds=300),
+                worker_id="route-worker",
+                fencing_token=claim.fencing_token,
+            )
+        self.assertEqual(
+            after_attempt,
+            (
+                self.store.get_command("command-1"),
+                self.store.get_outbox("command-1"),
+                self.store.get_reserved_exposure(),
+            ),
+        )
+
+    def test_expired_queued_command_terminalizes_once_and_releases_reservation(self) -> None:
+        ticket, approval = self.admit_one()
+        before_events = len(self.store.list_events("command-1"))
+        self.assertIsNone(
+            self.store.expire_next_queued_unsent(
+                at=ticket.expires_at - timedelta(microseconds=1)
+            )
+        )
+
+        expired = self.store.expire_next_queued_unsent(at=ticket.expires_at)
+
+        assert expired is not None
+        self.assertEqual("terminal", expired.state)
+        self.assertEqual((Decimal("0"), Decimal("0")), self.store.get_reserved_exposure())
+        self.assertEqual("consumed", self.store.approval_state(approval.approval_id))
+        self.assertEqual(
+            ["expired", "expired", "expired"],
+            [leg.status for leg in self.store.get_legs("command-1")],
+        )
+        outbox = self.store.get_outbox("command-1")
+        self.assertEqual("terminal", outbox.state)
+        self.assertIsNone(outbox.worker_id)
+        self.assertEqual(0, outbox.attempt_count)
+        with sqlite3.connect(self.path) as connection:
+            ticket_state = connection.execute(
+                "SELECT state FROM execution_tickets WHERE ticket_hash = ?",
+                (ticket.ticket_hash,),
+            ).fetchone()[0]
+        self.assertEqual("terminal", ticket_state)
+        self.assertIsNone(
+            self.store.expire_next_queued_unsent(
+                at=ticket.expires_at + timedelta(seconds=1)
+            )
+        )
+        events = self.store.list_events("command-1")
+        self.assertEqual(before_events + 1, len(events))
+        self.assertEqual("queued_command_expired_proven_unsent", events[-1].event_type)
+        self.assertIn('"reservation_released":true', events[-1].payload_json)
+
+    def test_queued_expiry_event_failure_rolls_back_every_transition(self) -> None:
+        ticket, _ = self.admit_one()
+        before = (
+            self.store.get_command("command-1"),
+            self.store.get_outbox("command-1"),
+            self.store.get_legs("command-1"),
+            self.store.get_reserved_exposure(),
+        )
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER injected_queued_expiry_abort
+                BEFORE INSERT ON execution_events
+                WHEN NEW.event_type = 'queued_command_expired_proven_unsent'
+                BEGIN SELECT RAISE(ABORT, 'injected expiry event failure'); END
+                """
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.expire_next_queued_unsent(at=ticket.expires_at)
+
+        self.assertEqual(
+            before,
+            (
+                self.store.get_command("command-1"),
+                self.store.get_outbox("command-1"),
+                self.store.get_legs("command-1"),
+                self.store.get_reserved_exposure(),
+            ),
+        )
+        with sqlite3.connect(self.path) as connection:
+            state = connection.execute(
+                "SELECT state FROM execution_tickets WHERE ticket_hash = ?",
+                (ticket.ticket_hash,),
+            ).fetchone()[0]
+        self.assertEqual("consumed", state)
+
+    def test_queued_expiry_uses_earliest_required_leg_expiration(self) -> None:
+        original = make_ticket("asymmetric-expiry")
+        assert original.plan is not None
+        early = original.expires_at - timedelta(seconds=1)
+        changed_stop = replace(
+            original.plan.protective_stop,
+            expires_at=early,
+        )
+        plan_payload = {
+            "domain": "protected-trade-plan-v1",
+            "assessment_hash": original.plan.assessment_hash,
+            "grouping": original.plan.grouping.value,
+            "legs": [
+                canonical_data(original.plan.entry),
+                canonical_data(changed_stop),
+                canonical_data(original.plan.take_profit),
+            ],
+        }
+        changed_plan = replace(
+            original.plan,
+            protective_stop=changed_stop,
+            plan_hash=hashlib.sha256(
+                canonical_json(plan_payload).encode("utf-8")
+            ).hexdigest(),
+        )
+        ticket = replace(original, plan=changed_plan, ticket_hash="")
+        grant = make_infrastructure_grant(
+            ticket,
+            grant_id="asymmetric-expiry-grant",
+        )
+        self.store.register_infrastructure_grant(grant, at=NOW)
+        self.store.register_ticket(
+            ticket,
+            infrastructure_grant_hash=grant.grant_hash,
+            stored_at=NOW + timedelta(milliseconds=1),
+        )
+        approval = make_approval(ticket)
+        self.store.register_approval(approval)
+        self.store.admit(
+            command_id="command-asymmetric",
+            approval_id=approval.approval_id,
+            token_hash=approval.token_hash,
+            audience=approval.audience,
+            at=NOW + timedelta(milliseconds=3),
+        )
+
+        expired = self.store.expire_next_queued_unsent(at=early)
+
+        assert expired is not None
+        self.assertEqual("command-asymmetric", expired.command_id)
+        self.assertEqual("terminal", expired.state)
+        self.assertEqual((Decimal("0"), Decimal("0")), self.store.get_reserved_exposure())
+
+    def test_queued_expiry_refuses_claimed_or_attempt_bound_state(self) -> None:
+        ticket, _ = self.admit_one()
+        claim = self.store.claim_next(
+            "expiry-race-worker",
+            at=NOW + timedelta(seconds=1),
+            lease_seconds=3_600,
+        )
+        assert claim is not None
+        before = (
+            self.store.get_command("command-1"),
+            self.store.get_outbox("command-1"),
+            self.store.get_reserved_exposure(),
+        )
+        self.assertIsNone(self.store.expire_next_queued_unsent(at=ticket.expires_at))
+        self.assertEqual(
+            before,
+            (
+                self.store.get_command("command-1"),
+                self.store.get_outbox("command-1"),
+                self.store.get_reserved_exposure(),
+            ),
+        )
+
+    def test_queued_expiry_wins_race_with_new_claim_exactly_once(self) -> None:
+        ticket, _ = self.admit_one()
+        barrier = threading.Barrier(2)
+        outcomes: dict[str, object] = {}
+        lock = threading.Lock()
+
+        def expire() -> None:
+            store = ExecutionStore(
+                self.path,
+                environment=Environment.TESTNET,
+                account_id="testnet-account",
+                max_reserved_loss="100",
+                max_reserved_notional="2000",
+            )
+            barrier.wait()
+            result = store.expire_next_queued_unsent(at=ticket.expires_at)
+            with lock:
+                outcomes["expiry"] = result
+
+        def claim() -> None:
+            store = ExecutionStore(
+                self.path,
+                environment=Environment.TESTNET,
+                account_id="testnet-account",
+                max_reserved_loss="100",
+                max_reserved_notional="2000",
+            )
+            barrier.wait()
+            result = store.claim_next(
+                "racing-worker",
+                at=ticket.expires_at,
+                lease_seconds=10,
+            )
+            with lock:
+                outcomes["claim"] = result
+
+        threads = (threading.Thread(target=expire), threading.Thread(target=claim))
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertIsNone(outcomes["claim"])
+        self.assertIsNotNone(outcomes["expiry"])
+        self.assertEqual("terminal", self.store.get_command("command-1").state)
+        self.assertEqual((Decimal("0"), Decimal("0")), self.store.get_reserved_exposure())
+        self.assertEqual(
+            1,
+            sum(
+                event.event_type == "queued_command_expired_proven_unsent"
+                for event in self.store.list_events("command-1")
+            ),
+        )
+
+    def test_route_independent_maintenance_terminalizes_prepared_without_authority(self) -> None:
+        ticket, _ = self.admit_one()
+        reserved = self.store.get_reserved_exposure()
+        claim = self.store.claim_next(
+            "crashed-worker",
+            at=NOW + timedelta(seconds=1),
+            lease_seconds=5,
+        )
+        assert claim is not None
+        preflight = self.register_preflight(ticket)
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id="command-1",
+            worker_id="crashed-worker",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
+        )
+        signed = self.make_signed_evidence(
+            preflight,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
+        self.store.prepare_attempt(
+            "command-1",
+            "crashed-worker",
+            claim.fencing_token,
+            attempt_id="prepared-without-authority",
+            preflight_hash=preflight.preflight_hash,
+            signed_evidence=signed,
+            nonce=signed.nonce,
+            action_hash=signed.action_hash,
+            wire_hash=signed.wire_hash,
+            at=NOW + timedelta(seconds=2),
+        )
+
+        self.store.normalize_expired_entry_claims(
+            at=NOW + timedelta(seconds=6)
+        )
+
+        self.assertEqual("terminal", self.store.get_command("command-1").state)
+        self.assertEqual("terminal", self.store.get_outbox("command-1").state)
+        self.assertEqual("prepared", self.store.get_attempt("command-1").state)
+        self.assertEqual((Decimal("0"), Decimal("0")), self.store.get_reserved_exposure())
+        self.assertNotEqual(reserved, self.store.get_reserved_exposure())
+        self.assertEqual(
+            "prepared_entry_expired_proven_unsent",
+            self.store.list_events("command-1")[-1].event_type,
+        )
+
+    def test_route_independent_maintenance_preserves_authority_ambiguity(self) -> None:
+        ticket, _ = self.admit_one()
+        reserved = self.store.get_reserved_exposure()
+        claim = self.store.claim_next(
+            "crashed-worker",
+            at=NOW + timedelta(seconds=1),
+            lease_seconds=5,
+        )
+        assert claim is not None
+        preflight = self.register_preflight(ticket)
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id="command-1",
+            worker_id="crashed-worker",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
+        )
+        signed = self.make_signed_evidence(
+            preflight,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
+        attempt = self.store.prepare_attempt(
+            "command-1",
+            "crashed-worker",
+            claim.fencing_token,
+            attempt_id="prepared-with-authority",
+            preflight_hash=preflight.preflight_hash,
+            signed_evidence=signed,
+            nonce=signed.nonce,
+            action_hash=signed.action_hash,
+            wire_hash=signed.wire_hash,
+            at=NOW + timedelta(seconds=2),
+        )
+        pre_send = self.record_pre_send_role(
+            preflight,
+            signed,
+            command_id="command-1",
+            attempt_id=attempt.attempt_id,
+            worker_id="crashed-worker",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=2, milliseconds=100),
+        )
+        self.store.require_submission_authority(
+            "command-1",
+            attempt.attempt_id,
+            signed.evidence_hash,
+            "crashed-worker",
+            claim.fencing_token,
+            pre_send_role_attestation_hash=pre_send.attestation_hash,
+            at=NOW + timedelta(seconds=2, milliseconds=100),
+        )
+
+        self.store.normalize_expired_entry_claims(
+            at=NOW + timedelta(seconds=6)
+        )
+
+        self.assertEqual(
+            "submitted_unknown",
+            self.store.get_command("command-1").state,
+        )
+        self.assertEqual(
+            "submitted_unknown",
+            self.store.get_outbox("command-1").state,
+        )
+        self.assertEqual("unknown", self.store.get_attempt("command-1").state)
+        self.assertEqual(reserved, self.store.get_reserved_exposure())
+        transport = self.store.get_transport_evidence("command-1")
+        self.assertEqual("claim_expiry", transport.evidence_basis)
+        self.assertIsNone(transport.venue_write_attempted)
+        self.assertEqual(
+            "prepared_attempt_became_unknown",
+            self.store.list_events("command-1")[-1].event_type,
+        )
 
     def test_prepared_attempt_expiry_becomes_unknown_and_never_retries(self) -> None:
         ticket, _ = self.admit_one()

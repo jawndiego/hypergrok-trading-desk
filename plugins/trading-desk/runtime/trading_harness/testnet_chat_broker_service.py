@@ -34,6 +34,7 @@ from .darwin_acl import (
     expected_darwin_user_acl,
 )
 from .errors import StorageError, ValidationError
+from .executor_config import load_executor_config
 from .testnet_chat_approval import CHAT_APPROVER_UID
 from .testnet_chat_approval_store import TestnetChatApprovalStore
 from .testnet_chat_broker import (
@@ -45,6 +46,11 @@ from .testnet_chat_broker import (
     TestnetChatBrokerSession,
     handle_testnet_chat_approval_connection,
     start_testnet_chat_broker_session,
+)
+from .testnet_chat_delivery import testnet_chat_execution_scope_from_config
+from .testnet_chat_handoff_publisher import (
+    TestnetChatApprovalPublisherCallback,
+    TestnetChatHandoffPublisher,
 )
 
 
@@ -65,6 +71,9 @@ TESTNET_CHAT_STATE_PARENT = Path(
 )
 TESTNET_CHAT_DATABASE_PATH = TESTNET_CHAT_STATE_PARENT / "chat-approval.sqlite3"
 TESTNET_CHAT_GENERATIONS_PARENT = TESTNET_CHAT_STATE_PARENT / "broker-generations"
+TESTNET_CHAT_EXECUTOR_CONFIG_PATH = Path(
+    "/etc/trading-desk/testnet-executor.toml"
+)
 
 BROKER_GENERATION_RECEIPT_HASH_DOMAIN = (
     "trading-harness/testnet-chat-broker-generation-receipt/v1"
@@ -707,7 +716,7 @@ def serve_testnet_chat_broker_sequentially(
     listener: BrokerListener,
     *,
     session: TestnetChatBrokerSession,
-    store: TestnetChatApprovalStore,
+    commit_approval: Callable[..., object],
     stop_event: threading.Event,
     clock: Clock,
 ) -> BrokerServiceSummary:
@@ -715,8 +724,8 @@ def serve_testnet_chat_broker_sequentially(
 
     if type(session) is not TestnetChatBrokerSession:
         raise TypeError("session must be exact TestnetChatBrokerSession")
-    if type(store) is not TestnetChatApprovalStore:
-        raise TypeError("store must be exact TestnetChatApprovalStore")
+    if not callable(commit_approval):
+        raise TypeError("commit_approval must be callable")
     if not isinstance(stop_event, threading.Event):
         raise TypeError("stop_event must be threading.Event")
     accepted = approvals = rejected = unknown = 0
@@ -734,7 +743,7 @@ def serve_testnet_chat_broker_sequentially(
                     reply = handle_testnet_chat_approval_connection(
                         connection,  # type: ignore[arg-type]
                         session=session,
-                        commit_approval=store.approve_trade_proposal,
+                        commit_approval=commit_approval,
                         clock=clock,
                     )
                 except BrokerAcknowledgementLost:
@@ -785,6 +794,15 @@ def _run_enabled_service() -> int:
 
     verify_fixed_service_preflight()
     store = TestnetChatApprovalStore(TESTNET_CHAT_DATABASE_PATH, must_exist=True)
+    config = load_executor_config(TESTNET_CHAT_EXECUTOR_CONFIG_PATH)
+    scope = testnet_chat_execution_scope_from_config(config)
+    publisher = TestnetChatHandoffPublisher(scope)
+    approval_callback = TestnetChatApprovalPublisherCallback(
+        store,
+        publisher,
+        scope,
+    )
+    approval_callback.reconcile_approved_startup()
     listener: socket.socket | None = None
     created_identity: _PathIdentity | None = None
     try:
@@ -808,7 +826,7 @@ def _run_enabled_service() -> int:
             summary = serve_testnet_chat_broker_sequentially(
                 listener,
                 session=session,
-                store=store,
+                commit_approval=approval_callback,
                 stop_event=stop_event,
                 clock=lambda: datetime.now(timezone.utc),
             )
@@ -864,6 +882,7 @@ __all__ = (
     "BrokerGenerationReceipt",
     "BrokerServiceSummary",
     "TESTNET_CHAT_BROKER_SERVICE_ENABLED",
+    "TESTNET_CHAT_EXECUTOR_CONFIG_PATH",
     "build_broker_generation_receipt",
     "darwin_named_acl_lines",
     "darwin_uid_uuid",

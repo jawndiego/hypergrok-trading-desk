@@ -13,7 +13,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from trading_harness.errors import StorageError, ValidationError
+from trading_harness.errors import (
+    AdmissionDenied,
+    EntrySubmissionRevoked,
+    StorageError,
+    ValidationError,
+)
 from trading_harness.daily_loss import DailyLossLedger
 from trading_harness.execution_store import ExecutionStore
 from trading_harness.executor_config import parse_executor_config
@@ -35,10 +40,21 @@ from trading_harness.learning_ledger import LearningLedger, LedgerIntegrityError
 from trading_harness.nonce import PersistentNonceAllocator
 from trading_harness.planning import RiskSizingPolicy
 from trading_harness.staging_inbox import TradeStagingInbox
+from trading_harness.testnet_route_health import TestnetRouteHealthGate
 from tests.test_account_risk import flat_clearing
 from tests.test_hyperliquid_account import ACCOUNT, FixtureTransport
+from tests.test_execution_store import (
+    make_approval,
+    make_infrastructure_grant,
+    make_ticket,
+)
 from tests.test_learning_quote_service import config_text
 from tests.test_node import AT
+from tests.test_testnet_route_health import (
+    route_evidence,
+    route_expectation,
+    route_gate,
+)
 
 
 class FakeWallet:
@@ -668,6 +684,384 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
             [payload["type"] for _, payload in transport.calls],
         )
         self.assertFalse(second.loss_sync_skipped_for_priority)
+        self.assertFalse(third.route_health_required)
+        self.assertFalse(third.route_health_failed)
+        guard = service.runtime._entry_dispatcher.submission_guard
+        assert guard is not None
+
+        @contextmanager
+        def allow_runtime_guard():
+            yield
+
+        with patch.object(
+            service.runtime,
+            "entry_submission_guard",
+            allow_runtime_guard,
+        ):
+            with self.assertRaisesRegex(EntrySubmissionRevoked, "route-health"):
+                with guard():
+                    self.fail("unconfigured route health must deny final submission")
+
+    def test_entry_capability_requires_same_tick_route_health(self) -> None:
+        state = initialize_testnet_executor_state(self.config, clock=lambda: AT)
+
+        def build(*, configured: bool):
+            return build_active_testnet_executor_service(
+                state=state,
+                wallet=FakeWallet(self.config.api_wallet_address),
+                recovery_secret=b"r" * 32,
+                instance_id=(
+                    "route-ready-instance" if configured else "route-blocked-instance"
+                ),
+                worker_id=(
+                    "route-ready-worker" if configured else "route-blocked-worker"
+                ),
+                clock=lambda: AT,
+                policy=self.policy,
+                account_reader=lambda _address, _network: self.snapshot,
+                market_reader=lambda _symbol, _network: {},
+                info_transport=EmptyLossTransport(),
+                route_health_gate=(
+                    route_gate(self.config.config_hash, at=AT)
+                    if configured
+                    else None
+                ),
+            )
+
+        for configured in (False, True):
+            with self.subTest(configured=configured):
+                service = build(configured=configured)
+                preview = replace(
+                    service.runtime.dry_run(),
+                    step=RuntimeStep.ENTRY_DISPATCH,
+                )
+                with (
+                    patch.object(
+                        service.runtime,
+                        "dry_run",
+                        return_value=preview,
+                    ),
+                    patch.object(
+                        service.loss_synchronizer,
+                        "synchronize",
+                        return_value=SimpleNamespace(complete=True),
+                    ),
+                    patch.object(
+                        service.learning_projector,
+                        "synchronize",
+                        return_value=SimpleNamespace(),
+                    ),
+                    patch.object(
+                        service.runtime,
+                        "tick",
+                        return_value=preview,
+                    ) as tick,
+                ):
+                    cycle = service.tick()
+
+                tick.assert_called_once_with(
+                    entry_refresh_permitted=configured
+                )
+                self.assertTrue(cycle.route_health_required)
+                self.assertEqual(configured, not cycle.route_health_failed)
+                assert cycle.route_health is not None
+                self.assertEqual(configured, cycle.route_health.ready)
+                self.assertFalse(
+                    cycle.route_health.as_dict()["venue_writes_authorized"]
+                )
+
+    def test_permanent_route_outage_cannot_retain_expired_queued_risk(self) -> None:
+        state = initialize_testnet_executor_state(self.config, clock=lambda: AT)
+        ticket = make_ticket(account_id=self.config.account_id)
+        grant = make_infrastructure_grant(
+            ticket,
+            account_id=self.config.account_id,
+        )
+        approval = make_approval(
+            ticket,
+            account_id=self.config.account_id,
+        )
+        state.execution_store.register_infrastructure_grant(
+            grant,
+            at=ticket.created_at,
+        )
+        state.execution_store.register_ticket(
+            ticket,
+            infrastructure_grant_hash=grant.grant_hash,
+            stored_at=ticket.created_at + timedelta(milliseconds=1),
+        )
+        state.execution_store.register_approval(approval)
+        state.execution_store.admit(
+            command_id="route-expiry-command",
+            approval_id=approval.approval_id,
+            token_hash=approval.token_hash,
+            audience=approval.audience,
+            at=ticket.created_at + timedelta(milliseconds=3),
+        )
+        claim = state.execution_store.claim_next(
+            "crashed-route-worker",
+            at=ticket.created_at + timedelta(milliseconds=4),
+            lease_seconds=5,
+        )
+        assert claim is not None
+        self.assertGreater(state.execution_store.get_reserved_exposure()[0], 0)
+        service = build_active_testnet_executor_service(
+            state=state,
+            wallet=FakeWallet(self.config.api_wallet_address),
+            recovery_secret=b"r" * 32,
+            instance_id="route-expiry-instance",
+            worker_id="route-expiry-worker",
+            clock=lambda: ticket.expires_at,
+            policy=self.policy,
+            account_reader=lambda _address, _network: self.snapshot,
+            market_reader=lambda _symbol, _network: {},
+            info_transport=EmptyLossTransport(),
+            sign_l1_action=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("queued expiry must not sign")
+            ),
+        )
+        preview = replace(
+            state.observer.dry_run(),
+            step=RuntimeStep.IDLE,
+            venue_write_attempted=False,
+            entry_eligible=False,
+        )
+        with (
+            patch.object(service.runtime, "dry_run", return_value=preview),
+            patch.object(service.runtime, "tick", return_value=preview),
+            patch.object(service.loss_synchronizer, "synchronize", return_value=None),
+            patch.object(service.learning_projector, "synchronize", return_value=None),
+        ):
+            cycle = service.tick()
+
+        self.assertEqual(
+            "terminal",
+            state.execution_store.get_command("route-expiry-command").state,
+        )
+        self.assertEqual(
+            "terminal",
+            state.execution_store.get_outbox("route-expiry-command").state,
+        )
+        self.assertEqual(
+            (Decimal("0"), Decimal("0")),
+            state.execution_store.get_reserved_exposure(),
+        )
+        self.assertNotEqual(RuntimeStep.ENTRY_DISPATCH, cycle.runtime_step.step)
+        self.assertFalse(cycle.runtime_step.venue_write_attempted)
+        event_types = tuple(
+            event.event_type
+            for event in state.execution_store.list_events("route-expiry-command")
+        )
+        self.assertIn("unsent_claim_expired_requeued", event_types)
+        self.assertIn("queued_command_expired_proven_unsent", event_types)
+        self.assertIsNone(
+            state.execution_store.expire_next_queued_unsent(
+                at=ticket.expires_at + timedelta(seconds=1)
+            )
+        )
+
+    def test_final_submission_guard_rereads_fresh_route_before_authority(self) -> None:
+        state = initialize_testnet_executor_state(self.config, clock=lambda: AT)
+        expectation = route_expectation(self.config.config_hash)
+        evidence = route_evidence(expectation, at=AT)
+        reads = 0
+
+        def reader():
+            nonlocal reads
+            reads += 1
+            return evidence
+
+        service = build_active_testnet_executor_service(
+            state=state,
+            wallet=FakeWallet(self.config.api_wallet_address),
+            recovery_secret=b"r" * 32,
+            instance_id="route-final-guard-instance",
+            worker_id="route-final-guard-worker",
+            clock=lambda: AT,
+            policy=self.policy,
+            account_reader=lambda _address, _network: self.snapshot,
+            market_reader=lambda _symbol, _network: {},
+            info_transport=EmptyLossTransport(),
+            route_health_gate=TestnetRouteHealthGate(
+                executor_config_hash=self.config.config_hash,
+                expectation=expectation,
+                reader=reader,
+            ),
+        )
+
+        @contextmanager
+        def allow_runtime_guard():
+            yield
+
+        guard = service.runtime._entry_dispatcher.submission_guard
+        assert guard is not None
+        with patch.object(
+            service.runtime,
+            "entry_submission_guard",
+            allow_runtime_guard,
+        ):
+            with guard():
+                self.assertEqual(1, reads)
+        self.assertEqual(1, reads)
+
+    def test_tick_route_reader_expiry_rollback_and_headroom_block_entry(self) -> None:
+        state = initialize_testnet_executor_state(self.config, clock=lambda: AT)
+        expectation = route_expectation(self.config.config_hash)
+        evidence = route_evidence(expectation, at=AT)
+        near_start = evidence.expires_at - timedelta(milliseconds=2_000)
+        cases = (
+            (
+                "reader expired evidence",
+                (AT, AT, evidence.expires_at),
+                "route_health_evidence_expired_during_preflight",
+            ),
+            (
+                "clock rollback",
+                (AT, AT, AT - timedelta(milliseconds=1)),
+                "route_health_clock_rolled_back_during_read",
+            ),
+            (
+                "insufficient send headroom",
+                (near_start, near_start, near_start + timedelta(milliseconds=1)),
+                "route_health_evidence_headroom_insufficient",
+            ),
+        )
+        for label, clock_values, expected_reason in cases:
+            with self.subTest(label=label):
+                ticks = iter(clock_values)
+                reads = 0
+
+                def reader():
+                    nonlocal reads
+                    reads += 1
+                    return evidence
+
+                service = build_active_testnet_executor_service(
+                    state=state,
+                    wallet=FakeWallet(self.config.api_wallet_address),
+                    recovery_secret=b"r" * 32,
+                    instance_id=f"tick-route-{label}",
+                    worker_id=f"tick-route-worker-{label}",
+                    clock=lambda: AT,
+                    policy=self.policy,
+                    account_reader=lambda _address, _network: self.snapshot,
+                    market_reader=lambda _symbol, _network: {},
+                    info_transport=EmptyLossTransport(),
+                    route_health_gate=TestnetRouteHealthGate(
+                        executor_config_hash=self.config.config_hash,
+                        expectation=expectation,
+                        reader=reader,
+                    ),
+                )
+                preview = replace(
+                    service.runtime.dry_run(),
+                    step=RuntimeStep.ENTRY_DISPATCH,
+                )
+                service.clock = lambda: next(ticks)
+                with (
+                    patch.object(service.runtime, "dry_run", return_value=preview),
+                    patch.object(
+                        service.loss_synchronizer,
+                        "synchronize",
+                        return_value=SimpleNamespace(complete=True),
+                    ),
+                    patch.object(
+                        service.learning_projector,
+                        "synchronize",
+                        return_value=SimpleNamespace(),
+                    ),
+                    patch.object(
+                        service.runtime,
+                        "tick",
+                        return_value=preview,
+                    ) as tick,
+                ):
+                    cycle = service.tick()
+
+                tick.assert_called_once_with(entry_refresh_permitted=False)
+                self.assertEqual(1, reads)
+                self.assertTrue(cycle.route_health_failed)
+                assert cycle.route_health is not None
+                self.assertFalse(cycle.route_health.ready)
+                self.assertEqual(expected_reason, cycle.route_health.reason_code)
+
+    def test_final_route_reader_timing_failures_precede_authority_and_sender(self) -> None:
+        state = initialize_testnet_executor_state(self.config, clock=lambda: AT)
+        expectation = route_expectation(self.config.config_hash)
+        evidence = route_evidence(expectation, at=AT)
+        cases = (
+            (
+                "reader expired evidence",
+                (AT, evidence.expires_at),
+                "ROUTE_HEALTH_INVALID",
+            ),
+            (
+                "clock rollback",
+                (AT, AT - timedelta(milliseconds=1)),
+                "ROUTE_HEALTH_CLOCK_ROLLBACK",
+            ),
+            (
+                "insufficient send headroom",
+                (
+                    evidence.expires_at - timedelta(milliseconds=2_000),
+                    evidence.expires_at - timedelta(milliseconds=1_999),
+                ),
+                "ROUTE_HEALTH_HEADROOM",
+            ),
+        )
+        for label, clock_values, expected_code in cases:
+            with self.subTest(label=label):
+                reads = 0
+                ticks = iter(clock_values)
+
+                def reader():
+                    nonlocal reads
+                    reads += 1
+                    return evidence
+
+                service = build_active_testnet_executor_service(
+                    state=state,
+                    wallet=FakeWallet(self.config.api_wallet_address),
+                    recovery_secret=b"r" * 32,
+                    instance_id=f"route-timing-{expected_code}",
+                    worker_id=f"route-timing-worker-{expected_code}",
+                    clock=lambda: next(ticks),
+                    policy=self.policy,
+                    account_reader=lambda _address, _network: self.snapshot,
+                    market_reader=lambda _symbol, _network: {},
+                    info_transport=EmptyLossTransport(),
+                    route_health_gate=TestnetRouteHealthGate(
+                        executor_config_hash=self.config.config_hash,
+                        expectation=expectation,
+                        reader=reader,
+                    ),
+                )
+
+                @contextmanager
+                def allow_runtime_guard():
+                    yield
+
+                authority_called = False
+                sender_called = False
+                guard = service.runtime._entry_dispatcher.submission_guard
+                assert guard is not None
+                with patch.object(
+                    service.runtime,
+                    "entry_submission_guard",
+                    allow_runtime_guard,
+                ):
+                    with self.assertRaises(EntrySubmissionRevoked) as raised:
+                        with guard():
+                            authority_called = True
+                            sender_called = True
+                self.assertEqual(1, reads)
+                self.assertFalse(authority_called)
+                self.assertFalse(sender_called)
+                self.assertIsInstance(raised.exception.__cause__, AdmissionDenied)
+                self.assertEqual(
+                    expected_code,
+                    raised.exception.__cause__.code,
+                )
 
     def test_loss_transport_failure_blocks_entry_without_skipping_startup_safety(self) -> None:
         state = initialize_testnet_executor_state(self.config, clock=lambda: AT)
@@ -726,13 +1120,21 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
                 "synchronize",
                 side_effect=AssertionError("urgent work must not wait on learning"),
             ) as learning_sync,
+            patch.object(
+                service.route_health_gate,
+                "require_ready",
+                side_effect=AssertionError("urgent work must not wait on route health"),
+            ) as route_check,
         ):
             cycle = service.tick()
 
         self.assertTrue(cycle.loss_sync_skipped_for_priority)
         self.assertTrue(cycle.learning_sync_skipped_for_priority)
+        self.assertTrue(cycle.route_health_skipped_for_priority)
+        self.assertIsNone(cycle.route_health)
         self.assertFalse(sync.called)
         self.assertFalse(learning_sync.called)
+        self.assertFalse(route_check.called)
 
     def test_entry_capability_requires_complete_refresh_from_same_tick(self) -> None:
         state = initialize_testnet_executor_state(self.config, clock=lambda: AT)
@@ -919,6 +1321,16 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
             build_active_testnet_executor_service(
                 wallet=FakeWallet(self.config.api_wallet_address),
                 **{**common, "policy": RiskSizingPolicy()},
+            )
+        with self.assertRaisesRegex(ValidationError, "route-health gate config"):
+            build_active_testnet_executor_service(
+                wallet=FakeWallet(self.config.api_wallet_address),
+                **{
+                    **common,
+                    "route_health_gate": TestnetRouteHealthGate.unavailable(
+                        "f" * 64
+                    ),
+                },
             )
 
         other_root = self.root / "insecure"

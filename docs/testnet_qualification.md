@@ -183,8 +183,12 @@ following promotion, live integrations and observable tests remain:
 - attended fault injection that forwards one real exact request while dropping
   its response; the bounded loopback accept/drop/crash/no-resend harness passes
   offline but is not evidence of a live forwarded request;
-- optional application-level router health if router readiness is to be an
-  admission gate rather than an OS-only failure boundary.
+- installation and live qualification of the implemented default-unavailable
+  two-sample route-health gate. Its trusted collector, durable expectation and
+  preflight/attempt binding, final-path PF enforcement and remote VPN exit are
+  still absent. Offline code now rejects reader rollback/expiry, requires two
+  seconds of final headroom, defers only active proven-unsent route failures and
+  releases queued risk at the earliest ticket/leg expiry;
 - installed and empirically qualified free-space shutdown guards plus a
   deterministic qualification artifact builder/signing workflow.
 

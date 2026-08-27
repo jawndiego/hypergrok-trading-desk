@@ -65,6 +65,14 @@ Signer = Callable[
     SignedActionEnvelope,
 ]
 SubmissionGuard = Callable[[], ContextManager[None]]
+_TRANSIENT_ROUTE_HEALTH_DENIAL_CODES = frozenset(
+    {
+        "ROUTE_HEALTH_UNAVAILABLE",
+        "ROUTE_HEALTH_INVALID",
+        "ROUTE_HEALTH_CLOCK_ROLLBACK",
+        "ROUTE_HEALTH_HEADROOM",
+    }
+)
 
 
 def _clock() -> datetime:
@@ -237,6 +245,7 @@ class ExecutionDispatcher:
         self, worker_id: str
     ) -> DispatchResult | DispatchDenialResult | None:
         claim_time = self._now()
+        self.store.expire_next_queued_unsent(at=claim_time)
         outbox = self.store.claim_next(
             worker_id,
             at=claim_time,
@@ -269,6 +278,38 @@ class ExecutionDispatcher:
                 at=self._now(),
             )
         except (AdmissionDenied, StateConflict, ValidationError) as error:
+            if (
+                type(error) is AdmissionDenied
+                and error.code in _TRANSIENT_ROUTE_HEALTH_DENIAL_CODES
+            ):
+                deferred_at = self._now()
+                if outbox.claimed_at is None:
+                    raise StateConflict("route-blocked claim lacks its claimed time")
+                if deferred_at < outbox.claimed_at:
+                    # The exact rollback denial is itself sufficient reason to
+                    # abandon this proven-unsent lease.  Preserve timestamp
+                    # monotonicity from the durable claim rather than turning
+                    # a transient route-clock failure into command terminality.
+                    deferred_at = outbox.claimed_at
+                if (
+                    deferred_at < ticket.expires_at
+                    and deferred_at < plan.entry.expires_at
+                    and deferred_at < plan.protective_stop.expires_at
+                    and deferred_at < plan.take_profit.expires_at
+                ):
+                    deferred = self.store.defer_unsent_claim(
+                        command.command_id,
+                        reason=error.code,
+                        at=deferred_at,
+                        worker_id=worker_id,
+                        fencing_token=outbox.fencing_token,
+                    )
+                    return DispatchDenialResult(
+                        command_id=command.command_id,
+                        outcome="preflight_deferred",
+                        command_state=deferred.state,
+                        detail_code=error.code,
+                    )
             terminal = self.store.void_unsent_command(
                 command.command_id,
                 reason="preflight_permanent_failure:" + type(error).__name__,

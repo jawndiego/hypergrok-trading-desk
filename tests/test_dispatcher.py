@@ -317,6 +317,152 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual([], self.signing_events)
         self.assertIsNone(dispatcher.dispatch_next("dispatcher-2"))
 
+    def test_transient_route_denial_defers_without_signing_and_can_retry(self) -> None:
+        sender_calls: list[bytes] = []
+
+        def route_unavailable(*_arguments):
+            raise AdmissionDenied(
+                "ROUTE_HEALTH_UNAVAILABLE",
+                "transient route fixture",
+            )
+
+        def forbidden_signer(*_arguments):
+            raise AssertionError("route deferral must precede signing")
+
+        def forbidden_attestor(**_arguments):
+            raise AssertionError("route deferral must precede PRE_KEY")
+
+        dispatcher = ExecutionDispatcher(
+            self.store,
+            preparer=route_unavailable,
+            signer=forbidden_signer,
+            role_attestor=forbidden_attestor,
+            clock=self.clock,
+            lease_seconds=15,
+        )
+        reserved = self.store.get_reserved_exposure()
+        with patch(
+            "trading_harness.hyperliquid_transport._default_sender",
+            side_effect=AssertionError("route deferral must not reach sender"),
+        ) as sender:
+            deferred = dispatcher.dispatch_next("dispatcher")
+
+        assert deferred is not None
+        self.assertEqual("preflight_deferred", deferred.outcome)
+        self.assertEqual("queued", deferred.command_state)
+        self.assertEqual("ROUTE_HEALTH_UNAVAILABLE", deferred.detail_code)
+        self.assertFalse(deferred.venue_write_attempted)
+        sender.assert_not_called()
+        self.assertEqual([], self.signing_events)
+        self.assertEqual([], self.role_calls)
+        self.assertEqual(reserved, self.store.get_reserved_exposure())
+        self.assertEqual("queued", self.store.get_command("command-1").state)
+        self.assertEqual("queued", self.store.get_outbox("command-1").state)
+        with self.assertRaises(RecordNotFound):
+            self.store.get_attempt("command-1")
+
+        def sender_once(endpoint, body, _timeout):
+            sender_calls.append(body)
+            return HttpExchangeResponse(200, endpoint, self.response_body())
+
+        with patch(
+            "trading_harness.hyperliquid_transport._default_sender",
+            side_effect=sender_once,
+        ):
+            retried = self.dispatcher().dispatch_next("dispatcher-2")
+
+        assert retried is not None
+        self.assertEqual("response_received", retried.outcome)
+        self.assertEqual(1, len(sender_calls))
+        self.assertEqual(reserved, self.store.get_reserved_exposure())
+
+    def test_only_exact_base_route_denials_are_transient(self) -> None:
+        class ForgedRoutePolicyViolation(AdmissionDenied):
+            pass
+
+        def deny(*_arguments):
+            raise ForgedRoutePolicyViolation(
+                "ROUTE_HEALTH_UNAVAILABLE",
+                "subclass must remain permanent",
+            )
+
+        dispatcher = ExecutionDispatcher(
+            self.store,
+            preparer=deny,
+            signer=self.sign,
+            role_attestor=self.attest,
+            clock=self.clock,
+            lease_seconds=15,
+        )
+        result = dispatcher.dispatch_next("dispatcher")
+
+        assert result is not None
+        self.assertEqual("preflight_denied", result.outcome)
+        self.assertEqual("terminal", self.store.get_command("command-1").state)
+
+    def test_route_clock_rollback_defers_at_durable_claim_time(self) -> None:
+        def deny(*_arguments):
+            raise AdmissionDenied(
+                "ROUTE_HEALTH_CLOCK_ROLLBACK",
+                "rollback fixture",
+            )
+
+        claim_at = NOW + timedelta(seconds=1)
+        ticks = iter(
+            (
+                claim_at,
+                claim_at + timedelta(milliseconds=10),
+                claim_at - timedelta(milliseconds=1),
+            )
+        )
+        dispatcher = ExecutionDispatcher(
+            self.store,
+            preparer=deny,
+            signer=self.sign,
+            role_attestor=self.attest,
+            clock=lambda: next(ticks),
+            lease_seconds=15,
+        )
+
+        result = dispatcher.dispatch_next("dispatcher")
+
+        assert result is not None
+        self.assertEqual("preflight_deferred", result.outcome)
+        self.assertEqual("queued", self.store.get_command("command-1").state)
+        self.assertEqual(claim_at, self.store.get_command("command-1").updated_at)
+
+    def test_route_denial_after_required_expiry_is_permanent(self) -> None:
+        def deny(*_arguments):
+            raise AdmissionDenied(
+                "ROUTE_HEALTH_UNAVAILABLE",
+                "outage crossed expiry",
+            )
+
+        expires = self.ticket.expires_at
+        ticks = iter(
+            (
+                expires - timedelta(seconds=1),
+                expires - timedelta(milliseconds=500),
+                expires,
+                expires + timedelta(milliseconds=1),
+            )
+        )
+        dispatcher = ExecutionDispatcher(
+            self.store,
+            preparer=deny,
+            signer=self.sign,
+            role_attestor=self.attest,
+            clock=lambda: next(ticks),
+            lease_seconds=15,
+        )
+
+        result = dispatcher.dispatch_next("dispatcher")
+
+        assert result is not None
+        self.assertEqual("preflight_denied", result.outcome)
+        self.assertEqual("terminal", result.command_state)
+        self.assertEqual((Decimal("0"), Decimal("0")), self.store.get_reserved_exposure())
+
     def test_timeout_becomes_unknown_without_retry(self) -> None:
         def timeout(_endpoint, _body, _timeout):
             raise TimeoutError("private timeout")

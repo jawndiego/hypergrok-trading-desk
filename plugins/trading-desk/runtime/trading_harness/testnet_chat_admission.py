@@ -423,6 +423,24 @@ def build_testnet_chat_execution_handoff(
     )
 
 
+def testnet_chat_execution_handoff_id(
+    proposal: TradeProposal,
+    approval_receipt: TestnetChatApprovalReceipt,
+) -> str:
+    """Return the deterministic artifact identity without choosing publication time."""
+
+    if type(proposal) is not TradeProposal:
+        raise TypeError("proposal must be exact TradeProposal")
+    if type(approval_receipt) is not TestnetChatApprovalReceipt:
+        raise TypeError("approval_receipt must be exact TestnetChatApprovalReceipt")
+    if (
+        approval_receipt.proposal_id != proposal.proposal_id
+        or approval_receipt.proposal_hash != proposal.proposal_hash
+    ):
+        raise ValidationError("approval receipt differs from proposal")
+    return _handoff_identity(proposal, approval_receipt)
+
+
 def testnet_chat_execution_handoff_from_dict(
     value: Mapping[str, Any],
 ) -> TestnetChatExecutionHandoff:
@@ -504,5 +522,6 @@ __all__ = (
     "chat_execution_authorization_id",
     "chat_execution_command_id",
     "chat_execution_token_hash",
+    "testnet_chat_execution_handoff_id",
     "testnet_chat_execution_handoff_from_dict",
 )

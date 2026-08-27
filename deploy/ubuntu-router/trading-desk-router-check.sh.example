@@ -19,7 +19,22 @@ max_handshake_age=180
 
 [ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ]
 [ "$(cat /proc/sys/net/ipv6/conf/all/forwarding)" = 0 ]
+[ -f /etc/wireguard/trading-desk-router.key ]
+[ ! -L /etc/wireguard/trading-desk-router.key ]
 [ "$(stat -c '%u:%g:%a' /etc/wireguard/trading-desk-router.key)" = 0:0:600 ]
+[ "$(stat -c '%h' /etc/wireguard/trading-desk-router.key)" = 1 ]
+
+for public_config in \
+    /etc/netplan/50-trading-desk-router.yaml \
+    /etc/wireguard/wg-exec.conf \
+    /etc/nftables.conf \
+    /etc/sysctl.d/70-trading-desk-router.conf
+do
+    [ -f "$public_config" ]
+    [ ! -L "$public_config" ]
+    [ "$(stat -c '%u:%g:%a:%h' "$public_config")" = 0:0:600:1 ]
+done
+! grep -Eq '^[[:space:]]*PrivateKey[[:space:]]*=' /etc/wireguard/wg-exec.conf
 
 systemctl is-active --quiet nftables.service
 systemctl is-active --quiet "wg-quick@${wg_interface}.service"
@@ -62,4 +77,79 @@ age=$((now - latest_handshake))
 [ "$age" -ge 0 ]
 [ "$age" -le "$max_handshake_age" ]
 
+router_public_key=$(wg show "$wg_interface" public-key)
+[ -n "$router_public_key" ]
+router_public_key_hash=$(printf '%s' "$router_public_key" | sha256sum | awk '{print $1}')
+mac_public_key_hash=$(printf '%s' "$expected_peer" | sha256sum | awk '{print $1}')
+transfer=$(wg show "$wg_interface" transfer | awk -v peer="$expected_peer" '$1 == peer { print $2 " " $3 }')
+[ -n "$transfer" ]
+wg_rx_bytes=$(printf '%s\n' "$transfer" | awk '{print $1}')
+wg_tx_bytes=$(printf '%s\n' "$transfer" | awk '{print $2}')
+case "$wg_rx_bytes" in
+    ''|*[!0-9]*) exit 1 ;;
+esac
+case "$wg_tx_bytes" in
+    ''|*[!0-9]*) exit 1 ;;
+esac
+https_rule=$(printf '%s\n' "$forward_rules" | grep -F "iifname \"${wg_interface}\" oifname \"${wan_interface}\" ip saddr ${router_network} tcp dport 443")
+forwarded_https_packets=$(printf '%s\n' "$https_rule" | awk '{for (index=1; index<=NF; index++) if ($index == "packets") { print $(index+1); exit }}')
+case "$forwarded_https_packets" in
+    ''|*[!0-9]*) exit 1 ;;
+esac
+route_ipv4_default=$(ip -j -4 route show default)
+route_ingress_address=$(ip -j -4 address show dev "$ingress_interface")
+route_wg_address=$(ip -j -4 address show dev "$wg_interface")
+route_ipv6_default=$(ip -j -6 route show default)
+route_wan_ipv6=$(ip -j -6 address show dev "$wan_interface" scope global)
+route_snapshot_hash=$(
+    printf '%s\n%s\n%s\n%s\n%s\n' \
+        "$route_ipv4_default" \
+        "$route_ingress_address" \
+        "$route_wg_address" \
+        "$route_ipv6_default" \
+        "$route_wan_ipv6" | sha256sum | awk '{print $1}'
+)
+guest_configuration_lines=$(sha256sum \
+    /etc/netplan/50-trading-desk-router.yaml \
+    /etc/wireguard/wg-exec.conf \
+    /etc/nftables.conf \
+    /etc/sysctl.d/70-trading-desk-router.conf)
+[ "$(printf '%s\n' "$guest_configuration_lines" | wc -l | tr -d ' ')" = 4 ]
+guest_configuration_hash=$(printf '%s\n' "$guest_configuration_lines" | sha256sum | awk '{print $1}')
+nftables_policy=$(nft --stateless list ruleset)
+[ -n "$nftables_policy" ]
+nftables_policy_hash=$(printf '%s\n' "$nftables_policy" | sha256sum | awk '{print $1}')
+
+cat <<EOF
+guest_health_schema_version=testnet_guest_router_health.v1
+mode=local_nat_lab
+observed_at_epoch_seconds=${now}
+latest_handshake_at_epoch_seconds=${latest_handshake}
+peer_handshake_age_seconds=${age}
+wg_interface=${wg_interface}
+wan_interface=${wan_interface}
+ingress_interface=${ingress_interface}
+router_endpoint=${router_endpoint}
+router_ipv4_network=${router_network}
+dns_ipv4=${dns_address}
+router_public_key_hash=${router_public_key_hash}
+mac_public_key_hash=${mac_public_key_hash}
+route_snapshot_hash=${route_snapshot_hash}
+guest_configuration_hash=${guest_configuration_hash}
+nftables_policy_hash=${nftables_policy_hash}
+wg_rx_bytes=${wg_rx_bytes}
+wg_tx_bytes=${wg_tx_bytes}
+forwarded_https_packets=${forwarded_https_packets}
+ipv4_forwarding_enabled=true
+ipv6_forwarding_enabled=false
+wan_ipv6_default_route_present=false
+wan_global_ipv6_address_present=false
+nft_input_default_drop=true
+nft_forward_default_drop=true
+nft_output_default_accept=true
+wg_peer_exact=true
+wg_allowed_ips_exact=true
+testnet_only=true
+venue_write_attempted=false
+EOF
 printf '%s\n' "router_local_checks_passed peer_handshake_age_seconds=${age}"

@@ -1,9 +1,10 @@
 """Credential-free production preflight preparation for protected entries.
 
-This adapter performs only allowlisted Hyperliquid ``/info`` reads.  It binds
-fresh account, metadata, market depth and local loss-budget state into the
-exact :class:`DispatchPackage` consumed by :class:`ExecutionDispatcher`.
-Signing and transport remain separate isolated boundaries.
+This adapter first requires fresh credential-free route evidence, then performs
+only allowlisted Hyperliquid ``/info`` reads.  It binds fresh account,
+metadata, market depth and local loss-budget state into the exact
+:class:`DispatchPackage` consumed by :class:`ExecutionDispatcher`. Signing and
+transport remain separate isolated boundaries.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from .market_data import get_market_brief
 from .planning import ProtectedTradePlan, RiskSizingPolicy, RiskTicket
 from .policy import decimal_subtract, exact_decimal
 from .recovery_dispatcher import PreparedRecovery
+from .testnet_route_health import TestnetRouteHealthGate
 
 
 Clock: TypeAlias = Callable[[], datetime]
@@ -58,6 +60,7 @@ class TestnetEntryPreparer:
         main_account_address: str,
         limits: AccountRiskLimits,
         policy: RiskSizingPolicy,
+        route_health_gate: TestnetRouteHealthGate,
         clock: Clock = _clock,
         account_reader: AccountReader | None = None,
         market_reader: MarketReader | None = None,
@@ -71,6 +74,8 @@ class TestnetEntryPreparer:
             raise TypeError("limits must be AccountRiskLimits")
         if not isinstance(policy, RiskSizingPolicy):
             raise TypeError("policy must be RiskSizingPolicy")
+        if type(route_health_gate) is not TestnetRouteHealthGate:
+            raise TypeError("route_health_gate must be exact TestnetRouteHealthGate")
         if (
             limits.environment.value != "testnet"
             or limits.account_id != store.account_id
@@ -91,6 +96,7 @@ class TestnetEntryPreparer:
         self.main_account_address = main_account_address
         self.limits = limits
         self.policy = policy
+        self.route_health_gate = route_health_gate
         self.clock = clock
         self.account_reader = account_reader or (
             lambda address, network: fetch_account_snapshot(
@@ -146,6 +152,19 @@ class TestnetEntryPreparer:
             raise StateConflict("protected plan is outside the testnet account scope")
         instrument = plan.entry.instrument
         symbol = instrument.removesuffix("-PERP")
+        route_checked_at = self._now()
+        if route_checked_at < started:
+            raise StateConflict("entry preparation clock moved backwards")
+        route_evidence = self.route_health_gate.require_ready(
+            at=route_checked_at
+        )
+        route_read_completed_at = self._now()
+        self.route_health_gate.verify_after_read(
+            route_evidence,
+            started_at=route_checked_at,
+            completed_at=route_read_completed_at,
+            minimum_remaining_ms=0,
+        )
         venue = self.account_reader(self.main_account_address, "testnet")
         if not isinstance(venue, HyperliquidAccountSnapshot):
             raise TypeError("account_reader must return HyperliquidAccountSnapshot")
@@ -153,8 +172,12 @@ class TestnetEntryPreparer:
         if not isinstance(market, Mapping):
             raise TypeError("market_reader must return a mapping")
         checked_at = self._now()
-        if checked_at < started:
+        if checked_at < route_read_completed_at:
             raise StateConflict("entry preparation clock moved backwards")
+        self.route_health_gate.verify_still_active(
+            route_evidence,
+            at=checked_at,
+        )
         daily_loss_used = exact_decimal(
             self.daily_loss_reader(checked_at),
             field="daily_loss_used",

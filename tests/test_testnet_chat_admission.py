@@ -30,6 +30,7 @@ from trading_harness.domain import Environment
 from trading_harness.errors import (
     AdmissionDenied,
     PolicyViolation,
+    RecordNotFound,
     StateConflict,
     StorageError,
     ValidationError,
@@ -122,7 +123,7 @@ def approved_handoff(
         proposal,
         proposal.required_approval_text,
         peer_uid=501,
-        uid_session_hash=SESSION_HASH,
+        uid_session_hash=proposal.uid_session_hash,
         received_at=NOW + timedelta(milliseconds=3),
     )
     return build_testnet_chat_execution_handoff(
@@ -630,6 +631,49 @@ class ChatAdmissionTests(unittest.TestCase):
                     return_value=self.delivery,
                 ), self.assertRaisesRegex(StateConflict, "clock rolled back"):
                     self.store.admit_chat_handoff(self.handoff.handoff_id)
+                self.assertEqual((0, 0, 0, 0, 0), self.counts())
+                self.assertEqual("awaiting_approval", self.ticket_state())
+
+    def test_durable_authorization_revalidates_by_exact_handoff_id(self) -> None:
+        command = self.admit()
+        reopened = ExecutionStore(
+            self.path,
+            environment=Environment.TESTNET,
+            account_id="testnet-account",
+            max_reserved_loss="100",
+            max_reserved_notional="2000",
+            chat_scope=self.scope,
+            must_exist=True,
+        )
+
+        authorization = reopened.get_chat_authorization_by_handoff_id(
+            self.handoff.handoff_id
+        )
+
+        self.assertEqual(self.handoff, authorization.handoff)
+        self.assertEqual(command.command_id, authorization.command_id)
+        self.assertEqual(self.scope.scope_hash, authorization.chat_scope_hash)
+        with self.assertRaisesRegex(RecordNotFound, "not registered"):
+            reopened.get_chat_authorization_by_handoff_id(
+                "tch_" + "f" * 48
+            )
+
+    def test_first_admission_time_denials_distinguish_future_from_expired(self) -> None:
+        cases = (
+            (
+                "CHAT_HANDOFF_NOT_YET_ACTIVE",
+                self.handoff.published_at - timedelta(microseconds=1),
+            ),
+            (
+                "CHAT_HANDOFF_EXPIRED",
+                self.handoff.proposal.expires_at,
+            ),
+        )
+        for expected_code, checked_at in cases:
+            with self.subTest(expected_code=expected_code):
+                with self.assertRaises(AdmissionDenied) as raised:
+                    self.admit(at=checked_at)
+                self.assertEqual(expected_code, raised.exception.code)
                 self.assertEqual((0, 0, 0, 0, 0), self.counts())
                 self.assertEqual("awaiting_approval", self.ticket_state())
 

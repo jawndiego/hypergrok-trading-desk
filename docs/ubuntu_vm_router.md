@@ -2,9 +2,10 @@
 
 Status: **repository-rendered guest configuration plus a pinned, plan-only
 Lima/VZ VM bundle; immutable public-input replay and a root host-preparation
-artifact are implemented, while every phase remains unapplied and writable
-Lima state, VM apply and boot orchestration remain disabled/unqualified; not
-VPN-qualified or a capital security boundary**.
+artifact plus a default-unavailable application route-health gate are
+implemented, while every phase remains unapplied and writable Lima state, VM
+apply, live health collection and boot orchestration remain
+disabled/unqualified; not VPN-qualified or a capital security boundary**.
 
 This design keeps the signer/executor on macOS, where the reviewed System
 Keychain and UID/ACL model exist, and puts only network routing in a dedicated
@@ -78,14 +79,16 @@ The output directory must not already exist. It contains:
 | `wg-exec.conf` | `/etc/wireguard/wg-exec.conf` |
 | `nftables.conf` | `/etc/nftables.conf` on this dedicated VM only |
 | `70-trading-desk-router.conf` | `/etc/sysctl.d/70-trading-desk-router.conf` |
-| `trading-desk-router-check` | `/usr/local/libexec/trading-desk-router-check` |
+| `trading-desk-router-check` | `/usr/local/libexec/trading-desk-router-check`; emits bounded non-secret topology/config hashes, handshake time and WireGuard/HTTPS counters for a future collector |
 | `mac-wireguard.conf.fragment` | attended paste into an app-generated Mac tunnel |
 | `local-nat-lab-test-plan` | plan-only attended test commands; never executes them |
 | `bundle-manifest.json` | retained deployment evidence |
 
 The manifest states explicitly that public egress does not change, host direct
 bypass is not prevented, venue writes are not authorized, mainnet is not
-authorized, and no `PrivateKey` field is emitted. WireGuard public and private
+authorized, the application route gate does not default ready, no trusted
+health collector or durable route-evidence binding is configured, and no
+`PrivateKey` field is emitted. WireGuard public and private
 keys have the same encoded shape, so the renderer cannot prove provenance; the
 operator must attest that both supplied strings were derived public keys.
 Retain the printed manifest SHA-256 outside the writable bundle in the change
@@ -241,7 +244,8 @@ with `flush ruleset`. Its observable policy is:
 - WireGuard UDP and SSH accepted only on the reviewed ingress interface and
   only from the exact management `/32`;
 - established replies accepted;
-- IPv4 forwarded only from `wg-exec` to the reviewed WAN interface;
+- IPv4 forwarded only from `wg-exec` to the reviewed WAN interface; accepted
+  HTTPS carries an explicit packet counter for two-sample route evidence;
 - forwarded clients may use only the reviewed DNS resolver on port 53,
   HTTPS/TCP 443 and NTP/UDP 123; DoT, QUIC and other ports remain blocked;
 - NAT applied only to the WireGuard IPv4 subnet on that WAN;
@@ -333,13 +337,43 @@ not execute any test or mutate the host.
    part of this no-write phase and remains an implementation gap before live
    qualification.
 
-The current application has no router-health admission field. If the WireGuard
-route remains selected but blackholes, authority may be consumed before one
-failed/unknown attempt. If macOS removes that route, traffic may bypass the VM
-and succeed directly. There is no application-configured fallback, but host
-fallback remains possible. A successful request alone does not prove VM
-traversal. Do not describe router health as an entry gate until separately
-reviewed application and host enforcement implement one.
+The application now has a narrowing-only route-health contract. It binds the
+executor config, reviewed router/VM manifests, local-lab qualification,
+peer-key hashes, exact endpoint/interfaces/peers/DNS and installed public
+configuration. One evidence document contains two stable samples around the
+fixed credential-free TESTNET `POST /info {"type":"meta"}` read. It requires a
+recent handshake, unchanged Mac IPv4 and IPv6 `utun` defaults, exact guest
+forwarding/nftables assertions, non-regressing WireGuard counters and an
+increasing accepted-HTTPS counter. Collection may span at most 15 seconds and
+expires within five seconds of its second sample.
+
+This gate defaults to unavailable. A new entry is denied in the same-tick
+runtime readiness decision, before account/market reads, and again inside the
+final runtime submission guard before authority/send unless a trusted reader
+returns exact active evidence. Each reader is bracketed by service-clock
+samples; rollback or expiry during the read fails, and the final sample must
+leave the full two-second PRE_SEND TTL before authority. Failure voids a
+proven-unsent entry and never selects a direct route. Recovery remains independent. The repository has no
+trusted collector, durable expectation loader or binding of the evidence hash
+into dispatch preflight/attempt/submission authority, so the test-injected
+reader is not a commissioning path.
+A route-only preparation denial can release only the current claim and requeue
+that same command while its ticket and all three legs remain active and no
+attempt/authority exists. Before preview, credential-free maintenance
+normalizes expired claims and atomically terminalizes queued work at the
+earliest ticket/leg expiry, releasing its proven-unsent reservation. Thus a
+permanent outage cannot strand the account's active-command slot.
+A future production reader must load already-collected local evidence within a
+strict bound. It must not run SSH, route tools, DNS, TLS or the `/info` probe
+while the final runtime submission lock is held; a separate least-privilege
+collector owns the two observations and atomic evidence publication.
+
+If the WireGuard route remains selected but blackholes after the final check,
+one failed/unknown attempt is still possible. If macOS removes that route,
+traffic may bypass the VM and succeed directly. There is no application-
+configured fallback, but host fallback remains possible. A successful request
+alone does not prove VM traversal. The gate is a fail-closed application signal,
+not a host kill switch or VPN qualification.
 
 ## Current stop line and shortest attended sequence
 
@@ -376,11 +410,27 @@ none of those artifacts. A macOS PF/Network Extension kill switch also remains
 absent, so even that future remote peer would not by itself prevent host route
 bypass.
 
+The future remote-exit extension must be a new reviewed schema/mode, never an
+environment toggle or live edit of `local_nat_lab`. It must bind a fixed remote
+gateway public key and endpoint IP/UDP port, generate the VM-side private key
+only inside the guest, and add a distinct `wg-egress` interface. VM output must
+default-drop except the outer handshake to that fixed endpoint plus established
+traffic; forwarded DNS, NTP and HTTPS must exit only `wg-egress`, and NAT must
+apply only from `wg-exec` to `wg-egress`. Loss of the remote peer must blackhole,
+not fall back to the VM WAN. A separate macOS PF/Network Extension or physical
+router must then prove that the Mac cannot reach TESTNET, DNS, IPv4 or IPv6
+outside `wg-exec`. Provider account setup, endpoint selection, static-IP terms,
+jurisdiction and live leak/failure tests remain operator decisions outside this
+credential-free repository slice.
+
 ## First TESTNET transaction boundary
 
 The local router can carry read-only TESTNET traffic after its local checks. It
 may carry attended functional transactions only after the separate
 commissioning gaps close, and it never qualifies always-on egress isolation.
+The default-unavailable route gate further blocks normal entry until a trusted
+collector and reviewed expectation are installed, but its evidence is not yet
+durably bound to the command and it cannot prevent macOS route fallback.
 The first harness order write remains blocked by
 `docs/testnet_commissioning.md`. The qualification-only GTC/cancel durable core
 plus dormant signer/sender/result transitions and a role-bound terminal CLI

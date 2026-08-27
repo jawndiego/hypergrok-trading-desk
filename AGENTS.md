@@ -27,13 +27,18 @@ This repository builds an agent-runtime-neutral trading research and execution h
   handoff and atomic executor consume/reservation/outbox admission. Schema v15
   removes free handoff/address/audience inputs: a caller supplies only a
   handoff ID and the store itself invokes the fixed UID-451 reader for a
-  config-bound, UID-452-owned canonical artifact. No installed listener/ACL,
-  control-side handoff publisher or executor consumer loop exists.
+  config-bound, UID-452-owned canonical artifact. A UID-452 artifact-first
+  publisher, empty ID-only ready index, approval callback/startup active repair
+  and dormant cached UID-451 consumer exist offline. Their gates remain false;
+  no listener/ACL/runtime is installed or commissioned.
 - The issuer's staging chain is store-backed, but its account and market
   evidence bindings are currently typed/self-consistent in-memory values. Do
   not describe their collectors as authoritative or enable presentation until
   fixed reviewed collector/store adapters prove provenance. Fresh executor
   preflight prevents capital bypass, not misleading issuance-time UX.
+  `deploy/macos/testnet/TESTNET_CHAT_ISSUANCE_PROVENANCE_PLAN.md` is an inert
+  proposal for UID 453 collectors, grant verification and executor
+  preregistration receipts; none exists or is authorized to apply.
 - The isolated TESTNET worker has a deployable write path, but it is a separate process and CLI. It is never an MCP tool or skill capability. Mainnet remains hard-disabled.
 - The foundation admits only local `infrastructure_testnet` `simulate_order`
   commands; deny strategy, shadow, mainnet, and systematic grants.
@@ -128,8 +133,8 @@ This repository builds an agent-runtime-neutral trading research and execution h
   reading, and be mutually verified by the UID-501 bridge before it sends. The
   control database needs a canonical UID-452 mode-0700 parent, mode-0600
   single-link files and no UID-501 ACL. Those ACL/listener/install checks and
-  the control-side handoff publisher plus installed executor consumer are still
-  promotion blockers.
+  installation/enablement of the offline publisher/ready-index/consumer chain
+  are still promotion blockers.
 - Execution-store schema v13 makes normal protected entry require fresh,
   stable two-read `userRole(api_wallet)` attestations at PRE_KEY and PRE_SEND.
   PRE_KEY is bound into signed evidence; PRE_SEND is attempt/signed-evidence
@@ -163,8 +168,11 @@ This repository builds an agent-runtime-neutral trading research and execution h
   `/private`, `/private/var` and `/private/var/db` must remain root:wheel 0755
   and ACL-free. UID 452 owns the dedicated root/config directory at 0700 with
   the sole UID-451 execute ACE and must publish immutable 0400 files create-only
-  with the sole UID-451 read ACE. The publisher, consumer loop and exact ACLs
-  are not installed.
+  with the sole UID-451 read ACE. Source now publishes the fully durable
+  artifact before an empty marker in the distinct ready index; the dormant
+  consumer treats the marker as notification only and revalidates v16 state.
+  Neither namespace, ACL, publisher nor consumer is installed/enabled. Retain
+  reviewed archival/GC before the hard 1,024-entry ready-index cap is reached.
 - Never provision a real secret through `security add-generic-password` or
   trust the shared `/usr/bin/security` executable in an item ACL. The macOS
   execution design requires the sealed role-specific native readers, fixed
@@ -186,6 +194,29 @@ This repository builds an agent-runtime-neutral trading research and execution h
   `192.168.106.2/24` guest ingress contract. The rendered
   `local-nat-lab-test-plan` is print-only: PF enforcement, a remote VPN exit,
   test execution and VM apply all remain absent.
+- `testnet_route_health.py` defines a credential-free, two-sample,
+  five-second TESTNET `local_nat_lab` evidence contract bound to the executor
+  config, VM/router manifests, qualified topology, peer-key hashes, stable Mac
+  default routes, guest policy, handshake, routed read-only `/info` probe and
+  advancing WireGuard/HTTPS counters. The active executor defaults this gate
+  to unavailable, checks it before account/market preparation and again inside
+  the final runtime guard before submission authority. Both reader boundaries
+  use nondecreasing before/after service-clock samples; the final sample requires
+  at least the full two-second PRE_SEND TTL of remaining route-evidence life.
+  A route failure at preparer time may requeue only the same proven-unsent
+  claim while its ticket and every leg remain active; the store retains its
+  approval/reservation and refuses any attempt/authority state. Independent
+  pre-preview maintenance normalizes expired claims and atomically terminalizes
+  the queued command at the earliest ticket/leg expiry, releasing risk. A
+  final-guard failure after attempt preparation voids proven-unsent entry. No
+  path selects a direct-network fallback; recovery remains independent.
+- Do not represent that route gate as installed or VPN-qualified. No trusted
+  bounded collector, durable expectation/config binding, preflight/attempt
+  evidence persistence, PF/Network Extension kill switch, remote VPN peer or
+  live route qualification exists yet.
+- A future final-guard reader must be a bounded local cached-evidence read. It
+  may not run SSH, route commands, DNS, TLS or an `/info` probe while holding
+  the runtime submission lock; the separate collector owns those observations.
 - The router VM is network-only. It receives no API-wallet, account config,
   execution state, Keychain access, repository/shared-folder mount, approval
   secret, agent runtime or venue authority.

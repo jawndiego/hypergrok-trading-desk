@@ -29,7 +29,10 @@ The normative live sequence remains `docs/testnet_qualification.md`.
 - Three disabled local identities exist in the current machine plan: research
   UID 450, executor UID 451 and control UID 452.
 - A private-key-field-free local Ubuntu router profile and deterministic
-  renderer exist; operator public-key provenance is still required.
+  renderer exist. Its guest check now exposes bounded non-secret hashes and
+  WireGuard/HTTPS counters for a two-sample health collector. A typed
+  five-second route-readiness gate exists and defaults unavailable; operator
+  public-key provenance and a trusted live collector are still required.
 - A separate TESTNET-only qualification core durably represents the retained
   account/agent snapshot, fixed GTC canary, bound cancel and full-residual
   attended close. Its credential-free envelope/injected recovery-verifier
@@ -73,10 +76,14 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   only a handoff ID and the store-owned clock while the fixed UID-451 reader
   internally loads a canonical, exact-ACL UID-452-owned config-hash-path
   artifact. Schema v16 persists and restart-validates the complete canonical
-  ancestor/identity/ACL/byte evidence. No listener/ACL install,
-  authenticated collector composition, same-process issuance, handoff artifact
-  publisher or installed reader/consumer loop exists, so this is not yet a
-  callable capital-bearing path.
+  ancestor/identity/ACL/byte evidence. A UID-452 artifact-first publisher,
+  ID-only ready index, broker callback/startup active repair and dormant cached
+  UID-451 consumer now compose offline. All gates remain false. No listener/
+  ACL/runtime install, authenticated account/market/grant provenance or
+  same-process active-session issuer exists, so this is not yet callable.
+  An inert issuance-provenance plan proposes UID/GID 453, fixed TESTNET-info-
+  only evidence, an attended grant-verification receipt and executor
+  preregistration receipt; none is implemented or authorized.
 
 These facts do not make the machine transaction-ready.
 
@@ -121,6 +128,13 @@ their owning machines because their derived public keys are renderer inputs.
    macOS PF/Network Extension or non-bypassable physical router remains a later
    egress-isolation gate; if absent during an attended functional TESTNET
    canary, the qualification artifact must say network isolation is unqualified.
+   The application route gate now fails closed before entry preparation and
+   again before submission authority with post-reader clock validation and the
+   full two-second PRE_SEND headroom. Route-only preflight denial requeues only
+   an active proven-unsent command; pre-preview maintenance normalizes claims
+   and releases queued risk at the earliest ticket/leg expiry. It has no installed collector,
+   durable expectation/preflight binding or live evidence. Do not inject test
+   evidence into a commissioned process.
 7. **Proxy/trust environment.** Prove the executor rejects ambient proxy and CA
    override variables and that its urllib openers install an empty proxy
    handler. Retain the root-owned CA path and TLS hostname-verification
@@ -138,7 +152,9 @@ their owning machines because their derived public keys are renderer inputs.
     Prove UID 501 can only traverse/connect to the socket and cannot create,
     replace, list or read control state. Add named-ACL inspection, stale-node
     refusal, restart/crash evidence and broker-generation persistence before
-    installing either the broker or its unregistered stdio MCP client.
+    installing either the broker or its unregistered stdio MCP client. Install
+    the separate handoff and ready-index paths only from an exact sealed plan,
+    and define archival/GC before the 1,024-marker hard cap.
 
 No `init`, venue/Keychain secret, grant issuance, launchd installation or
 harness venue write belongs in this phase.
@@ -156,10 +172,10 @@ code and attended-evidence gaps:
 | Ordinary attended reduce-only close, including an unexpected GTC-canary fill | Full-residual envelope/result/query, pinned SDK signer/recovery, attended CLI authorization/reconciliation and terminal-flat source-reservation release exist offline; submission promotion and live exercise remain absent; general bracket-parent close is intentionally unsupported |
 | WebSocket disconnect/fill/recovery exercise | An injected, credential-free exact TESTNET client/decoder accepts only `orderUpdates` and `userEvents` (`channel: user`) and forces a REST request begun after the causal boundary whose receipt/server watermark covers the event after connect, every advisory event and every disconnect because the official feed has no gap-free sequence; timestamp-less events require strict server-time advance; no live connector, durable event integration or attended exercise exists |
 | Forward request but drop the real response | A bounded loopback HTTP harness proves accept-then-drop, crash normalization, reservation retention and no resend; no live forwarding proxy or attended real-request exercise exists |
-| Router health as an admission capability | No application router-health field or pre-admission guard exists |
+| Router health as an admission capability | A strict two-sample TESTNET `local_nat_lab` model and default-unavailable gate check same-tick readiness, preparation and final pre-authority state with post-reader clocks and two-second headroom. Exact route-only denial may requeue only active proven-unsent state; independent claim normalization and earliest ticket/leg expiry prevent stranded reservation. No authenticated bounded collector, durable config/preflight/attempt binding, PF enforcement, remote exit or live qualification exists |
 | Executor free-space shutdown threshold | External fail-closed guard and launchd templates exist; root-owned config, real APFS `statvfs`, shutdown and restart behavior are not installed/qualified |
 | Signed qualification artifact | No artifact builder/signing workflow exists; the deliverable is still manual |
-| Codex chat proposal approval | Proposal v2, store-backed staging plus typed/self-consistent issuance snapshots, create-only presentation, durable approval CAS, mutual peer-checked wire/client, exact one-field stdio MCP, deterministic handoff, schema-v13 atomic admission/learning provenance, schema-v14 signer/outcome role fencing, schema-v15 config-bound verified reader/scope and schema-v16 canonical delivery evidence exist offline. Missing: fixed authenticated account/market collectors, same-process issuer/listener lifecycle, socket/state/presentation/handoff ACL installation, a UID-452 create-only handoff publisher, installed UID-451 reader/consumer and live end-to-end qualification |
+| Codex chat proposal approval | Proposal v2, presentation, durable CAS, peer-checked bridge, one-field stdio MCP, schema-v13-v16 admission, UID-452 artifact-first publisher/ID-only ready index, startup repair and dormant cached UID-451 consumer exist offline. Missing: authenticated account/market collectors and preverified grant provenance, same-process active-session issuer/listener composition, all path/ACL/runtime installation, ready-marker archival/GC and live end-to-end qualification |
 
 Close the remaining items as narrow TESTNET-only, durable workflows with
 observable failure tests. They may not become generic MCP execution tools,
@@ -169,7 +185,8 @@ offline remote lane recognizes only exact `execute trade <proposal-id>` for an
 immutable, short-lived, fully bound proposal and can durably record approval,
 and a separately delivered handoff can be atomically admitted offline only
 after the fixed UID-451 reader authenticates its config-bound UID-452 artifact.
-The publisher, consumer and ACLs are not installed. Bare/free-form chat remains
+The offline publisher and consumer gates remain false and their paths/ACLs are
+not installed. Bare/free-form chat remains
 invalid. Until the live gates pass, the first harness order write remains blocked.
 
 ## Credential provisioning

@@ -36,14 +36,18 @@ it may not grant state read/list/create/delete/rename/replace rights.
 
 The current storage/ACL scripts do not create or verify either path, the
 separate presentation namespace or the config-hash-bound handoff namespace,
+or the ID-only ready-index namespace,
 and no script installs or launches a broker. The application wheel includes the
 dormant stdio MCP entry point, but the installer does not register or enable it
 in Codex, the plugin descriptor, OpenCode or launchd. A later exact-head pack
 must add named-ACL inspection, stale socket refusal, broker-generation evidence,
 restart/crash probes, authenticated evidence collectors, same-process issuance,
-create-only handoff publication, executor-side verified-reader consumption and
-negative UID tests before these paths are applied. The router VM receives none
-of this state.
+installation/enablement of the offline artifact-first publisher, ID-only ready
+index and cached executor consumer, marker archival/GC, and negative UID tests
+before these paths are applied. The router VM receives none of this state.
+The adjacent `TESTNET_CHAT_ISSUANCE_PROVENANCE_PLAN.md` is inert design only;
+its proposed UID 453 collector and grant/executor receipt pipelines do not
+exist and authorize no identity, ACL, network or service change.
 
 ## Irreversible operator choice
 
@@ -148,6 +152,7 @@ CAS/wire/stdio MCP, typed issuer/presentation, schema-v13 atomic admission,
 schema-v14 signer/outcome fences, schema-v15 verified handoff reader/scope and
 schema-v16 full canonical delivery evidence are likewise offline. They still
 need authenticated collectors, same-process
-issuance, fixed listener and all named ACLs, an installed handoff publisher/
-consumer and live end-to-end qualification. WebSocket live recovery, real
+issuance and grant provenance, fixed listener and all named ACLs, installation
+and enablement of the implemented publisher/ready-index/consumer chain,
+archival before its 1,024-entry cap, and live end-to-end qualification. WebSocket live recovery, real
 response-loss injection and the signed qualification artifact remain incomplete.

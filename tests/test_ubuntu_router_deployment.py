@@ -137,6 +137,7 @@ class UbuntuRouterRendererTests(unittest.TestCase):
             self.assertEqual(
                 manifest["security_claims"],
                 {
+                    "application_route_gate_default_ready": False,
                     "changes_public_egress_ip": False,
                     "host_direct_bypass_prevented": False,
                     "macos_full_tunnel_routes_emitted": True,
@@ -144,6 +145,8 @@ class UbuntuRouterRendererTests(unittest.TestCase):
                     "mainnet_authorized": False,
                     "private_key_field_emitted": False,
                     "remote_vpn_exit_configured": False,
+                    "route_health_evidence_durably_bound": False,
+                    "trusted_route_health_collector_configured": False,
                     "venue_writes_authorized": False,
                     "vpn_qualified": False,
                 },
@@ -188,7 +191,7 @@ class UbuntuRouterRendererTests(unittest.TestCase):
                 nftables,
             )
             self.assertIn(
-                'iifname "wg-exec" oifname "enp0s1" ip saddr 10.77.0.0/24 tcp dport 443 ct state new,established accept',
+                'iifname "wg-exec" oifname "enp0s1" ip saddr 10.77.0.0/24 tcp dport 443 ct state new,established counter accept',
                 nftables,
             )
             self.assertIn(
@@ -222,7 +225,21 @@ class UbuntuRouterRendererTests(unittest.TestCase):
             self.assertIn("ip -6 route show default", check)
             self.assertIn('address show dev "$wan_interface" scope global', check)
             self.assertIn("prerouting_observe", check)
+            self.assertIn("nft --stateless list ruleset", check)
             self.assertIn("router_local_checks_passed", check)
+            for health_field in (
+                "guest_health_schema_version=testnet_guest_router_health.v1",
+                "route_snapshot_hash=",
+                "guest_configuration_hash=",
+                "nftables_policy_hash=",
+                "router_public_key_hash=",
+                "mac_public_key_hash=",
+                "wg_rx_bytes=",
+                "wg_tx_bytes=",
+                "forwarded_https_packets=",
+                "venue_write_attempted=false",
+            ):
+                self.assertIn(health_field, check)
             self.assertNotIn("router_ready", check)
             subprocess.run(
                 ["/bin/sh", "-n", str(output / "trading-desk-router-check")],
@@ -246,6 +263,9 @@ class UbuntuRouterRendererTests(unittest.TestCase):
             for required in (
                 "apply_enabled=false",
                 "test_execution_enabled=false",
+                "application_route_gate_default_ready=false",
+                "trusted_route_health_collector_configured=false",
+                "route_health_evidence_durably_bound=false",
                 "macos_pf_kill_switch_emitted=false",
                 "remote_vpn_exit_configured=false",
                 "vpn_qualified=false",
@@ -256,6 +276,7 @@ class UbuntuRouterRendererTests(unittest.TestCase):
                 "guest_command_ipv6_default_route=",
                 "guest_command_ipv6_wan_global_address=",
                 "mac_command_unsigned_info=",
+                "route_health_evidence_contract=Two stable samples",
                 "evidence_status=awaiting_vm_apply_router_keys_and_attended_local_nat_lab_test",
             ):
                 self.assertIn(required, plan.stdout)

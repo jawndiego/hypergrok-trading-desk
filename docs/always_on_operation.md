@@ -171,7 +171,14 @@ rendered bundle manifest with the deployment record.
 `local_nat_lab` is intentionally narrow. It creates a Mac-to-VM WireGuard
 full-tunnel path and default-drop VM forwarding, but exits through the same
 home/office connection. It does not change the public IP, stop macOS host
-bypass, supply a remote VPN peer or gate admission inside the application.
+bypass or supply a remote VPN peer. The application now has a
+default-unavailable, short-lived two-sample route gate before normal entry
+preparation and final submission authority, but no trusted collector or durable
+expectation/command binding is installed.
+Reader completion is re-timed and must leave the full two-second PRE_SEND
+window. A transient preparation denial can only requeue the same active
+proven-unsent command; pre-preview maintenance normalizes expired claims and
+releases queued risk at the earliest ticket/leg expiry.
 If the selected route blackholes after durable authority consumption, the
 attempt remains unknown and must reconcile without retry. If macOS removes the
 route, traffic may instead bypass the VM and succeed directly; no application

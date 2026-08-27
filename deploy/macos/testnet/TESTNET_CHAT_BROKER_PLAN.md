@@ -25,9 +25,12 @@ existing role's venv is not an allowed workaround.
   `/private/var/db/trading-desk/control-private/chat-approval/chat-approval.sqlite3`;
 - immutable generation receipts:
   `/private/var/db/trading-desk/control-private/chat-approval/broker-generations`.
-- future handoff root:
+- planned handoff root:
   `/private/var/db/trading-desk-testnet-chat-handoffs`, with one
   executor-config-hash child directory.
+- planned ID-only ready root:
+  `/private/var/db/trading-desk-testnet-chat-ready`, with one
+  executor-config-hash child directory and a hard 1,024-entry cap.
 
 No path, account, environment, endpoint, action or credential is accepted on
 argv or from an environment variable. The service imports no Keychain reader,
@@ -50,6 +53,13 @@ before sending a request byte.
 The state and generation parents are UID/GID 452, mode `0700`, and ACL-free.
 Database, WAL, SHM and generation files are mode `0600`, regular, single-link
 and ACL-free. UID 501 receives no traversal or file capability there.
+
+The planned handoff root/config directory is 452:452 mode `0700` with only UID
+451 `execute`; immutable canonical handoff files are 452:452 mode `0400` with
+only UID 451 `read`. The separate ready root/config directory is 452:452 mode
+`0700` with only UID 451 `read,execute`; empty ID-only marker files are mode
+`0400` and ACL-free. Source enforces a 1,024-entry cap but performs no deletion,
+so installation requires separately reviewed archival/GC.
 
 ## Required attended proof before promotion
 
@@ -80,8 +90,9 @@ source boundaries. The reader requires `/private`, `/private/var` and
 and config-hash child to be 452:452 mode 0700 with only UID 451 `execute`; and
 each handoff file to be 452:452 mode 0400 with only UID 451 `read`. These source
 checks do not close the deployment gates: authenticated account/market
-collectors, same-process issuer/listener
-lifecycle, presentation ACL/configuration, a UID-452 create-only canonical
-handoff publisher, an installed UID-451 reader/consumer loop, the handoff
-namespace ACL matrix and live end-to-end qualification remain mandatory.
+collectors and preverified grant provenance, same-process active-session issuer/
+listener lifecycle, presentation ACL/configuration, installation/enablement of
+the implemented UID-452 artifact-first publisher and dormant cached UID-451
+consumer, handoff/ready namespace ACL matrices, marker archival/GC before the
+cap, and live end-to-end qualification remain mandatory.
 Mainnet never uses this chat provenance.

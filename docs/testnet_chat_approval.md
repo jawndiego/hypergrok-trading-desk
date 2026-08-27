@@ -5,9 +5,10 @@ CAS, create-only presentation artifact/reader, mutually authenticated AF_UNIX
 protocol/client, a separate one-tool stdio MCP adapter, deterministic execution
 handoff, atomic schema-v13 admission/role fences, schema-v14 signer/outcome
 hardening, schema-v15 config-bound verified delivery and schema-v16 canonical
-delivery evidence implemented offline;
-listener/presentation/handoff ACL configuration and handoff publication/
-consumption are not installed; mainnet prohibited**.
+delivery evidence, UID-452 artifact-first publisher/ID-only ready index,
+approval callback/startup repair and dormant UID-451 consumer implemented
+offline; all enable gates remain false and listener/presentation/handoff/ready
+ACL configuration and runtimes are not installed; mainnet prohibited**.
 
 This design adds a convenient attended TESTNET approval gesture without making
 chat, Codex, MCP or a model part of the signing or submission boundary. The
@@ -22,6 +23,8 @@ credential, signer, venue transport or execution-store module.
 `testnet_chat_delivery.py` defines the fixed UID-451 artifact reader and
 executor-config scope; `ExecutionStore` accepts only a handoff ID and invokes
 that fixed reader itself before capital-side admission.
+`testnet_chat_handoff_publisher.py` writes the artifact and ready marker;
+`executor_chat_ready_consumer.py` owns the dormant executor-side scan.
 
 ## Security meaning
 
@@ -100,9 +103,14 @@ and enough crossable depth for the protected entry. The issuer derives every
 proposal economic value, address, hash and expiry; none is a free per-call
 parameter. Those fixed account/market bindings are typed and self-consistent,
 but their in-memory construction does not itself authenticate collector
-provenance. Production presentation requires fixed reviewed collector/store
-adapters. Fresh executor preflight prevents capital bypass if issuance evidence
-was forged, but not a misleading proposal display. The issuer creates the
+provenance, and the issuance path does not yet require a separately preverified
+grant receipt from an authenticated grant source. Production presentation
+requires fixed reviewed collector/store adapters and grant-receipt validation.
+The inert `deploy/macos/testnet/TESTNET_CHAT_ISSUANCE_PROVENANCE_PLAN.md`
+specifies a proposed UID-453 info-only collector plus grant and executor
+preregistration receipts; it creates or enables none of them.
+Fresh executor preflight prevents capital bypass if issuance evidence was
+forged, but not a misleading proposal display. The issuer creates the
 proposal and initial `PENDING` state in storage that UID 501 cannot modify.
 The issuer accepts the exact in-memory broker session and the presentation
 artifact binds its broker-generation ID. It does not accept a decoded receipt
@@ -240,8 +248,8 @@ lost acknowledgement is `UNKNOWN`; the client never retries automatically.
   `human_message_attested=false`, and the complete bridge remains TESTNET-only.
 - Its exact schema, peer checks, timeout/output bounds and negative capability
   tests are implemented and reviewed. It must remain unregistered until the
-  fixed-path listener, ACLs, broker lifecycle and dormant presentation reader
-  configuration plus handoff publication/consumption are separately
+  fixed-path listener, ACLs, broker lifecycle, dormant presentation reader and
+  offline handoff publisher/consumer are separately installed, enabled and
   commissioned.
 
 ### Lookup and transition
@@ -329,6 +337,23 @@ and byte evidence document; restart decoding recomputes its hash graph.
 Nonempty legacy chat state cannot auto-migrate across either boundary because
 authentic source evidence cannot be backfilled.
 
+The offline control publisher accepts only the exact approved store record and
+config-derived scope. It fully writes, ACLs and synchronizes the canonical
+handoff artifact before publishing an empty handoff-ID-only marker in the
+separate ready index. Exclusive no-replace promotion and renewed file-then-
+parent durability barriers make exact replay safe after ambiguous failures.
+The broker callback performs durable approval first and reports any later
+publication uncertainty as `UNKNOWN`; startup repair scans one bounded stable
+snapshot of active approvals before listener activation.
+
+The dormant UID-451 consumer is cached across executor ticks and runs only in
+nonurgent `IDLE`/`GATE_READY` lanes. It verifies the fixed ready-directory ACL,
+stable marker identities and hard 1,024-entry cap, treats the empty marker as
+notification rather than authority, and asks `ExecutionStore` to authenticate
+the v16 artifact. Existing durable authorization reconciles replay. Both the
+publisher/service and consumer compile-time gates remain false, and no path or
+ACL is installed. Retained markers require reviewed archival/GC before the cap.
+
 Schema v13 gives proposal ID/hash, receipt hash, approval-state hash, handoff
 ID/hash, ticket, plan and command independent unique constraints. An exact
 duplicate of the same verified delivery returns the one existing command
@@ -367,11 +392,11 @@ ambiguity remaining `UNKNOWN` and never retried. Automatic migrations refuse
 nonempty legacy signed/attempt/submission/outcome state where real role and
 timing evidence cannot be backfilled.
 
-The canonical handoff, fixed verified reader and atomic consumer now exist, but
-no control-side create-only handoff publisher or installed executor watcher
-connects the approval store to that reader. Creating a handoff or recording
-approval therefore still cannot queue an order on the machine as currently
-commissioned.
+The canonical handoff, artifact-first publisher, ID-only ready index, fixed
+verified reader and cached consumer now compose in offline source. Because the
+broker and consumer gates are false and their paths/ACLs/runtimes are not
+installed, recording approval still cannot queue an order on the current
+machine.
 
 ## Approval is not execution
 
@@ -393,9 +418,10 @@ This slice still does not implement or authorize:
 - same-process active-generation issuance orchestration or installed
   presentation ACL/configuration;
 - fixed authenticated account/market collector composition for issuance;
+- an authenticated preverified grant-receipt source for issuance;
 - registration or enabling of the existing raw-`command_text` stdio MCP;
-- a UID-452 create-only canonical handoff publisher or installed UID-451
-  reader/consumer loop;
+- installation/enablement of the offline UID-452 publisher/ready index and
+  UID-451 reader/consumer, including bounded marker archival/GC;
 - Keychain, credential or live venue integration for the chat path;
 - HTTP, WebSocket, VPN or venue access;
 - order placement, cancellation, closing or any other venue write;
@@ -405,7 +431,8 @@ This slice still does not implement or authorize:
 Promotion requires fixed-path socket and named-ACL enforcement, installed
 read-only presentation publication, authenticated evidence collectors,
 same-process broker-generation issuance, an at-least-once create-only handoff
-publisher and executor consumer, exact-head installation, and end-to-end
+publisher/ready index and executor consumer installation, marker retention/GC,
+exact-head installation, and end-to-end
 TESTNET limits including live schema-v14 PRE_KEY/PRE_SEND role-fence and
 UNKNOWN-outcome exercises. Until then `/dev/tty` plus the control-role HMAC is
 the only installed attended authorization route.

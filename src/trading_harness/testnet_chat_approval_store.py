@@ -1156,6 +1156,132 @@ class TestnetChatApprovalStore:
         finally:
             connection.close()
 
+    def list_approved_trade_proposals(
+        self,
+        *,
+        limit: int,
+        after_proposal_id: str | None = None,
+    ) -> tuple[StoredTradeApproval, ...]:
+        """Return a bounded, deterministic page for startup publication repair."""
+
+        if type(limit) is not int or not 1 <= limit <= 64:
+            raise ValidationError("approved proposal list limit must be 1 through 64")
+        cursor = (
+            None
+            if after_proposal_id is None
+            else _proposal_id(after_proposal_id)
+        )
+        connection = self._connect(read_only=True)
+        try:
+            connection.execute("BEGIN")
+            rows = connection.execute(
+                """
+                SELECT proposal.proposal_id
+                FROM testnet_chat_proposals AS proposal
+                JOIN testnet_chat_approval_states AS state
+                  ON state.proposal_id = proposal.proposal_id
+                WHERE state.status = 'approved'
+                  AND (? IS NULL OR proposal.proposal_id > ?)
+                ORDER BY proposal.proposal_id
+                LIMIT ?
+                """,
+                (cursor, cursor, limit),
+            ).fetchall()
+            records = tuple(
+                self._load_locked(connection, str(row["proposal_id"]))
+                for row in rows
+            )
+            if any(
+                record.state.status is not TradeApprovalStatus.APPROVED
+                or record.receipt is None
+                for record in records
+            ):
+                raise StorageError("approved proposal list contains non-approved state")
+            connection.commit()
+            return records
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StorageError("approved proposal list failed") from error
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def scan_approved_trade_proposals(
+        self,
+        *,
+        page_size: int,
+        hard_limit: int,
+        active_at: datetime,
+    ) -> tuple[StoredTradeApproval, ...]:
+        """Read all startup repairs from one stable, bounded SQLite snapshot."""
+
+        if type(page_size) is not int or not 1 <= page_size <= 64:
+            raise ValidationError("approved scan page_size must be 1 through 64")
+        if type(hard_limit) is not int or not 1 <= hard_limit <= 256:
+            raise ValidationError("approved scan hard_limit must be 1 through 256")
+        checked_at = _utc(active_at, "approved scan active_at")
+        active_text = _time_text(checked_at, "approved scan active_at")
+        connection = self._connect(read_only=True)
+        try:
+            connection.execute("BEGIN")
+            cursor: str | None = None
+            result: list[StoredTradeApproval] = []
+            while True:
+                rows = connection.execute(
+                    """
+                    SELECT proposal.proposal_id
+                    FROM testnet_chat_proposals AS proposal
+                    JOIN testnet_chat_approval_states AS state
+                      ON state.proposal_id = proposal.proposal_id
+                    WHERE state.status = 'approved'
+                      AND proposal.expires_at > ?
+                      AND (? IS NULL OR proposal.proposal_id > ?)
+                    ORDER BY proposal.proposal_id
+                    LIMIT ?
+                    """,
+                    (active_text, cursor, cursor, page_size),
+                ).fetchall()
+                if not rows:
+                    break
+                if len(result) + len(rows) > hard_limit:
+                    raise StorageError("approved proposal scan exceeds hard limit")
+                page = tuple(
+                    self._load_locked(connection, str(row["proposal_id"]))
+                    for row in rows
+                )
+                if any(
+                    record.state.status is not TradeApprovalStatus.APPROVED
+                    or record.receipt is None
+                    or not record.proposal.is_active(checked_at)
+                    for record in page
+                ):
+                    raise StorageError(
+                        "approved proposal scan contains non-approved state"
+                    )
+                result.extend(page)
+                next_cursor = page[-1].proposal_id
+                if cursor is not None and next_cursor <= cursor:
+                    raise StorageError("approved proposal scan cursor stalled")
+                cursor = next_cursor
+                if len(page) < page_size:
+                    break
+            connection.commit()
+            return tuple(result)
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StorageError("approved proposal scan failed") from error
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def approve_trade_proposal(
         self,
         proposal_id: str,

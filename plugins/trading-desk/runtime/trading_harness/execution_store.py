@@ -106,6 +106,14 @@ _RECOVERY_COMMAND_STATES = frozenset(
         "terminal",
     }
 )
+_TRANSIENT_ROUTE_HEALTH_DENIAL_CODES = frozenset(
+    {
+        "ROUTE_HEALTH_UNAVAILABLE",
+        "ROUTE_HEALTH_INVALID",
+        "ROUTE_HEALTH_CLOCK_ROLLBACK",
+        "ROUTE_HEALTH_HEADROOM",
+    }
+)
 
 
 def _file_signature(file_stat: os.stat_result) -> tuple[int, ...]:
@@ -5257,6 +5265,41 @@ class ExecutionStore:
         assert scope is not None
         return self._chat_authorization_from_row(row, scope=scope)
 
+    def get_chat_authorization_by_handoff_id(
+        self,
+        handoff_id: str,
+    ) -> ChatExecutionAuthorization:
+        """Load one fully revalidated durable chat admission by handoff ID."""
+
+        checked = _text(
+            handoff_id,
+            field="handoff_id",
+            maximum=64,
+        )
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT * FROM execution_chat_authorizations
+                WHERE handoff_id = ?
+                """,
+                (checked,),
+            ).fetchone()
+            scope = (
+                None
+                if row is None
+                else self._require_configured_chat_scope_locked(connection)
+            )
+        finally:
+            connection.close()
+        if row is None:
+            raise RecordNotFound("chat execution authorization is not registered")
+        assert scope is not None
+        authorization = self._chat_authorization_from_row(row, scope=scope)
+        if authorization.handoff.handoff_id != checked:
+            raise StorageError("persisted chat authorization handoff ID differs")
+        return authorization
+
     def admit_chat_handoff(
         self,
         handoff_id: str,
@@ -5427,16 +5470,15 @@ class ExecutionStore:
                         )
                     return command
 
-                if not (
-                    proposal.issued_at
-                    <= receipt.received_at
-                    <= handoff.published_at
-                    <= checked_at
-                    < proposal.expires_at
-                ):
+                if checked_at < handoff.published_at:
                     raise AdmissionDenied(
-                        "CHAT_HANDOFF_INACTIVE",
-                        "chat handoff is expired or not yet active",
+                        "CHAT_HANDOFF_NOT_YET_ACTIVE",
+                        "chat handoff publication is not yet active",
+                    )
+                if checked_at >= proposal.expires_at:
+                    raise AdmissionDenied(
+                        "CHAT_HANDOFF_EXPIRED",
+                        "chat handoff proposal has expired",
                     )
 
                 ticket_row = connection.execute(
@@ -6899,6 +6941,380 @@ class ExecutionStore:
         if tuple(leg.role for leg in result) != _ROLES:
             raise StorageError("command does not contain exactly three ordered legs")
         return result
+
+    def defer_unsent_claim(
+        self,
+        command_id: str,
+        *,
+        reason: str,
+        at: datetime,
+        worker_id: str,
+        fencing_token: int,
+    ) -> CommandRecord:
+        """Requeue one route-blocked claim before any send attempt exists.
+
+        This narrow transition preserves the consumed ticket, approval and
+        reservation for the same command.  It cannot defer an expired/wrong
+        worker fence or any command with attempt/submission-authority state.
+        """
+
+        checked_command = _text(command_id, field="command_id", maximum=128)
+        checked_reason = _text(reason, field="reason", maximum=64)
+        if checked_reason not in _TRANSIENT_ROUTE_HEALTH_DENIAL_CODES:
+            raise ValidationError("claim deferral reason is not transient route health")
+        checked_worker = _text(worker_id, field="worker_id", maximum=128)
+        token = _positive_int(fencing_token, field="fencing_token")
+        checked_at = _utc(at, field="at")
+        with self._transaction() as connection:
+            outbox, outbox_row = self._require_claim_locked(
+                connection,
+                command_id=checked_command,
+                worker_id=checked_worker,
+                fencing_token=token,
+                at=checked_at,
+                allowed_states=frozenset({"claimed"}),
+            )
+            command_row = connection.execute(
+                "SELECT * FROM execution_commands WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            if command_row is None:
+                raise StorageError("deferred claim command is missing")
+            command = self._command_from_row(command_row)
+            if command.state != "claimed":
+                raise StateConflict("only a claimed command may be deferred")
+            if (
+                outbox.current_attempt_id is not None
+                or outbox.attempt_count != 0
+                or connection.execute(
+                    "SELECT 1 FROM execution_attempts WHERE command_id = ? LIMIT 1",
+                    (checked_command,),
+                ).fetchone()
+                is not None
+                or connection.execute(
+                    """
+                    SELECT 1 FROM execution_submission_authorities
+                    WHERE command_id = ? LIMIT 1
+                    """,
+                    (checked_command,),
+                ).fetchone()
+                is not None
+            ):
+                raise StateConflict(
+                    "command has attempt or submission authority and cannot be deferred"
+                )
+            leg_rows = connection.execute(
+                "SELECT * FROM execution_command_legs WHERE command_id = ?",
+                (checked_command,),
+            ).fetchall()
+            if len(leg_rows) != 3:
+                raise StorageError("deferred command is missing protected legs")
+            for leg_row in leg_rows:
+                leg = self._leg_from_row(leg_row)
+                if (
+                    leg.status != "queued"
+                    or leg.cumulative_filled != ZERO
+                    or leg.venue_oid is not None
+                ):
+                    raise StateConflict(
+                        "command has venue-facing leg state and cannot be deferred"
+                    )
+            ticket_row = connection.execute(
+                "SELECT * FROM execution_tickets WHERE ticket_hash = ?",
+                (command.ticket_hash,),
+            ).fetchone()
+            if ticket_row is None:
+                raise StorageError("deferred command ticket is missing")
+            self._verify_ticket_row(ticket_row)
+            if ticket_row["state"] != "consumed":
+                raise StateConflict("deferred command ticket is not consumed")
+            try:
+                ticket_payload = _decode_payload(
+                    str(ticket_row["payload_json"]),
+                    str(ticket_row["content_hash"]),
+                    field="deferred command ticket",
+                )
+                if not isinstance(ticket_payload, Mapping):
+                    raise TypeError("ticket payload is not an object")
+                ticket = risk_ticket_from_dict(ticket_payload)
+                if canonical_json(ticket.as_dict()) != str(ticket_row["payload_json"]):
+                    raise ValueError("ticket payload is not canonical")
+            except (TypeError, ValueError, ValidationError) as error:
+                raise StorageError("deferred command ticket payload is invalid") from error
+            if (
+                ticket.ticket_hash != command.ticket_hash
+                or ticket.plan is None
+                or ticket.plan.plan_hash != command.plan_hash
+                or checked_at
+                >= min(
+                    ticket.expires_at,
+                    ticket.plan.entry.expires_at,
+                    ticket.plan.protective_stop.expires_at,
+                    ticket.plan.take_profit.expires_at,
+                )
+            ):
+                raise StateConflict("expired or mismatched command cannot be deferred")
+            reserved_loss, reserved_notional, _, _ = self._read_exposure_locked(
+                connection
+            )
+            if (
+                reserved_loss < command.reserved_loss
+                or reserved_notional < command.reserved_notional
+            ):
+                raise StorageError("deferred command reservation is missing")
+
+            queued_command = self._set_command_state_locked(
+                connection,
+                command_row,
+                state="queued",
+                at=checked_at,
+            )
+            self._set_outbox_locked(
+                connection,
+                outbox_row,
+                state="queued",
+                at=checked_at,
+                worker_id=None,
+                fencing_token=outbox.fencing_token,
+                claimed_at=None,
+                lease_expires_at=None,
+                current_attempt_id=None,
+                attempt_count=0,
+            )
+            self._append_event_locked(
+                connection,
+                command_id=checked_command,
+                event_type="unsent_claim_deferred",
+                occurred_at=checked_at,
+                payload={
+                    "reason": checked_reason,
+                    "worker_id": checked_worker,
+                    "fencing_token": token,
+                    "same_command_requeued": True,
+                    "ticket_and_reservation_retained": True,
+                    "attempt_existed": False,
+                    "submission_authority_consumed": False,
+                    "venue_write_attempted": False,
+                },
+            )
+            return queued_command
+
+    def expire_next_queued_unsent(
+        self,
+        *,
+        at: datetime,
+    ) -> CommandRecord | None:
+        """Terminalize at most one expired queued command without any send.
+
+        This maintenance transition is independent of route readiness.  It
+        releases only a proven-unsent queued reservation whose consumed ticket
+        or entry intent has expired.  Existing attempt or submission-authority
+        state is a hard conflict, never a reason to infer that no send occurred.
+        """
+
+        checked_at = _utc(at, field="at")
+        with self._transaction() as connection:
+            selected = connection.execute(
+                """
+                SELECT command_id FROM execution_commands
+                WHERE state = 'queued'
+                ORDER BY created_at, command_id
+                LIMIT 1
+                """
+            ).fetchone()
+            if selected is None:
+                return None
+            command_id = _stored_text(
+                selected["command_id"],
+                field="command_id",
+                maximum=128,
+            )
+            command_row = connection.execute(
+                "SELECT * FROM execution_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
+            outbox_row = connection.execute(
+                "SELECT * FROM execution_outbox WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
+            if command_row is None or outbox_row is None:
+                raise StorageError("queued expiry candidate is incomplete")
+            command = self._command_from_row(command_row)
+            outbox = self._outbox_from_row(outbox_row)
+            if command.state != "queued" or outbox.state != "queued":
+                raise StateConflict("queued expiry candidate state differs")
+            if (
+                outbox.worker_id is not None
+                or outbox.claimed_at is not None
+                or outbox.lease_expires_at is not None
+                or outbox.current_attempt_id is not None
+                or outbox.attempt_count != 0
+            ):
+                raise StateConflict("queued expiry candidate retains claim or attempt state")
+            if (
+                connection.execute(
+                    "SELECT 1 FROM execution_attempts WHERE command_id = ? LIMIT 1",
+                    (command_id,),
+                ).fetchone()
+                is not None
+                or connection.execute(
+                    """
+                    SELECT 1 FROM execution_submission_authorities
+                    WHERE command_id = ? LIMIT 1
+                    """,
+                    (command_id,),
+                ).fetchone()
+                is not None
+            ):
+                raise StateConflict(
+                    "queued command has attempt or submission authority"
+                )
+            ticket_row = connection.execute(
+                "SELECT * FROM execution_tickets WHERE ticket_hash = ?",
+                (command.ticket_hash,),
+            ).fetchone()
+            if ticket_row is None:
+                raise StorageError("queued expiry candidate ticket is missing")
+            self._verify_ticket_row(ticket_row)
+            if ticket_row["state"] != "consumed":
+                raise StateConflict("queued expiry candidate ticket is not consumed")
+            try:
+                ticket_payload = _decode_payload(
+                    str(ticket_row["payload_json"]),
+                    str(ticket_row["content_hash"]),
+                    field="queued expiry ticket",
+                )
+                if not isinstance(ticket_payload, Mapping):
+                    raise TypeError("ticket payload is not an object")
+                ticket = risk_ticket_from_dict(ticket_payload)
+                if canonical_json(ticket.as_dict()) != str(ticket_row["payload_json"]):
+                    raise ValueError("ticket payload is not canonical")
+            except (TypeError, ValueError, ValidationError) as error:
+                raise StorageError("queued expiry ticket payload is invalid") from error
+            if (
+                ticket.ticket_hash != command.ticket_hash
+                or ticket.plan is None
+                or ticket.plan.plan_hash != command.plan_hash
+                or ticket.expires_at
+                != _parse_time(ticket_row["expires_at"], field="ticket expires_at")
+            ):
+                raise StorageError("queued expiry ticket binding differs")
+            expiry = min(
+                ticket.expires_at,
+                ticket.plan.entry.expires_at,
+                ticket.plan.protective_stop.expires_at,
+                ticket.plan.take_profit.expires_at,
+            )
+            if checked_at < expiry:
+                return None
+
+            leg_rows = connection.execute(
+                "SELECT * FROM execution_command_legs WHERE command_id = ?",
+                (command_id,),
+            ).fetchall()
+            if len(leg_rows) != 3:
+                raise StorageError("expired queued command is missing protected legs")
+            for leg_row in leg_rows:
+                leg = self._leg_from_row(leg_row)
+                if (
+                    leg.status != "queued"
+                    or leg.cumulative_filled != ZERO
+                    or leg.venue_oid is not None
+                ):
+                    raise StateConflict(
+                        "expired queued command has venue-facing leg state"
+                    )
+                self._update_leg_locked(
+                    connection,
+                    leg,
+                    status="expired",
+                    cumulative_filled=ZERO,
+                    venue_oid=None,
+                    at=checked_at,
+                )
+            current_loss, current_notional, exposure_revision, _ = (
+                self._read_exposure_locked(connection)
+            )
+            self._write_exposure_locked(
+                connection,
+                loss=decimal_subtract(
+                    current_loss,
+                    command.reserved_loss,
+                    field="expired queued reserved loss",
+                ),
+                notional=decimal_subtract(
+                    current_notional,
+                    command.reserved_notional,
+                    field="expired queued reserved notional",
+                ),
+                previous_revision=exposure_revision,
+                at=checked_at,
+            )
+            terminal_command = self._set_command_state_locked(
+                connection,
+                command_row,
+                state="terminal",
+                at=checked_at,
+                terminal=True,
+            )
+            self._set_outbox_locked(
+                connection,
+                outbox_row,
+                state="terminal",
+                at=checked_at,
+                worker_id=None,
+                fencing_token=outbox.fencing_token,
+                claimed_at=None,
+                lease_expires_at=None,
+                current_attempt_id=None,
+                attempt_count=0,
+            )
+            terminal_ticket = self._ticket_material(ticket_row, state="terminal")
+            changed_ticket = connection.execute(
+                """
+                UPDATE execution_tickets SET state = 'terminal', record_hash = ?
+                WHERE ticket_hash = ? AND state = 'consumed'
+                """,
+                (
+                    _record_hash("ticket", terminal_ticket),
+                    command.ticket_hash,
+                ),
+            )
+            if changed_ticket.rowcount != 1:
+                raise StateConflict("expired queued ticket changed concurrently")
+            self._append_event_locked(
+                connection,
+                command_id=command_id,
+                event_type="queued_command_expired_proven_unsent",
+                occurred_at=checked_at,
+                payload={
+                    "ticket_expires_at": _time_text(
+                        ticket.expires_at,
+                        field="ticket_expires_at",
+                    ),
+                    "entry_expires_at": _time_text(
+                        ticket.plan.entry.expires_at,
+                        field="entry_expires_at",
+                    ),
+                    "protective_stop_expires_at": _time_text(
+                        ticket.plan.protective_stop.expires_at,
+                        field="protective_stop_expires_at",
+                    ),
+                    "take_profit_expires_at": _time_text(
+                        ticket.plan.take_profit.expires_at,
+                        field="take_profit_expires_at",
+                    ),
+                    "effective_expiry": _time_text(
+                        expiry,
+                        field="effective_expiry",
+                    ),
+                    "reservation_released": True,
+                    "attempt_existed": False,
+                    "submission_authority_consumed": False,
+                    "venue_write_attempted": False,
+                },
+            )
+            return terminal_command
 
     def void_unsent_command(
         self,
@@ -8555,6 +8971,18 @@ class ExecutionStore:
                 },
             )
 
+    def normalize_expired_entry_claims(self, *, at: datetime) -> None:
+        """Apply the bounded normal-entry lease-expiry state machine.
+
+        One account can have at most one nonterminal normal command.  This
+        public maintenance wrapper lets the executor run the existing
+        proven-unsent/UNKNOWN normalization before route readiness is checked.
+        """
+
+        checked_at = _utc(at, field="at")
+        with self._transaction() as connection:
+            self._normalize_expired_claims_locked(connection, at=checked_at)
+
     def claim_next(
         self,
         worker_id: str,
@@ -8620,6 +9048,55 @@ class ExecutionStore:
             if row is None:
                 return None
             current = self._outbox_from_row(row)
+            command_row = connection.execute(
+                "SELECT * FROM execution_commands WHERE command_id = ?",
+                (current.command_id,),
+            ).fetchone()
+            if command_row is None:
+                raise StorageError("outbox references missing command")
+            command = self._command_from_row(command_row)
+            if command.state != "queued":
+                raise StateConflict("queued outbox command state differs")
+            ticket_row = connection.execute(
+                "SELECT * FROM execution_tickets WHERE ticket_hash = ?",
+                (command.ticket_hash,),
+            ).fetchone()
+            plan_row = connection.execute(
+                "SELECT * FROM execution_plans WHERE plan_hash = ?",
+                (command.plan_hash,),
+            ).fetchone()
+            if ticket_row is None or plan_row is None:
+                raise StorageError("queued command ticket or plan is missing")
+            self._verify_ticket_row(ticket_row)
+            self._verify_plan_row(plan_row)
+            if ticket_row["state"] != "consumed":
+                raise StateConflict("queued command ticket is not consumed")
+            try:
+                plan_payload = _decode_payload(
+                    str(plan_row["payload_json"]),
+                    str(plan_row["content_hash"]),
+                    field="queued command plan",
+                )
+                if not isinstance(plan_payload, Mapping):
+                    raise TypeError("plan payload is not an object")
+                plan = protected_trade_plan_from_dict(plan_payload)
+                if canonical_json(plan.as_dict()) != str(plan_row["payload_json"]):
+                    raise ValueError("plan payload is not canonical")
+            except (TypeError, ValueError, ValidationError) as error:
+                raise StorageError("queued command plan payload is invalid") from error
+            if (
+                ticket_row["plan_hash"] != command.plan_hash
+                or plan.plan_hash != command.plan_hash
+            ):
+                raise StorageError("queued command ticket/plan binding differs")
+            effective_expiry = min(
+                _parse_time(ticket_row["expires_at"], field="ticket expires_at"),
+                plan.entry.expires_at,
+                plan.protective_stop.expires_at,
+                plan.take_profit.expires_at,
+            )
+            if checked_at >= effective_expiry:
+                return None
             claimed = self._set_outbox_locked(
                 connection,
                 row,
@@ -8632,12 +9109,6 @@ class ExecutionStore:
                 current_attempt_id=None,
                 attempt_count=current.attempt_count,
             )
-            command_row = connection.execute(
-                "SELECT * FROM execution_commands WHERE command_id = ?",
-                (current.command_id,),
-            ).fetchone()
-            if command_row is None:
-                raise StorageError("outbox references missing command")
             self._set_command_state_locked(
                 connection, command_row, state="claimed", at=checked_at
             )

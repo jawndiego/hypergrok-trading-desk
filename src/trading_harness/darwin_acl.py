@@ -22,7 +22,7 @@ from .errors import ValidationError
 _ACL_TYPE_EXTENDED = 0x00000100
 _MAX_ACL_TEXT_BYTES = 16 * 1024
 _ACL_LINE_RE = re.compile(r"[!-~]{1,1024}", re.ASCII)
-_EXACT_RIGHTS = frozenset({"execute", "read"})
+_EXACT_RIGHTS = frozenset({"execute", "read", "read,execute"})
 
 
 def _path_signature(metadata: os.stat_result) -> tuple[int, ...]:
@@ -79,7 +79,7 @@ def expected_darwin_user_acl(uid: int, *, right: str) -> tuple[str, ...]:
     if type(uid) is not int or uid < 0:
         raise ValueError("UID must be a nonnegative integer")
     if right not in _EXACT_RIGHTS:
-        raise ValueError("ACL right must be exact execute or read")
+        raise ValueError("ACL right must be exact execute, read, or read,execute")
     entry = pwd.getpwuid(uid)
     if entry.pw_uid != uid:
         raise ValidationError("ACL account UID differs")
@@ -164,8 +164,68 @@ def darwin_named_acl_lines(path: Path) -> tuple[str, ...]:
         free_acl(acl)
 
 
+def replace_darwin_named_acl(path: Path, entries: tuple[str, ...]) -> None:
+    """Replace one object's extended ACL with exact pre-rendered entries."""
+
+    if sys.platform != "darwin":
+        raise OSError(errno.ENOTSUP, "Darwin extended ACLs are required")
+    if (
+        type(entries) is not tuple
+        or not entries
+        or len(entries) > 8
+        or len(entries) != len(set(entries))
+        or any(not isinstance(row, str) or _ACL_LINE_RE.fullmatch(row) is None for row in entries)
+    ):
+        raise ValidationError("replacement ACL entries are invalid")
+    selected = Path(path)
+    _canonical_existing_path(selected)
+    before = selected.lstat()
+    if stat.S_ISLNK(before.st_mode):
+        raise ValidationError("ACL target may not be a symlink")
+    rendered = "!#acl 1\n" + "\n".join(entries) + "\n"
+    raw = rendered.encode("ascii", errors="strict")
+    libc = ctypes.CDLL(None, use_errno=True)
+    from_text = libc.acl_from_text
+    set_file = libc.acl_set_file
+    free_acl = libc.acl_free
+    from_text.argtypes = [ctypes.c_char_p]
+    from_text.restype = ctypes.c_void_p
+    set_file.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_void_p]
+    set_file.restype = ctypes.c_int
+    free_acl.argtypes = [ctypes.c_void_p]
+    free_acl.restype = ctypes.c_int
+    ctypes.set_errno(0)
+    acl = from_text(raw)
+    if not acl:
+        error_number = ctypes.get_errno() or errno.EINVAL
+        raise OSError(error_number, "extended ACL parsing failed")
+    try:
+        ctypes.set_errno(0)
+        if set_file(os.fsencode(selected), _ACL_TYPE_EXTENDED, acl) != 0:
+            error_number = ctypes.get_errno() or errno.EIO
+            raise OSError(error_number, "extended ACL replacement failed")
+    finally:
+        free_acl(acl)
+    after = selected.lstat()
+    stable_fields = lambda value: (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+    )
+    if stable_fields(before) != stable_fields(after):
+        raise ValidationError("ACL target identity changed during replacement")
+    if darwin_named_acl_lines(selected) != entries:
+        raise ValidationError("replacement ACL did not round-trip exactly")
+
+
 __all__ = (
     "darwin_named_acl_lines",
     "darwin_uid_uuid",
     "expected_darwin_user_acl",
+    "replace_darwin_named_acl",
 )

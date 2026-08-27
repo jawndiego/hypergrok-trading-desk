@@ -20,6 +20,7 @@
     "database": "/private/var/db/trading-desk/control-private/chat-approval/chat-approval.sqlite3",
     "generations_parent": "/private/var/db/trading-desk/control-private/chat-approval/broker-generations",
     "handoff_root": "/private/var/db/trading-desk-testnet-chat-handoffs",
+    "ready_root": "/private/var/db/trading-desk-testnet-chat-ready",
     "control_runtime_root": "/opt/trading-desk/current/control",
     "control_runtime_python": "/opt/trading-desk/current/control/.venv/bin/python",
     "launchd_plan": "/Library/LaunchDaemons/com.jawndiego.trading-desk-testnet-chat-broker.plist"
@@ -56,6 +57,23 @@
       "mode": "0600",
       "named_acl_entries": 0,
       "type": "regular-single-link"
+    },
+    "handoff_namespace": {
+      "owner_uid": 452,
+      "owner_gid": 452,
+      "directory_mode": "0700",
+      "directory_acl": "uid-451 execute",
+      "file_mode": "0400",
+      "file_acl": "uid-451 read"
+    },
+    "ready_namespace": {
+      "owner_uid": 452,
+      "owner_gid": 452,
+      "directory_mode": "0700",
+      "directory_acl": "uid-451 read,execute",
+      "marker_mode": "0400",
+      "marker_acl_entries": 0,
+      "hard_entry_cap": 1024
     }
   },
   "service": {
@@ -66,6 +84,8 @@
     "accept_timeout_milliseconds": 500,
     "sequential": true,
     "automatic_approval_retry": false,
+    "artifact_first_publisher_implemented_offline": true,
+    "ready_consumer_compiled_enabled": false,
     "run_at_load": false,
     "keep_alive": false,
     "launchd_disabled": true
@@ -79,9 +99,10 @@
     "fixed authenticated account and market collector composition",
     "same-process active-generation issuer and listener lifecycle",
     "installed read-only proposal presentation ACL and configuration",
-    "UID-452 create-only canonical handoff artifact publisher",
-    "installed UID-451 verified handoff reader and consumer loop",
-    "handoff namespace ACL and replacement matrix",
+    "install and enable the implemented UID-452 artifact-first publisher and ready index",
+    "install and enable the implemented cached UID-451 verified reader and consumer loop",
+    "handoff and ready namespace ACL and replacement matrices",
+    "reviewed ready-marker archival and garbage collection before the 1024-entry cap",
     "live schema-v14 PRE_KEY and PRE_SEND signer, transport, and UNKNOWN-outcome qualification"
   ]
 }

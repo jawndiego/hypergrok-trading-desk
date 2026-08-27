@@ -285,14 +285,49 @@ credential provisioning. A local VM is not a VPN until it connects to a
 second remote peer; no documentation or status may call `local_nat_lab`
 VPN-qualified.
 
-Router health is not currently an application admission capability. If route
-loss occurs after durable authority consumption, the single permitted send may
-fail with an unknown outcome. That outcome MUST remain reserved and reconcile
-without resend. No application-configured direct-network fallback is permitted.
-In `local_nat_lab`, macOS may still bypass the VM if its route disappears;
-that disqualifies egress isolation and a successful request does not prove VM
-traversal. If the selected route instead blackholes, cancel/flatten recovery
-may remain unavailable until that path returns.
+Normal TESTNET entry MUST additionally hold a fresh route-health capability.
+The schema-v1 evidence contract binds the exact executor config, retained
+router/VM manifest and local-lab qualification hashes, public-peer hashes,
+topology and installed public configuration. It requires two stable samples
+around one fixed credential-free TESTNET `/info` read, recent WireGuard
+handshake, unchanged Mac IPv4/IPv6 `utun` defaults, exact guest forwarding and
+nftables assertions, non-regressing WireGuard counters and an increasing HTTPS
+forward counter. Collection is bounded to 15 seconds and evidence expires no
+later than five seconds after the second sample. Every authority, credential,
+write, mainnet, PF, remote-exit and VPN-qualified claim remains false.
+
+The active service MUST default the route gate to unavailable. When configured
+with a trusted reader and reviewed expectation, it checks route readiness in
+the same tick as daily-loss/learning readiness, before account/market reads,
+and again inside the revocable final submission guard before durable submission
+authority. Preparation and final checks MUST sample the service clock before
+and after the route reader, reject rollback, and revalidate at the post-read
+time. The final sample MUST leave at least the complete
+`ENTRY_ROLE_ATTESTATION_TTL_MS` two-second interval, so valid route evidence
+outlives every send still permitted by PRE_SEND. Failure denies or voids the
+proven-unsent entry and MUST NOT select a direct-network fallback. Recovery
+remains independent of this entry gate.
+An exact base `ROUTE_HEALTH_*` denial during preparation MAY release only the
+active claim and requeue that same command before any attempt or submission
+authority exists; its consumed approval/ticket and reservation remain bound.
+Before every preview, route-independent maintenance MUST normalize expired
+claims and terminalize the sole queued command at the earliest ticket or
+three-leg expiry, releasing its proven-unsent reservation. Expired work MUST
+NOT be claimed or deferred again.
+The current evidence is not durably bound into the preflight, attempt or
+submission authority, and no trusted live collector or durable expectation
+loader exists; those remain promotion gates.
+A production final-guard reader MUST be a bounded local cached-evidence read;
+it MUST NOT invoke SSH, route tools, DNS, TLS or `/info` while holding the
+runtime submission lock. A separate least-privilege collector owns observation
+and atomic publication.
+
+If route loss occurs after durable authority consumption, the single permitted
+send may fail with an unknown outcome. That outcome MUST remain reserved and
+reconcile without resend. In `local_nat_lab`, macOS may still bypass the VM if
+its route disappears; that disqualifies egress isolation and a successful
+request does not prove VM traversal. If the selected route instead blackholes,
+cancel/flatten recovery may remain unavailable until that path returns.
 
 Before the first harness TESTNET order write, qualification MUST cover normal
 read-only routing plus VM/tunnel/hypervisor loss, IPv4 and IPv6 leakage, DNS/DoT/QUIC
@@ -428,8 +463,14 @@ config directory and file identities, exact UID-451 execute/read ACEs and byte
 and source hashes. Restart decoding reconstructs the typed evidence and
 recomputes its complete relationship to the handoff and scope. Nonempty
 schema-v15 chat state cannot auto-migrate because that evidence cannot be
-invented later. The control publisher, exact ACL installation and installed
-reader/consumer loop remain deployment work.
+invented later. A separate UID-452 publisher now establishes file-then-parent
+durability for the canonical artifact before publishing an empty ID-only ready
+marker. The broker callback does approval first and reports later publication
+ambiguity as `UNKNOWN`; bounded active-record repair runs before listener
+activation. A cached UID-451 consumer may scan only nonurgent idle/ready ticks,
+treats the marker as notification only, and asks the store to authenticate the
+v16 artifact. Both gates remain false; exact ACL/runtime installation,
+ready-marker archival/GC before 1,024 entries, and live qualification remain.
 
 Reconciliation is restart-idempotent rather than order-status retrying: an
 existing query row and its hash-bound retained snapshot are hydrated from
@@ -684,10 +725,11 @@ Required controls:
   and MFA for mainnet. Free-form agent chat is invalid. The weaker TESTNET-only
   proposal lane recognizes only the exact proposal-ID command and records
   `human_message_attested=false`; its durable CAS and local peer/session
-  anti-replay boundary, verified handoff reader and atomic execution admission
-  exist offline. Authenticated evidence collectors, same-process issuance,
-  listener/presentation/handoff publication, exact ACLs and installed
-  consumption remain uncommissioned.
+  anti-replay boundary, artifact-first handoff publisher/ID-only ready index,
+  bounded startup repair, dormant cached consumer, verified reader and atomic
+  execution admission exist offline with false gates. Authenticated account/
+  market collectors and grant provenance, same-process active-session issuance,
+  exact ACL/runtime installation and live use remain uncommissioned.
 - Approval tokens are signed, audience-bound, expiring, single-use, and protected against replay and cross-environment use.
 - Services use mutually authenticated identities and least-privilege authorization.
 - Signer keys are generated, stored, rotated, and revoked in a managed KMS/HSM or equivalent isolated secret boundary.
@@ -892,7 +934,8 @@ caller-selected account/address/audience inputs are invalid. The immutable
 scope and artifact/source hashes are persisted with the authorization, and
 schema v16 adds the complete canonical delivery evidence for restart
 validation.
-Cross-database publication and installed consumption remain absent;
+Source publication and bounded consumption exist behind false gates, while
+their cross-UID paths/ACLs and runtimes remain uninstalled;
 exactly-once authority belongs to the execution transaction. The one-shot
 sender preserves `UNKNOWN` without blind retry.
 
@@ -902,7 +945,12 @@ database, reloads that store's verified chain, and resolves fixed typed account
 and canonical TESTNET market evidence; callers cannot substitute a view, ticket,
 plan, economics, address or snapshot per issuance call. It derives all proposal
 economics, addresses, hashes, session binding and expiry before atomically
-storing `PENDING`. Schema
+storing `PENDING`. Typed/self-consistent account and market values and a grant
+hash are not authenticated provenance: production requires fixed collector/
+store adapters plus a separately preverified grant receipt before issuance.
+The checked-in UID-453 collector/grant/executor-receipt plan is inert and
+authorizes no identity, network, ACL, store or proposal operation.
+Schema
 v2 preserves the original schema-v1 checksum and adds a unique immutable
 staging-document binding; nonempty v1 state cannot auto-migrate. Presentation is
 a separate UID-452-owned mode-0400 artifact published from a fully synchronized,

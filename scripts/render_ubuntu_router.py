@@ -73,6 +73,7 @@ TEMPLATES: dict[str, tuple[str, int]] = {
 }
 
 SECURITY_CLAIMS = {
+    "application_route_gate_default_ready": False,
     "changes_public_egress_ip": False,
     "host_direct_bypass_prevented": False,
     "macos_full_tunnel_routes_emitted": True,
@@ -80,6 +81,8 @@ SECURITY_CLAIMS = {
     "mainnet_authorized": False,
     "private_key_field_emitted": False,
     "remote_vpn_exit_configured": False,
+    "route_health_evidence_durably_bound": False,
+    "trusted_route_health_collector_configured": False,
     "venue_writes_authorized": False,
     "vpn_qualified": False,
 }

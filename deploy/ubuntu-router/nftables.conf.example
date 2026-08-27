@@ -30,7 +30,7 @@ table inet trading_desk_filter {
         ct state invalid drop
         iifname "wg-exec" oifname "__REVIEWED_WAN_INTERFACE__" ip saddr __REVIEWED_ROUTER_IPV4_NETWORK__ ip daddr __REVIEWED_DNS_IPV4__ udp dport 53 ct state new,established accept
         iifname "wg-exec" oifname "__REVIEWED_WAN_INTERFACE__" ip saddr __REVIEWED_ROUTER_IPV4_NETWORK__ ip daddr __REVIEWED_DNS_IPV4__ tcp dport 53 ct state new,established accept
-        iifname "wg-exec" oifname "__REVIEWED_WAN_INTERFACE__" ip saddr __REVIEWED_ROUTER_IPV4_NETWORK__ tcp dport 443 ct state new,established accept
+        iifname "wg-exec" oifname "__REVIEWED_WAN_INTERFACE__" ip saddr __REVIEWED_ROUTER_IPV4_NETWORK__ tcp dport 443 ct state new,established counter accept
         iifname "wg-exec" oifname "__REVIEWED_WAN_INTERFACE__" ip saddr __REVIEWED_ROUTER_IPV4_NETWORK__ udp dport 123 ct state new,established accept
         iifname "__REVIEWED_WAN_INTERFACE__" oifname "wg-exec" ip daddr __REVIEWED_ROUTER_IPV4_NETWORK__ ct state established,related accept
         # Make denied IPv4 forwarded traffic observable during attended leak

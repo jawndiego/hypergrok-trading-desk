@@ -98,6 +98,178 @@ class StoreCase(unittest.TestCase):
             received_at=received_at,
         )
 
+    def test_approved_listing_cursor_and_snapshot_scan_are_bounded_and_restart_safe(self) -> None:
+        approved = []
+        for index in range(5):
+            item = proposal(
+                staging_document_id=f"stg_page_{index}",
+                staging_document_hash=f"{index + 2:x}" * 64,
+                ticket_id=f"ticket-page-{index}",
+                ticket_hash=f"{index + 3:x}" * 64,
+                plan_hash=f"{index + 4:x}" * 64,
+            )
+            self.store.store_pending_trade_proposal(item, stored_at=NOW)
+            approved.append(
+                self.store.approve_trade_proposal(
+                    item.proposal_id,
+                    item.required_approval_text,
+                    peer_uid=CHAT_APPROVER_UID,
+                    uid_session_hash=SESSION_HASH,
+                    received_at=NOW + timedelta(seconds=1, milliseconds=index),
+                )
+            )
+        expected = tuple(sorted(approved, key=lambda item: item.proposal_id))
+        first = self.store.list_approved_trade_proposals(limit=2)
+        second = self.store.list_approved_trade_proposals(
+            limit=2,
+            after_proposal_id=first[-1].proposal_id,
+        )
+        third = self.store.list_approved_trade_proposals(
+            limit=2,
+            after_proposal_id=second[-1].proposal_id,
+        )
+        self.assertEqual(expected, first + second + third)
+        self.assertEqual(
+            expected,
+            self.store.scan_approved_trade_proposals(
+                page_size=2,
+                hard_limit=5,
+                active_at=NOW + timedelta(seconds=2),
+            ),
+        )
+        with self.assertRaisesRegex(StorageError, "hard limit"):
+            self.store.scan_approved_trade_proposals(
+                page_size=2,
+                hard_limit=4,
+                active_at=NOW + timedelta(seconds=2),
+            )
+
+        reopened = TestnetChatApprovalStore(self.database, must_exist=True)
+        self.assertEqual(
+            expected,
+            reopened.scan_approved_trade_proposals(
+                page_size=3,
+                hard_limit=5,
+                active_at=NOW + timedelta(seconds=2),
+            ),
+        )
+
+        late = proposal(
+            staging_document_id="stg_page_late",
+            staging_document_hash="9" * 64,
+            ticket_id="ticket-page-late",
+            ticket_hash="a" * 64,
+            plan_hash="b" * 64,
+        )
+        reopened.store_pending_trade_proposal(late, stored_at=NOW)
+        reopened.approve_trade_proposal(
+            late.proposal_id,
+            late.required_approval_text,
+            peer_uid=CHAT_APPROVER_UID,
+            uid_session_hash=SESSION_HASH,
+            received_at=NOW + timedelta(seconds=2),
+        )
+        after_mutation = reopened.scan_approved_trade_proposals(
+            page_size=2,
+            hard_limit=6,
+            active_at=NOW + timedelta(seconds=3),
+        )
+        self.assertEqual(6, len(after_mutation))
+        self.assertEqual(
+            tuple(sorted(item.proposal_id for item in after_mutation)),
+            tuple(item.proposal_id for item in after_mutation),
+        )
+
+    def test_historical_expired_approvals_do_not_exhaust_active_repair_cap(self) -> None:
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            for index in range(1, 258):
+                proposal_id = f"tp_{index:032x}"
+                proposal_hash = f"{index:064x}"
+                receipt_hash = f"{index + 1000:064x}"
+                state_hash = f"{index + 2000:064x}"
+                connection.execute(
+                    """
+                    INSERT INTO testnet_chat_proposals (
+                        proposal_id, proposal_hash, environment, uid_session_hash,
+                        issued_at, expires_at, stored_at, payload_json, payload_hash
+                    ) VALUES (?, ?, 'testnet', ?, ?, ?, ?, '{}', ?)
+                    """,
+                    (
+                        proposal_id,
+                        proposal_hash,
+                        SESSION_HASH,
+                        "2020-01-01T00:00:00.000000Z",
+                        "2020-01-01T00:01:00.000000Z",
+                        "2020-01-01T00:00:00.000000Z",
+                        f"{index + 3000:064x}",
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO testnet_chat_approval_receipts (
+                        receipt_hash, proposal_id, proposal_hash,
+                        prior_state_hash, approval_text_hash, peer_uid,
+                        uid_session_hash, received_at, provenance,
+                        human_message_attested, testnet_only, mainnet_authorized,
+                        execution_performed, venue_write_attempted
+                    ) VALUES (?, ?, ?, ?, ?, 501, ?, ?, ?, 0, 1, 0, 0, 0)
+                    """,
+                    (
+                        receipt_hash,
+                        proposal_id,
+                        proposal_hash,
+                        f"{index + 4000:064x}",
+                        f"{index + 5000:064x}",
+                        SESSION_HASH,
+                        "2020-01-01T00:00:30.000000Z",
+                        "local-macos-testnet-chat/v1",
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO testnet_chat_approval_states (
+                        proposal_id, proposal_hash, status, revision,
+                        changed_at, approval_receipt_hash, state_hash
+                    ) VALUES (?, ?, 'approved', 1, ?, ?, ?)
+                    """,
+                    (
+                        proposal_id,
+                        proposal_hash,
+                        "2020-01-01T00:00:30.000000Z",
+                        receipt_hash,
+                        state_hash,
+                    ),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+        active = proposal(
+            staging_document_id="stg_active_after_history",
+            staging_document_hash="8" * 64,
+            ticket_id="ticket-active-after-history",
+            ticket_hash="9" * 64,
+            plan_hash="a" * 64,
+        )
+        self.store.store_pending_trade_proposal(active, stored_at=NOW)
+        approved = self.store.approve_trade_proposal(
+            active.proposal_id,
+            active.required_approval_text,
+            peer_uid=CHAT_APPROVER_UID,
+            uid_session_hash=SESSION_HASH,
+            received_at=NOW + timedelta(seconds=1),
+        )
+        self.assertEqual(
+            (approved,),
+            self.store.scan_approved_trade_proposals(
+                page_size=2,
+                hard_limit=1,
+                active_at=NOW + timedelta(seconds=2),
+            ),
+        )
+
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database)
         connection.row_factory = sqlite3.Row

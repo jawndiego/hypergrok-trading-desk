@@ -40,6 +40,17 @@
   renderer, nftables/WireGuard checks and an explicit TESTNET commissioning gap
   register. The local VM is network-only, preserves the host public IP and is
   not represented as VPN or mainnet qualification.
+- Added a credential-free two-sample TESTNET route-health evidence model bound
+  to reviewed config/manifests/topology, stable Mac routes, guest policy,
+  handshake and advancing WireGuard/HTTPS counters. Normal entry now defaults
+  this gate unavailable and rechecks it before account/market preparation and
+  immediately before submission authority. Before/after clock samples reject
+  slow-reader expiry or rollback, and the final evidence must retain the full
+  two-second PRE_SEND TTL. Exact route-only preflight failures requeue the same
+  active proven-unsent claim without releasing authority/risk; independent
+  pre-preview maintenance normalizes expired claims and terminalizes queued
+  risk at the earliest ticket/leg expiry. No collector, durable command
+  binding, PF kill switch or remote VPN exit is claimed.
 - Added a separately namespaced schema-v12 TESTNET qualification core for
   retained account/agent evidence, a fixed minimum GTC canary, bound cancel,
   full-residual attended close, atomic reservation, per-step single-use
@@ -64,9 +75,12 @@
   source hashes. Schema v16 removes caller-supplied delivery objects, makes the
   store invoke the fixed exact-ACL reader from a handoff ID, and persists the
   complete canonical source-evidence document for restart validation.
-  Listener/ACL installation, authenticated collector
-  composition, same-process issuance, handoff publication/consumption and live
-  qualification remain disconnected.
+  Added the UID-452 artifact-first publisher, empty ID-only ready index,
+  broker callback with bounded active startup repair, and a cached UID-451
+  consumer restricted to nonurgent idle/ready ticks. All gates remain false;
+  listener/ACL/runtime installation, authenticated account/market/grant
+  provenance, same-process active-session issuance, marker archival/GC and
+  live qualification remain disconnected.
 - Added credential-free, plan-gated macOS APFS quota, final-path pre/post-init
   ACL, exact offline install and storage-headroom guard artifacts. No machine
   mutation or service activation is implied.

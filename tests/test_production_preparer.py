@@ -13,6 +13,7 @@ from trading_harness.execution_store import ExecutionStore
 from trading_harness.planning import RiskSizingPolicy
 from trading_harness.production_preparer import TestnetEntryPreparer
 from trading_harness.production_preparer import TestnetRecoveryPreparer
+from trading_harness.testnet_route_health import TestnetRouteHealthGate
 from tests.test_dispatch_preflight import market, positioned_account, setup_account
 from tests.test_execution_store import (
     NOW,
@@ -27,6 +28,7 @@ from tests.test_hyperliquid_signer import (
     prepare_durable_recovery_fixture,
 )
 from tests.test_execution_store import ExecutionStoreTestCase
+from tests.test_testnet_route_health import digest as route_digest, route_gate
 
 
 class ProductionPreparerTests(unittest.TestCase):
@@ -72,17 +74,33 @@ class ProductionPreparerTests(unittest.TestCase):
             max_notional=Decimal("1000"),
             leverage=Decimal("2"),
         )
+        self.route_config_hash = route_digest("production-preparer-config")
+        self.route_health_gate = route_gate(
+            self.route_config_hash,
+            at=NOW + timedelta(seconds=2),
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def preparer(self, *, venue=None, daily_loss="0") -> TestnetEntryPreparer:
+    def preparer(
+        self,
+        *,
+        venue=None,
+        daily_loss="0",
+        route_health_gate=None,
+    ) -> TestnetEntryPreparer:
         selected = self.venue if venue is None else venue
         return TestnetEntryPreparer(
             self.store,
             main_account_address=ACCOUNT,
             limits=self.limits,
             policy=RiskSizingPolicy(),
+            route_health_gate=(
+                self.route_health_gate
+                if route_health_gate is None
+                else route_health_gate
+            ),
             clock=lambda: NOW + timedelta(seconds=2),
             account_reader=lambda address, network: selected,
             market_reader=lambda symbol, network: market(
@@ -142,6 +160,7 @@ class ProductionPreparerTests(unittest.TestCase):
                 main_account_address=ACCOUNT,
                 limits=wrong,
                 policy=RiskSizingPolicy(),
+                route_health_gate=self.route_health_gate,
             )
         with self.assertRaisesRegex(TypeError, "realized loss"):
             TestnetEntryPreparer(
@@ -149,7 +168,98 @@ class ProductionPreparerTests(unittest.TestCase):
                 main_account_address=ACCOUNT,
                 limits=self.limits,
                 policy=RiskSizingPolicy(),
+                route_health_gate=self.route_health_gate,
             )
+
+    def test_route_health_denial_precedes_account_market_and_loss_reads(self) -> None:
+        assert self.ticket.plan is not None
+        calls: list[str] = []
+        preparer = TestnetEntryPreparer(
+            self.store,
+            main_account_address=ACCOUNT,
+            limits=self.limits,
+            policy=RiskSizingPolicy(),
+            route_health_gate=TestnetRouteHealthGate.unavailable(
+                self.route_config_hash
+            ),
+            clock=lambda: NOW + timedelta(seconds=2),
+            account_reader=lambda _address, _network: calls.append("account"),
+            market_reader=lambda _symbol, _network: calls.append("market"),
+            daily_loss_reader=lambda _at: calls.append("loss"),
+        )
+
+        with self.assertRaisesRegex(AdmissionDenied, "ROUTE_HEALTH_UNAVAILABLE"):
+            preparer(
+                self.store.get_command("command-1"),
+                self.ticket,
+                self.ticket.plan,
+                NOW + timedelta(seconds=1),
+            )
+        self.assertEqual([], calls)
+
+    def test_route_evidence_expiry_during_reads_denies_before_loss_or_action(self) -> None:
+        assert self.ticket.plan is not None
+        ticks = iter(
+            (
+                NOW + timedelta(seconds=2),
+                NOW + timedelta(seconds=2),
+                NOW + timedelta(seconds=7),
+            )
+        )
+        calls: list[str] = []
+        preparer = TestnetEntryPreparer(
+            self.store,
+            main_account_address=ACCOUNT,
+            limits=self.limits,
+            policy=RiskSizingPolicy(),
+            route_health_gate=self.route_health_gate,
+            clock=lambda: next(ticks),
+            account_reader=lambda _address, _network: self.venue,
+            market_reader=lambda _symbol, _network: market(
+                self.ticket,
+                at=NOW + timedelta(seconds=2),
+            ),
+            daily_loss_reader=lambda _at: calls.append("loss"),
+        )
+
+        with self.assertRaisesRegex(AdmissionDenied, "expired_during_preflight"):
+            preparer(
+                self.store.get_command("command-1"),
+                self.ticket,
+                self.ticket.plan,
+                NOW + timedelta(seconds=1),
+            )
+        self.assertEqual([], calls)
+
+    def test_route_reader_clock_rollback_denies_before_account_or_market(self) -> None:
+        assert self.ticket.plan is not None
+        ticks = iter(
+            (
+                NOW + timedelta(seconds=2),
+                NOW + timedelta(seconds=1, milliseconds=500),
+            )
+        )
+        calls: list[str] = []
+        preparer = TestnetEntryPreparer(
+            self.store,
+            main_account_address=ACCOUNT,
+            limits=self.limits,
+            policy=RiskSizingPolicy(),
+            route_health_gate=self.route_health_gate,
+            clock=lambda: next(ticks),
+            account_reader=lambda _address, _network: calls.append("account"),
+            market_reader=lambda _symbol, _network: calls.append("market"),
+            daily_loss_reader=lambda _at: calls.append("loss"),
+        )
+
+        with self.assertRaisesRegex(AdmissionDenied, "CLOCK_ROLLBACK"):
+            preparer(
+                self.store.get_command("command-1"),
+                self.ticket,
+                self.ticket.plan,
+                NOW + timedelta(seconds=1),
+            )
+        self.assertEqual([], calls)
 
 
 class ProductionRecoveryPreparerTests(ExecutionStoreTestCase):

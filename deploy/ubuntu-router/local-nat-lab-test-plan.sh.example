@@ -15,6 +15,9 @@ fi
 cat <<'EOF'
 apply_enabled=false
 test_execution_enabled=false
+application_route_gate_default_ready=false
+trusted_route_health_collector_configured=false
+route_health_evidence_durably_bound=false
 mode=local_nat_lab
 macos_full_tunnel_routes_emitted=true
 macos_pf_kill_switch_emitted=false
@@ -33,8 +36,9 @@ operator_step_05=Record the guest IPv6 pre-routing ingress counter and IPv4 forw
 operator_step_06=Run allowed DNS and unsigned TESTNET info reads; do not call an exchange action endpoint.
 operator_step_07=Run the IPv6 probe; it must fail and increment the pre-routing IPv6 ingress counter while forwarding stays disabled and the WAN has no IPv6 default route or global address; no forward-drop increment is required.
 operator_step_08=Run alternate-DNS, DoT, QUIC and unreviewed-port IPv4 probes; each must fail and increment the wg-exec forward drop counter.
-operator_step_09=Recheck the public IP; it must equal the tunnel-off value in local_nat_lab.
-operator_step_10=Stop the tunnel and VM separately and record physical-route fallback; fallback is expected and proves there is no host kill switch.
+operator_step_09=Capture a second Mac route snapshot and guest health block; require unchanged topology/routes, non-regressing WireGuard transfer counters and an increased accepted-HTTPS counter around the read-only TESTNET info probe.
+operator_step_10=Recheck the public IP; it must equal the tunnel-off value in local_nat_lab.
+operator_step_11=Stop the tunnel and VM separately and record physical-route fallback; fallback is expected and proves there is no host kill switch.
 mac_command_routes_ipv4=/usr/sbin/netstat -rn -f inet
 mac_command_routes_ipv6=/usr/sbin/netstat -rn -f inet6
 mac_command_route_dns=/sbin/route -n get __REVIEWED_DNS_IPV4__
@@ -55,5 +59,6 @@ mac_command_block_dot=/usr/bin/nc -G 3 -vz 1.1.1.1 853
 mac_command_block_unreviewed_tcp=/usr/bin/nc -G 3 -vz 1.1.1.1 80
 quic_test_requirement=Generate one bounded IPv4 UDP/443 probe while watching the guest wg-exec forward drop counter; a UDP client exit code alone is not evidence.
 public_ip_requirement=Use one reviewed HTTPS observer before and after; retain raw responses and require exact equality.
+route_health_evidence_contract=Two stable samples, reviewed manifest/config/topology bindings, a recent handshake and an accepted-HTTPS counter increase are required; this plan does not collect or authorize them.
 evidence_status=awaiting_vm_apply_router_keys_and_attended_local_nat_lab_test
 EOF

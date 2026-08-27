@@ -5,11 +5,14 @@ active builder requires an already-loaded API-wallet object and an independent
 recovery HMAC secret, then composes the reviewed stores, synchronizer,
 reconcilers, safety controller, signers, one-shot dispatchers, and serialized
 runtime.  Mainnet is not representable by ``ExecutorConfig`` or this module.
+Normal entry also defaults to an unavailable route-health gate; recovery does
+not depend on that gate.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import os
@@ -24,7 +27,12 @@ from .approval import TestnetRecoveryAuthority
 from .daily_loss import DailyLossBinding, DailyLossLedger
 from .dispatcher import ExecutionDispatcher
 from .domain import Environment
-from .errors import StateConflict, ValidationError
+from .errors import (
+    AdmissionDenied,
+    EntrySubmissionRevoked,
+    StateConflict,
+    ValidationError,
+)
 from .execution_store import ExecutionStore
 from .execution_work_scanner import ExecutionWorkScanner
 from .executor_config import ExecutorConfig
@@ -81,11 +89,17 @@ from .staging_inbox import (
     TradeStagingInbox,
     TrustedQuoteDecision,
 )
+from . import executor_chat_ready_consumer as _testnet_chat_ready_consumer
 from .testnet_chat_delivery import testnet_chat_execution_scope_from_config
 from .testnet_entry_role_attestation import (
+    ENTRY_ROLE_ATTESTATION_TTL_MS,
     EntryRoleAttestationStage,
     TESTNET_ENTRY_ROLE_INFO_ENDPOINT,
     collect_testnet_entry_role_attestation,
+)
+from .testnet_route_health import (
+    TestnetRouteHealthGate,
+    TestnetRouteReadinessReport,
 )
 
 
@@ -100,6 +114,40 @@ _VERIFICATION_DIRECTORY_PREFIXES = (
 
 def _clock() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _service_clock_value(clock: Clock) -> datetime:
+    try:
+        value = clock()
+    except Exception as error:
+        raise ValidationError("active executor service clock failed") from error
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
+        raise ValidationError(
+            "active executor service clock must be timezone-aware"
+        )
+    return value.astimezone(timezone.utc)
+
+
+def _consume_testnet_chat_ready_if_enabled(
+    store: ExecutionStore,
+    cached_consumer: _testnet_chat_ready_consumer.TestnetChatReadyConsumer | None,
+) -> tuple[
+    _testnet_chat_ready_consumer.TestnetChatReadyConsumer | None,
+    _testnet_chat_ready_consumer.TestnetChatReadyConsumerResult | None,
+]:
+    """Cross the ready-index boundary only after the literal dormant gate."""
+
+    if not _testnet_chat_ready_consumer.TESTNET_CHAT_READY_CONSUMER_ENABLED:
+        return cached_consumer, None
+    if cached_consumer is None:
+        cached_consumer = _testnet_chat_ready_consumer.TestnetChatReadyConsumer(store)
+    elif not cached_consumer.is_bound_to(store):
+        raise StateConflict("cached chat-ready consumer belongs to another store")
+    return cached_consumer, cached_consumer.consume_once()
 
 
 def _wallet_address(wallet: object) -> str:
@@ -476,11 +524,15 @@ class ActiveExecutorCycle:
     learning_sync: ExecutionLearningSyncReport | None
     learning_sync_failed: bool
     learning_sync_skipped_for_priority: bool
+    route_health: TestnetRouteReadinessReport | None
+    route_health_required: bool
+    route_health_failed: bool
+    route_health_skipped_for_priority: bool
     runtime_step: RuntimeStepResult
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "active_testnet_executor_cycle.v1",
+            "schema_version": "active_testnet_executor_cycle.v2",
             "loss_sync": None if self.loss_sync is None else self.loss_sync.as_dict(),
             "loss_sync_failed": self.loss_sync_failed,
             "loss_sync_skipped_for_priority": self.loss_sync_skipped_for_priority,
@@ -490,6 +542,14 @@ class ActiveExecutorCycle:
             "learning_sync_failed": self.learning_sync_failed,
             "learning_sync_skipped_for_priority": (
                 self.learning_sync_skipped_for_priority
+            ),
+            "route_health": (
+                None if self.route_health is None else self.route_health.as_dict()
+            ),
+            "route_health_required": self.route_health_required,
+            "route_health_failed": self.route_health_failed,
+            "route_health_skipped_for_priority": (
+                self.route_health_skipped_for_priority
             ),
             "runtime_step": self.runtime_step.as_dict(),
             "environment": "testnet",
@@ -513,9 +573,13 @@ class ActiveTestnetExecutorService:
     handlers: TestnetExecutorHandlerSet
     loss_synchronizer: HyperliquidDailyLossSynchronizer
     learning_projector: ExecutionLearningProjector | _UnavailableLearningProjector
+    route_health_gate: TestnetRouteHealthGate
     runtime: ExecutorRuntime
     clock: Clock
     _last_loss_sync_at: datetime | None = field(default=None, init=False)
+    _chat_ready_consumer: (
+        _testnet_chat_ready_consumer.TestnetChatReadyConsumer | None
+    ) = field(default=None, init=False, repr=False)
 
     def start(self):
         return self.runtime.start()
@@ -523,6 +587,12 @@ class ActiveTestnetExecutorService:
     def tick(self) -> ActiveExecutorCycle:
         report: HyperliquidDailyLossSync | None = None
         failed = False
+        now = _service_clock_value(self.clock)
+        # Expired queued risk must be released independently of route health;
+        # otherwise a permanently unavailable route can retain the account's
+        # sole active-command slot and reservation forever.
+        self.state.execution_store.normalize_expired_entry_claims(at=now)
+        self.state.execution_store.expire_next_queued_unsent(at=now)
         preview = self.runtime.dry_run()
         urgent_steps = {
             RuntimeStep.RECOVERY_RECONCILE,
@@ -535,17 +605,6 @@ class ActiveTestnetExecutorService:
             RuntimeStep.STARTUP_RECONCILE,
             RuntimeStep.SHUTDOWN_DRAIN,
         }
-        try:
-            clock_value = self.clock()
-        except Exception as error:
-            raise ValidationError("active executor service clock failed") from error
-        if (
-            not isinstance(clock_value, datetime)
-            or clock_value.tzinfo is None
-            or clock_value.utcoffset() is None
-        ):
-            raise ValidationError("active executor service clock must be timezone-aware")
-        now = clock_value.astimezone(timezone.utc)
         due = self._last_loss_sync_at is None or (
             now - self._last_loss_sync_at
             >= timedelta(milliseconds=self.state.config.reconcile_interval_ms)
@@ -559,6 +618,15 @@ class ActiveTestnetExecutorService:
             )
         )
         skipped = preview.step in urgent_steps
+        if preview.step in {RuntimeStep.GATE_READY, RuntimeStep.IDLE}:
+            # The helper's literal false gate still precedes consumer
+            # construction and all ready-path I/O.  If promoted later, marker
+            # work cannot preempt reconciliation, protection, safety, recovery,
+            # an existing entry, or a blocked gate.
+            self._chat_ready_consumer, _ = _consume_testnet_chat_ready_if_enabled(
+                self.state.execution_store,
+                self._chat_ready_consumer,
+            )
         if not skipped and (
             due or entry_requires_refresh or loss_block_requires_refresh
         ):
@@ -580,6 +648,62 @@ class ActiveTestnetExecutorService:
                 learning_report = self.learning_projector.synchronize()
             except Exception:
                 learning_failed = True
+        route_health: TestnetRouteReadinessReport | None = None
+        route_health_failed = False
+        route_health_skipped = skipped
+        if entry_requires_refresh and not skipped:
+            route_checked_at = now
+            try:
+                route_read_started_at = _service_clock_value(self.clock)
+                route_evidence = self.route_health_gate.require_ready(
+                    at=route_read_started_at
+                )
+                route_read_completed_at = _service_clock_value(self.clock)
+                route_checked_at = route_read_completed_at
+                self.route_health_gate.verify_after_read(
+                    route_evidence,
+                    started_at=route_read_started_at,
+                    completed_at=route_read_completed_at,
+                    minimum_remaining_ms=ENTRY_ROLE_ATTESTATION_TTL_MS,
+                )
+            except AdmissionDenied as error:
+                route_health = TestnetRouteReadinessReport(
+                    ready=False,
+                    checked_at=route_checked_at,
+                    reason_code=error.message,
+                    expectation_hash=(
+                        None
+                        if self.route_health_gate.expectation is None
+                        else self.route_health_gate.expectation.expectation_hash
+                    ),
+                    evidence_hash=None,
+                    evidence_expires_at=None,
+                )
+            except ValidationError:
+                route_health = TestnetRouteReadinessReport(
+                    ready=False,
+                    checked_at=route_checked_at,
+                    reason_code="route_health_service_clock_invalid",
+                    expectation_hash=(
+                        None
+                        if self.route_health_gate.expectation is None
+                        else self.route_health_gate.expectation.expectation_hash
+                    ),
+                    evidence_hash=None,
+                    evidence_expires_at=None,
+                )
+            else:
+                route_expectation = self.route_health_gate.expectation
+                assert route_expectation is not None
+                route_health = TestnetRouteReadinessReport(
+                    ready=True,
+                    checked_at=route_read_completed_at,
+                    reason_code="ready",
+                    expectation_hash=route_expectation.expectation_hash,
+                    evidence_hash=route_evidence.evidence_hash,
+                    evidence_expires_at=route_evidence.expires_at,
+                )
+            route_health_failed = not route_health.ready
         runtime_step = self.runtime.tick(
             entry_refresh_permitted=(
                 report is not None
@@ -587,6 +711,8 @@ class ActiveTestnetExecutorService:
                 and not failed
                 and learning_report is not None
                 and not learning_failed
+                and route_health is not None
+                and route_health.ready
             )
         )
         post_step_urgent = (
@@ -607,6 +733,10 @@ class ActiveTestnetExecutorService:
             learning_sync=learning_report,
             learning_sync_failed=learning_failed,
             learning_sync_skipped_for_priority=learning_skipped,
+            route_health=route_health,
+            route_health_required=entry_requires_refresh,
+            route_health_failed=route_health_failed,
+            route_health_skipped_for_priority=route_health_skipped,
             runtime_step=runtime_step,
         )
 
@@ -624,6 +754,7 @@ def build_active_testnet_executor_service(
     market_reader: MarketReader | None = None,
     info_transport: InfoTransport = post_public_info,
     sign_l1_action: SignL1Action | None = None,
+    route_health_gate: TestnetRouteHealthGate | None = None,
 ) -> ActiveTestnetExecutorService:
     """Compose the real one-shot TESTNET write path behind the local runtime."""
 
@@ -640,6 +771,18 @@ def build_active_testnet_executor_service(
         raise ValidationError("recovery secret must contain at least 32 bytes")
     if not callable(clock) or not callable(info_transport):
         raise TypeError("clock and info_transport must be callable")
+    if route_health_gate is None:
+        selected_route_health_gate = TestnetRouteHealthGate.unavailable(
+            config.config_hash
+        )
+    else:
+        if type(route_health_gate) is not TestnetRouteHealthGate:
+            raise TypeError(
+                "route_health_gate must be exact TestnetRouteHealthGate or None"
+            )
+        if route_health_gate.executor_config_hash != config.config_hash:
+            raise ValidationError("route-health gate config differs from executor")
+        selected_route_health_gate = route_health_gate
     selected_account_reader = account_reader or (
         lambda address, network: fetch_account_snapshot(
             address,
@@ -727,6 +870,7 @@ def build_active_testnet_executor_service(
         main_account_address=config.main_account_address,
         limits=limits,
         policy=policy,
+        route_health_gate=selected_route_health_gate,
         clock=clock,
         account_reader=selected_account_reader,
         market_reader=selected_market_reader,
@@ -834,7 +978,29 @@ def build_active_testnet_executor_service(
         clock=clock,
         **handlers.runtime_ports(),
     )
-    entry_dispatcher.submission_guard = runtime.entry_submission_guard
+
+    @contextmanager
+    def route_bound_submission_guard():
+        with runtime.entry_submission_guard():
+            try:
+                route_read_started_at = _service_clock_value(clock)
+                route_evidence = selected_route_health_gate.require_ready(
+                    at=route_read_started_at
+                )
+                route_read_completed_at = _service_clock_value(clock)
+                selected_route_health_gate.verify_after_read(
+                    route_evidence,
+                    started_at=route_read_started_at,
+                    completed_at=route_read_completed_at,
+                    minimum_remaining_ms=ENTRY_ROLE_ATTESTATION_TTL_MS,
+                )
+            except Exception as error:
+                raise EntrySubmissionRevoked(
+                    "fresh route-health capability is unavailable"
+                ) from error
+            yield
+
+    entry_dispatcher.submission_guard = route_bound_submission_guard
     loss_sync = HyperliquidDailyLossSynchronizer(
         environment=Environment.TESTNET,
         account_id=config.account_id,
@@ -850,6 +1016,7 @@ def build_active_testnet_executor_service(
         handlers=handlers,
         loss_synchronizer=loss_sync,
         learning_projector=learning_projector,
+        route_health_gate=selected_route_health_gate,
         runtime=runtime,
         clock=clock,
     )
