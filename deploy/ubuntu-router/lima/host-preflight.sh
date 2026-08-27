@@ -19,6 +19,7 @@ expected_lima_version=__PINNED_LIMA_VERSION_SHELL__
 expected_limactl_sha256=__PINNED_LIMACTL_SHA256_SHELL__
 expected_socket_vmnet_sha256=__PINNED_SOCKET_VMNET_SHA256_SHELL__
 expected_socket_vmnet_client_sha256=__PINNED_SOCKET_VMNET_CLIENT_SHA256_SHELL__
+expected_limactl_path=/opt/trading-desk-router-tools/lima-2.2.0/bin/limactl
 
 if [ "$#" -eq 1 ] && [ "$1" = '--plan' ]; then
     printf '%s\n' \
@@ -30,6 +31,7 @@ if [ "$#" -eq 1 ] && [ "$1" = '--plan' ]; then
         "networks_yaml_sha256=${expected_networks_sha256}" \
         "effective_config_sha256=${expected_effective_sha256}" \
         'required_validation=limactl validate --fill' \
+        "required_limactl_path=${expected_limactl_path}" \
         'evidence_status=awaiting_lima_home_and_effective_config_attestation'
     exit 0
 fi
@@ -43,10 +45,14 @@ case "$limactl_path" in
 esac
 [ -f "$limactl_path" ] && [ ! -L "$limactl_path" ] || \
     fail 'limactl must be a real regular file'
+[ "$limactl_path" = "$expected_limactl_path" ] || \
+    fail 'limactl path differs from the versioned root-owned install'
 [ -x "$limactl_path" ] || fail 'limactl is not executable'
 [ "$(stat -f '%l' "$limactl_path")" = 1 ] || fail 'limactl has an unsafe link count'
-[ "$(stat -f '%u' "$limactl_path")" = "$(id -u)" ] || \
-    fail 'limactl is not owned by the invoking operator'
+[ "$(stat -f '%u' "$limactl_path")" = 0 ] || \
+    fail 'limactl is not root-owned'
+[ "$(stat -f '%Lp' "$limactl_path")" = 555 ] || \
+    fail 'limactl mode is not 0555'
 [ -z "$(find "$limactl_path" -maxdepth 0 -perm +022 -print -quit)" ] || \
     fail 'limactl is group/world writable'
 actual_limactl_sha256=$(shasum -a 256 "$limactl_path" | awk '{print $1}')

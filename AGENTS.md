@@ -15,11 +15,19 @@ This repository builds an agent-runtime-neutral trading research and execution h
 
 ## Capital boundary
 
-- No agent, prompt, skill, webpage, generated script, or chat message may hold a signing key, approve a trade, or call a venue write endpoint.
+- No agent, prompt, skill, webpage, generated script, or free-form chat message
+  may hold a signing key, create authority by itself, or call a venue write
+  endpoint. A future TESTNET chat-approval lane is reserved only for the exact
+  `execute trade <proposal-id>` command over an immutable, short-lived,
+  fully risk-bound proposal; it is not implemented and a bare command is
+  invalid.
 - The isolated TESTNET worker has a deployable write path, but it is a separate process and CLI. It is never an MCP tool or skill capability. Mainnet remains hard-disabled.
 - The foundation admits only local `infrastructure_testnet` `simulate_order`
   commands; deny strategy, shadow, mainnet, and systematic grants.
-- Approval in chat is invalid. `stage_trade_candidate` can create only an all-false authority document; attended authorization requires the exact ticket confirmation read directly from `/dev/tty` by `trading-harness-executor`.
+- `stage_trade_candidate` can create only an all-false authority document.
+  Current authorization uses exact confirmation read directly from `/dev/tty`
+  by the role-isolated CLI as an administrative fallback. Do not reinterpret
+  ordinary chat as that HMAC permit or expose the signer/store to MCP.
 - Evidence status and deployment authority are separate.
 - Use exact `Decimal`/integer monetary arithmetic; reject binary floats for prices, sizes, fees, and limits.
 - Admission must atomically reserve risk, consume a single-use command authorization, update policy counters, and create the durable outbox row before network I/O.
@@ -59,24 +67,28 @@ This repository builds an agent-runtime-neutral trading research and execution h
 - Read `docs/testnet_commissioning.md` before claiming transaction readiness.
   Machine setup alone is insufficient. The qualification GTC/query/cancel,
   retained snapshot and ordinary-close semantics now have a separate
-  TESTNET-only schema-v11 persistence lane. Its credential-free signer-envelope
+  TESTNET-only schema-v12 persistence lane. Its credential-free signer-envelope
   and injected signature-recovery interfaces plus offline
   transport/query/terminal/crash transitions exist, including terminal-flat
   reservation release. The exact SDK 0.24.0 TESTNET signer and independent
   EIP-712 recovery verifier exist behind a schema-v2 global nonce authority.
   A separate `trading-harness-qualification` terminal surface provides
   control-UID collect/verify/attended authorization and executor-UID
-  status/recover/reconciliation commands. Its `run` command fails at the
-  compiled submission gate before config, state, Keychain or network access;
-  split prepare/sign commands are not public. A one-shot exact-TESTNET HTTP
-  sender contract, injected credential-free advisory WebSocket decoder/client
-  and bounded local accept-then-drop/crash harness exist. The sender remains
-  unreachable because qualification submission authority is compiled off; no
-  complete live place/query/cancel worker, live WebSocket adapter or live
-  response-loss forwarder has been promoted.
-- Treat an expired proven-unsent cancel as a hard halt with reservation
-  retained. No fresh same-CLOID cancel reauthorization exists yet; never add a
-  blind retry or call the current one-phase `run` contract live-ready.
+  status/recover/reconciliation commands. Its full bounded foreground worker
+  composes place, paired CLOID/OID query, cancel and terminal-flat
+  reconciliation, but `run` fails at the compiled submission gate before
+  config, state, Keychain or network access; split prepare/sign commands are
+  not public. Each key/send boundary requires a fresh two-read `userRole`
+  attestation bound through the signed attempt and submission authority. A
+  one-shot exact-TESTNET HTTP sender contract, injected credential-free
+  advisory WebSocket decoder/client and bounded local accept-then-drop/crash
+  harness exist. The sender remains unreachable because qualification
+  submission authority is compiled off; no live WebSocket adapter or live
+  response-loss forwarder has been qualified.
+- An expired proven-unsent cancel hard-halts with reservation retained. One
+  fresh, attended, read-proven-open same-CLOID successor may be authorized
+  through a separately persisted issued-to-consumed permit and a new action,
+  envelope and global nonce. Never turn it into a blind retry.
 - Do not promote qualification submission until the executor performs a final
   fresh stable `userRole(api_wallet)` mapping check after claim and immediately
   before key use/send, bound into attempt evidence; the agent wire does not
@@ -95,8 +107,12 @@ This repository builds an agent-runtime-neutral trading research and execution h
   and a dated Ubuntu image. Its schema-v3 commission lock binds offline host
   attestations, the signed Noble snapshot/cloud manifest and the 116-package
   no-recommends dependency closure. `commission-public.py` may only plan or
-  verify those public bytes; host install, VM/package apply and network/key
-  mutation remain absent and guest preflight must pass before keys exist.
+  verify those public bytes. A separate commissioner specifies exact media and
+  root-owned non-writable Lima/socket_vmnet installation, but every root gate
+  and its launcher remain false pending a pre-exec sealed-runtime symlink/dylib
+  proof. Its UID-501 verification receipt is informational and never root
+  authority. Writable Lima-home, validate-fill, VM/guest/package apply and
+  network/key mutation also remain hard-disabled behind named blockers.
 - The VM and router renderers share the fixed `192.168.106.1/32` Mac to
   `192.168.106.2/24` guest ingress contract. The rendered
   `local-nat-lab-test-plan` is print-only: PF enforcement, a remote VPN exit,

@@ -29,6 +29,7 @@ TEMPLATE_ROOT = ROOT / "deploy" / "ubuntu-router" / "lima"
 DEFAULT_IMAGE_LOCK = TEMPLATE_ROOT / "image-lock.json"
 DEFAULT_PACKAGE_LOCK = TEMPLATE_ROOT / "package-lock.json"
 DEFAULT_COMMISSION_LOCK = TEMPLATE_ROOT / "commission-lock.json"
+DEFAULT_COMMISSION_APPLY_LOCK = TEMPLATE_ROOT / "commission-apply-lock.json"
 
 PLACEHOLDER_RE = re.compile(r"__[A-Z0-9_]+__")
 INSTANCE_RE = re.compile(r"[a-z][a-z0-9-]{0,30}")
@@ -144,12 +145,16 @@ TEMPLATES: dict[str, tuple[str, int]] = {
     "host-preflight.sh": ("host-preflight.sh", 0o700),
     "guest-preflight.sh": ("guest-preflight.sh", 0o700),
     "commission-public.py": ("commission-public.py", 0o700),
+    "commission-apply.py": ("commission-apply.py", 0o700),
+    "commission-apply-launcher.sh": ("commission-apply-launcher.sh", 0o700),
+    "commission-guest.py": ("commission-guest.py", 0o700),
 }
 CANONICAL_INPUTS: dict[str, int] = {
     "vm-spec.json": 0o600,
     "image-lock.json": 0o600,
     "package-lock.json": 0o600,
     "commission-lock.json": 0o600,
+    "commission-apply-lock.json": 0o600,
 }
 STATIC_PUBLIC_INPUTS: dict[str, int] = {
     "ubuntu-cloud-image-signing-key.gpg": 0o600,
@@ -162,7 +167,11 @@ SECURITY_CLAIMS = {
     "apply_enabled": False,
     "changes_public_egress_ip": False,
     "credentials_present": False,
+    "guest_mutation_apply_enabled": False,
     "host_direct_bypass_prevented": False,
+    "host_prepare_apply_artifact_present": True,
+    "host_prepare_apply_executed": False,
+    "lima_home_apply_enabled": False,
     "mainnet_authorized": False,
     "network_state_changed": False,
     "packages_installed": False,
@@ -170,6 +179,7 @@ SECURITY_CLAIMS = {
     "router_keys_generated": False,
     "venue_writes_authorized": False,
     "vm_created": False,
+    "vm_create_apply_enabled": False,
 }
 
 
@@ -607,6 +617,129 @@ def validate_commission_lock(
     return lock
 
 
+def validate_commission_apply_lock(lock: dict[str, Any]) -> dict[str, Any]:
+    _exact_keys(
+        lock,
+        frozenset(
+            {
+                "blockers",
+                "host",
+                "paths",
+                "phases",
+                "python_runtime",
+                "review_status",
+                "schema_version",
+                "stop_line",
+                "verifier_toolchain",
+            }
+        ),
+        "commission apply lock",
+    )
+    if type(lock["schema_version"]) is not int or lock["schema_version"] != 1:
+        raise ValueError("commission apply lock schema_version must be exactly 1")
+    if lock["review_status"] != (
+        "operator_evidence_only_all_root_vm_guest_apply_disabled"
+    ):
+        raise ValueError("commission apply lock review status differs")
+    expected_host = {
+        "architecture": "arm64",
+        "build_version": "25G83",
+        "operator_gid": 20,
+        "operator_uid": 501,
+        "os": "Darwin",
+        "product_version": "26.6.2",
+    }
+    if lock["host"] != expected_host:
+        raise ValueError("commission apply host contract differs")
+    expected_paths = {
+        "lima_home": "/private/var/db/trading-desk-lima",
+        "lima_install": "/opt/trading-desk-router-tools/lima-2.2.0",
+        "media_parent": "/private/var/db/trading-desk-router-commission-v1/media",
+        "operator_home": "/private/var/db/trading-desk-lima/home",
+        "quarantine_parent": "/private/var/db/trading-desk-router-commission-v1/quarantine",
+        "receipt_parent": "/private/var/db/trading-desk-router-commission-v1/receipts",
+        "socket_vmnet_install": "/opt/socket_vmnet",
+        "state_root": "/private/var/db/trading-desk-router-commission-v1",
+        "tools_parent": "/opt/trading-desk-router-tools",
+    }
+    if lock["paths"] != expected_paths:
+        raise ValueError("commission apply path contract differs")
+    expected_phases = {
+        "guest_freeze_apply_enabled": False,
+        "guest_package_install_apply_enabled": False,
+        "guest_package_simulation_apply_enabled": False,
+        "host_tools_apply_enabled": False,
+        "lima_home_apply_enabled": False,
+        "media_seal_apply_enabled": False,
+        "operator_verification_receipt_enabled": True,
+        "router_activation_apply_enabled": False,
+        "validate_fill_apply_enabled": False,
+        "vm_create_apply_enabled": False,
+        "vm_start_apply_enabled": False,
+    }
+    if lock["phases"] != expected_phases:
+        raise ValueError("commission apply phase gates differ")
+    if not isinstance(lock["stop_line"], dict) or any(lock["stop_line"].values()):
+        raise ValueError("commission apply stop line unexpectedly enables authority")
+    if set(lock["blockers"]) != {
+        "guest_freeze",
+        "guest_package_install",
+        "host_tools",
+        "lima_home",
+        "media_seal",
+        "router_activation",
+        "validate_fill",
+        "vm_create",
+        "vm_start",
+    } or not all(
+        isinstance(value, str) and 20 <= len(value) <= 300
+        for value in lock["blockers"].values()
+    ):
+        raise ValueError("commission apply blocker set differs")
+    if lock["python_runtime"] != {
+        "external_install_receipt_required": True,
+        "path": "/opt/trading-desk/runtime/python-3.11.16/bin/python3.11",
+        "prefix": "/opt/trading-desk/runtime/python-3.11.16",
+        "version": "3.11.16",
+    }:
+        raise ValueError("commission apply Python runtime contract differs")
+    toolchain = lock["verifier_toolchain"]
+    if not isinstance(toolchain, dict) or set(toolchain) != {
+        "gh",
+        "gpgv",
+        "homebrew_dependencies",
+        "llvm_otool",
+    }:
+        raise ValueError("commission verifier toolchain keys differ")
+    for name in ("gh", "gpgv", "llvm_otool"):
+        contract = toolchain[name]
+        if not isinstance(contract, dict):
+            raise ValueError(f"commission verifier {name} contract is invalid")
+        _reviewed_string(contract.get("sha256"), f"commission verifier {name}", SHA256_RE)
+        if type(contract.get("size_bytes")) is not int or contract["size_bytes"] <= 0:
+            raise ValueError(f"commission verifier {name} size is invalid")
+        if not isinstance(contract.get("path"), str) or not contract["path"].startswith("/"):
+            raise ValueError(f"commission verifier {name} path is invalid")
+    dependencies = toolchain["homebrew_dependencies"]
+    if not isinstance(dependencies, list) or len(dependencies) != 5:
+        raise ValueError("commission verifier dependency closure differs")
+    for dependency in dependencies:
+        if not isinstance(dependency, dict):
+            raise ValueError("commission verifier dependency is invalid")
+        _reviewed_string(
+            dependency.get("sha256"), "commission verifier dependency", SHA256_RE
+        )
+        if not isinstance(dependency.get("load_paths"), list):
+            raise ValueError("commission verifier dependency load paths differ")
+    if DEFAULT_COMMISSION_APPLY_LOCK.is_file() and not DEFAULT_COMMISSION_APPLY_LOCK.is_symlink():
+        checked_in = _read_json(
+            DEFAULT_COMMISSION_APPLY_LOCK, "checked-in commission apply lock"
+        )
+        if lock != checked_in:
+            raise ValueError("commission apply lock differs from the checked-in exact lock")
+    return lock
+
+
 def _is_rfc1918(address: ipaddress.IPv4Address) -> bool:
     return any(
         address in network
@@ -958,17 +1091,22 @@ def render_bundle(
     package_lock_path: Path,
     output_dir: Path,
     commission_lock_path: Path = DEFAULT_COMMISSION_LOCK,
+    commission_apply_lock_path: Path = DEFAULT_COMMISSION_APPLY_LOCK,
 ) -> dict[str, Any]:
     spec_input = _read_json(spec_path, "VM spec")
     image_input = _read_json(image_lock_path, "image lock")
     package_input = _read_json(package_lock_path, "package lock")
     commission_input = _read_json(commission_lock_path, "commission lock")
+    commission_apply_input = _read_json(
+        commission_apply_lock_path, "commission apply lock"
+    )
     spec = validate_vm_spec(spec_input)
     image_lock = validate_image_lock(image_input)
     package_lock = validate_package_lock(package_input)
     commission_lock = validate_commission_lock(
         commission_input, image_lock, package_lock
     )
+    commission_apply_lock = validate_commission_apply_lock(commission_apply_input)
     commission_bytes = _canonical_json(commission_input)
     if _sha256(commission_bytes) != package_lock["apt_install_source"][
         "commission_lock_sha256"
@@ -1003,6 +1141,7 @@ def render_bundle(
         "image-lock.json": _canonical_json(image_input),
         "package-lock.json": _canonical_json(package_input),
         "commission-lock.json": commission_bytes,
+        "commission-apply-lock.json": _canonical_json(commission_apply_input),
     }
     for name, content in canonical_inputs.items():
         rendered[name] = (content, CANONICAL_INPUTS[name])
@@ -1076,6 +1215,19 @@ def render_bundle(
                 "immutable_public_inputs_locked": True,
                 "immutable_public_inputs_verified": False,
                 "apply_authorized": False,
+                "commission_apply_lock_sha256": _sha256(
+                    _canonical_json(commission_apply_input)
+                ),
+                "enabled_host_prepare_phases": sorted(
+                    name
+                    for name, enabled in commission_apply_lock["phases"].items()
+                    if enabled
+                ),
+                "host_prepare_apply_authorized": False,
+                "vm_create_apply_enabled": False,
+                "vm_start_apply_enabled": False,
+                "guest_mutation_apply_enabled": False,
+                "router_activation_apply_enabled": False,
             },
             "network_contract": {
                 "expected_guest_nic_count": 2,
@@ -1106,6 +1258,9 @@ def render_bundle(
                 "commission_lock_sha256": package_lock["apt_install_source"][
                     "commission_lock_sha256"
                 ],
+                "commission_apply_lock_sha256": _sha256(
+                    _canonical_json(commission_apply_input)
+                ),
                 "lima_version": package_lock["host_tools"]["lima"]["version"],
                 "lima_archive_sha256": package_lock["host_tools"]["lima"][
                     "sha256"
@@ -1238,6 +1393,11 @@ def verify_bundle(
     commission_lock = validate_commission_lock(
         commission_input, image_lock, package_lock
     )
+    commission_apply_input = _read_json(
+        entries["commission-apply-lock.json"], "embedded commission apply lock"
+    )
+    commission_apply_lock = validate_commission_apply_lock(commission_apply_input)
+    commission_apply_digest = _sha256(_canonical_json(commission_apply_input))
     if _sha256(_canonical_json(commission_input)) != package_lock[
         "apt_install_source"
     ]["commission_lock_sha256"]:
@@ -1269,6 +1429,7 @@ def verify_bundle(
         "commission_lock_sha256": package_lock["apt_install_source"][
             "commission_lock_sha256"
         ],
+        "commission_apply_lock_sha256": commission_apply_digest,
         "lima_version": package_lock["host_tools"]["lima"]["version"],
         "lima_archive_sha256": package_lock["host_tools"]["lima"]["sha256"],
         "lima_attestation_repository": package_lock["host_tools"]["lima"][
@@ -1321,6 +1482,17 @@ def verify_bundle(
         "immutable_public_inputs_locked": True,
         "immutable_public_inputs_verified": False,
         "apply_authorized": False,
+        "commission_apply_lock_sha256": commission_apply_digest,
+        "enabled_host_prepare_phases": sorted(
+            name
+            for name, enabled in commission_apply_lock["phases"].items()
+            if enabled
+        ),
+        "host_prepare_apply_authorized": False,
+        "vm_create_apply_enabled": False,
+        "vm_start_apply_enabled": False,
+        "guest_mutation_apply_enabled": False,
+        "router_activation_apply_enabled": False,
     }
     if manifest["commission_contract"] != expected_commission_contract:
         raise ValueError("bundle commission contract differs from its embedded lock")
@@ -1377,6 +1549,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-lock", type=Path, default=DEFAULT_IMAGE_LOCK)
     parser.add_argument("--package-lock", type=Path, default=DEFAULT_PACKAGE_LOCK)
     parser.add_argument("--commission-lock", type=Path, default=DEFAULT_COMMISSION_LOCK)
+    parser.add_argument(
+        "--commission-apply-lock",
+        type=Path,
+        default=DEFAULT_COMMISSION_APPLY_LOCK,
+    )
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--check-bundle", type=Path)
     parser.add_argument("--expected-manifest-sha256")
@@ -1420,6 +1597,7 @@ def main(argv: list[str] | None = None) -> int:
             arguments.package_lock,
             arguments.output_dir,
             arguments.commission_lock,
+            arguments.commission_apply_lock,
         )
         manifest_digest = _sha256(
             (arguments.output_dir.resolve(strict=False) / "bundle-manifest.json").read_bytes()

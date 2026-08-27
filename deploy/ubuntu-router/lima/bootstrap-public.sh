@@ -17,6 +17,12 @@ printf '%s\n' \
     'packages_installed=false' \
     'host_tool_downloads_performed=false' \
     'host_tool_install_apply_enabled=false' \
+    'separate_commission_apply_artifact_present=true' \
+    'separate_media_seal_apply_enabled=false' \
+    'separate_host_tool_apply_enabled=false' \
+    'separate_lima_home_apply_enabled=false' \
+    'separate_vm_create_apply_enabled=false' \
+    'separate_guest_mutation_apply_enabled=false' \
     'host_tool_attestation_required=true' \
     'lima_source_url=__PINNED_LIMA_SOURCE_URL__' \
     'lima_archive_sha256=__PINNED_LIMA_ARCHIVE_SHA256__' \

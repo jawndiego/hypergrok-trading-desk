@@ -5,10 +5,12 @@ from datetime import timedelta
 import hashlib
 import inspect
 import unittest
+from unittest import mock
 
 from trading_harness.canonical import domain_hash
 from trading_harness.errors import (
     AdmissionDenied,
+    RecordNotFound,
     StateConflict,
     StorageError,
     ValidationError,
@@ -22,6 +24,10 @@ from trading_harness.qualification_signer import (
     QualificationSignerPolicy,
     QualificationSigningAccount,
     freeze_signed_qualification_envelope,
+)
+from trading_harness.qualification_role_attestation import (
+    QualificationRoleAttestationStage,
+    collect_testnet_user_role_attestation,
 )
 from trading_harness import qualification_store as qualification_store_module
 from trading_harness.testnet_qualification import (
@@ -147,7 +153,43 @@ class QualificationStoreTests(ExecutionStoreTestCase):
         )
         return envelope, envelope.execution_store_evidence(), policy, verifier
 
-    def test_schema_v11_admission_atomically_consumes_and_reserves(self) -> None:
+    def role_attestation(
+        self,
+        intent,
+        signing,
+        *,
+        stage: QualificationRoleAttestationStage,
+        start_ms: int,
+        attempt_id: str | None = None,
+        signed_evidence_hash: str | None = None,
+    ):
+        times = iter((at(start_ms), at(start_ms + 10), at(start_ms + 20)))
+        result = collect_testnet_user_role_attestation(
+            api_wallet_address=intent.api_wallet_address,
+            expected_main_account_address=intent.main_account_address,
+            stage=stage,
+            command_id=signing.command_id,
+            phase=signing.phase,
+            action_hash=signing.action_hash,
+            signing_authority_hash=signing.authority_hash,
+            worker_id=signing.worker_id,
+            fencing_token=signing.fencing_token,
+            attempt_id=attempt_id,
+            signed_evidence_hash=signed_evidence_hash,
+            transport=lambda _method, _endpoint, _payload: {
+                "role": "agent",
+                "data": {"user": intent.main_account_address},
+            },
+            clock=lambda: next(times),
+        )
+        self.qualification.record_role_attestation(
+            result,
+            lane="qualification",
+            at=at(start_ms + 30),
+        )
+        return result
+
+    def test_schema_v12_admission_atomically_consumes_and_reserves(self) -> None:
         _, intent, permit, workflow, command = self.admission_fixture()
 
         self.assertEqual(command.intent_hash, intent.intent_hash)
@@ -349,6 +391,12 @@ class QualificationStoreTests(ExecutionStoreTestCase):
         envelope, signed, policy, verifier = self.signed_fixture(
             command, intent, signing
         )
+        pre_key = self.role_attestation(
+            intent,
+            signing,
+            stage=QualificationRoleAttestationStage.PRE_KEY,
+            start_ms=1_050,
+        )
         self.assertFalse(hasattr(self.qualification, "prepare_attempt"))
         self.assertEqual(signed.verified_signer_address, API_WALLET)
         self.qualification.prepare_envelope_attempt(
@@ -360,9 +408,18 @@ class QualificationStoreTests(ExecutionStoreTestCase):
             policy=policy,
             signed=envelope,
             signature_verifier=verifier,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
             worker_id="qualification-worker",
             fencing_token=claim.fencing_token,
             at=at(1_300),
+        )
+        self.role_attestation(
+            intent,
+            signing,
+            stage=QualificationRoleAttestationStage.PRE_SEND,
+            start_ms=1_320,
+            attempt_id="qualification-attempt-1",
+            signed_evidence_hash=signed.evidence_hash,
         )
         with self.assertRaisesRegex(
             StateConflict, "submission is disabled"
@@ -469,6 +526,96 @@ class QualificationStoreTests(ExecutionStoreTestCase):
             (intent.reserved_loss, intent.reserved_notional),
         )
 
+    def test_future_gate_atomically_creates_role_bound_submission_authority(self) -> None:
+        _, intent, _, _, command = self.admission_fixture()
+        claim = self.qualification.claim(
+            command.command_id,
+            worker_id="qualification-worker",
+            at=at(500),
+            lease_seconds=15,
+        )
+        signing = self.qualification.require_signing_authority(
+            command.command_id,
+            intent.primary_action,
+            worker_id="qualification-worker",
+            fencing_token=claim.fencing_token,
+            at=at(1_000),
+        )
+        envelope, signed, policy, verifier = self.signed_fixture(
+            command, intent, signing
+        )
+        pre_key = self.role_attestation(
+            intent,
+            signing,
+            stage=QualificationRoleAttestationStage.PRE_KEY,
+            start_ms=1_050,
+        )
+        self.qualification.prepare_envelope_attempt(
+            command.command_id,
+            attempt_id="qualification-attempt-role-bound",
+            intent=intent,
+            action=intent.primary_action,
+            authority=signing,
+            policy=policy,
+            signed=envelope,
+            signature_verifier=verifier,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+            worker_id="qualification-worker",
+            fencing_token=claim.fencing_token,
+            at=at(1_300),
+        )
+        pre_send = self.role_attestation(
+            intent,
+            signing,
+            stage=QualificationRoleAttestationStage.PRE_SEND,
+            start_ms=1_320,
+            attempt_id="qualification-attempt-role-bound",
+            signed_evidence_hash=signed.evidence_hash,
+        )
+        with mock.patch.object(
+            qualification_store_module,
+            "QUALIFICATION_SUBMISSION_ENABLED",
+            True,
+        ):
+            authority_record = self.qualification.require_submission_authority(
+                command.command_id,
+                "qualification-attempt-role-bound",
+                signed.evidence_hash,
+                worker_id="qualification-worker",
+                fencing_token=claim.fencing_token,
+                at=at(1_400),
+            )
+        self.assertEqual(authority_record.command_id, command.command_id)
+        self.assertEqual(authority_record.attempt_id, "qualification-attempt-role-bound")
+        self.assertEqual(
+            authority_record.pre_send_attestation_hash,
+            pre_send.attestation_hash,
+        )
+        self.assertEqual(
+            authority_record.pre_send_expires_at_ms,
+            pre_send.expires_at_ms,
+        )
+        self.assertEqual(
+            self.qualification.get_step(
+                command.command_id, QualificationAttemptPhase.PLACE
+            ).state,
+            "sending",
+        )
+        connection = self.store._connect()
+        try:
+            connection.execute(
+                """
+                UPDATE execution_qualification_role_attestations
+                SET record_hash = ? WHERE attestation_hash = ?
+                """,
+                ("f" * 64, pre_send.attestation_hash),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaisesRegex(StorageError, "role attestation"):
+            self.qualification.normalize_expired_claims(at=at(15_600))
+
     def test_expired_unsent_claim_and_prepared_attempt_release_reservation(self) -> None:
         _, intent, _, _, command = self.admission_fixture()
         claim = self.qualification.claim(
@@ -539,6 +686,12 @@ class QualificationStoreTests(ExecutionStoreTestCase):
         envelope, signed, policy, verifier = self.signed_fixture(
             command, intent, signing, signed_ms=300
         )
+        pre_key = self.role_attestation(
+            intent,
+            signing,
+            stage=QualificationRoleAttestationStage.PRE_KEY,
+            start_ms=220,
+        )
         self.qualification.prepare_envelope_attempt(
             command.command_id,
             attempt_id="qualification-attempt-1",
@@ -548,9 +701,18 @@ class QualificationStoreTests(ExecutionStoreTestCase):
             policy=policy,
             signed=envelope,
             signature_verifier=verifier,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
             worker_id="qualification-worker",
             fencing_token=claim.fencing_token,
             at=at(400),
+        )
+        self.role_attestation(
+            intent,
+            signing,
+            stage=QualificationRoleAttestationStage.PRE_SEND,
+            start_ms=420,
+            attempt_id="qualification-attempt-1",
+            signed_evidence_hash=signed.evidence_hash,
         )
 
         incident = self.store.record_incident(
@@ -667,7 +829,7 @@ class QualificationStoreTests(ExecutionStoreTestCase):
             ),
         )
 
-        # A fresh database proves the point-of-no-return branch independently.
+        # A fresh database proves unbound prepared evidence cannot promote.
         self.temporary.cleanup()
         super().setUp()
         self.qualification = QualificationStore(self.store)
@@ -701,7 +863,7 @@ class QualificationStoreTests(ExecutionStoreTestCase):
             fencing_token=claim.fencing_token,
             at=at(400),
         )
-        with self.assertRaises(StateConflict):
+        with self.assertRaises((StateConflict, RecordNotFound)):
             self.qualification.require_submission_authority(
                 command.command_id,
                 "qualification-attempt-1",

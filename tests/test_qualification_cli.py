@@ -6,17 +6,20 @@ from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 from trading_harness.canonical import domain_hash
-from trading_harness.errors import StateConflict
+from trading_harness.errors import RecordNotFound, StateConflict
 from trading_harness import qualification_cli as cli_module
 from trading_harness.executor_config import parse_executor_config
 from trading_harness.qualification_cli import (
     QUALIFICATION_SPLIT_PHASE_COMMANDS_ENABLED,
     QUALIFICATION_QUEUE_POLL_SECONDS,
+    QualificationLifecycleDeadlineExceeded,
     _collect_retained_snapshot,
+    _call_with_absolute_read_deadline,
     _new_worker_id,
     _policy,
     authorize_canary,
@@ -127,6 +130,14 @@ class FakeSigningStore:
     def halt_unused_signing_authority(self, *args, **kwargs):
         self.events.append("halt_unused")
 
+    def record_role_attestation(self, attestation, **kwargs):
+        self.events.append("record_role")
+        return attestation
+
+    def require_current_role_attestation(self, **kwargs):
+        self.events.append("require_role")
+        return SimpleNamespace(attestation_hash="pre-key-role")
+
     def prepare_envelope_attempt(self, command_id, **values):
         self.events.append("store_prepare")
         return values["signed"].execution_store_evidence()
@@ -164,6 +175,15 @@ class QualificationCliTests(unittest.TestCase):
         path = self.review / "prewrite.json"
         export_qualification_evidence_review_artifact(collect(), path)
         return path
+
+    def test_blocking_info_read_is_interrupted_at_absolute_budget(self) -> None:
+        before = time.monotonic()
+        with self.assertRaises(QualificationLifecycleDeadlineExceeded):
+            _call_with_absolute_read_deadline(
+                lambda: time.sleep(1.0),
+                remaining_seconds=0.01,
+            )
+        self.assertLess(time.monotonic() - before, 0.5)
 
     def test_collect_verify_and_typed_load_keep_exact_seven_read_scope(self) -> None:
         destination = self.review / "collected.json"
@@ -347,6 +367,10 @@ class QualificationCliTests(unittest.TestCase):
                 self.config,
                 authority.command_id,
                 worker_id=authority.worker_id,
+                live_role_transport=lambda _endpoint, _payload: {
+                    "role": "agent",
+                    "data": {"user": self.config.main_account_address},
+                },
                 clock=lambda: at(300),
                 wallet_loader=wallet_loader,
                 store=store,  # type: ignore[arg-type]
@@ -362,6 +386,8 @@ class QualificationCliTests(unittest.TestCase):
                 "normalize",
                 "load_authority",
                 "artifact_load",
+                "record_role",
+                "require_role",
                 "wallet_load",
                 "sdk_sign",
                 "artifact_persist",
@@ -410,6 +436,9 @@ class QualificationCliTests(unittest.TestCase):
                 self.config,
                 authority.command_id,
                 worker_id=authority.worker_id,
+                live_role_transport=lambda _endpoint, _payload: self.fail(
+                    "orphan resume performed another role read"
+                ),
                 clock=lambda: at(300),
                 wallet_loader=lambda _config: self.fail("wallet was loaded"),
                 store=store,  # type: ignore[arg-type]
@@ -425,6 +454,7 @@ class QualificationCliTests(unittest.TestCase):
                 "load_authority",
                 "artifact_load",
                 "nonce_verify",
+                "require_role",
                 "store_prepare",
             ],
         )
@@ -447,6 +477,9 @@ class QualificationCliTests(unittest.TestCase):
                     self.config,
                     authority.command_id,
                     worker_id=authority.worker_id,
+                    live_role_transport=lambda _endpoint, _payload: self.fail(
+                        "role read occurred after orphan nonce detection"
+                    ),
                     clock=lambda: at(300),
                     wallet_loader=lambda _config: self.fail("wallet was reloaded"),
                     store=store,  # type: ignore[arg-type]
@@ -496,6 +529,7 @@ class QualificationCliTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.normalized = 0
                 self.list_calls = 0
+                self.state = "queued"
 
             def normalize_expired_claims(self, *, at):
                 self.normalized += 1
@@ -505,21 +539,45 @@ class QualificationCliTests(unittest.TestCase):
                 self.list_calls += 1
                 if self.list_calls == 1:
                     return ()
-                return (SimpleNamespace(state="queued", command_id=authority.command_id),)
+                return (
+                    SimpleNamespace(
+                        state=self.state, command_id=authority.command_id
+                    ),
+                )
+
+            def get_command(self, command_id):
+                return SimpleNamespace(state=self.state, current_phase="place")
 
             def get_outbox(self, command_id):
                 return SimpleNamespace(current_attempt_id="attempt-fixed", fencing_token=1)
 
             def load_workflow(self, command_id):
-                return SimpleNamespace(as_dict=lambda: {"state": "authorized"})
+                return SimpleNamespace(
+                    state=SimpleNamespace(value="place_pending_query"),
+                    as_dict=lambda: {"state": "place_pending_query"},
+                )
+
+            def record_role_attestation(self, *args, **kwargs):
+                return args[0]
 
         store = Store()
+        cancel_store = SimpleNamespace(
+            normalize_expired=lambda **_kwargs: 0,
+            list_records=lambda: (),
+        )
         sleeps: list[float] = []
         submission = SimpleNamespace(
             workflow=SimpleNamespace(as_dict=lambda: {"state": "pending_query"}),
             result=SimpleNamespace(as_dict=lambda: {"retry_performed": False}),
         )
         artifacts = SimpleNamespace(load=lambda _command, _phase: signed)
+        sends: list[dict[str, object]] = []
+
+        def send_once(*args, **kwargs):
+            sends.append(kwargs)
+            store.state = "terminal"
+            return submission
+
         with (
             mock.patch.object(
                 cli_module.qualification_store_module,
@@ -548,25 +606,269 @@ class QualificationCliTests(unittest.TestCase):
                 "trading_harness.qualification_cli.QualificationEnvelopeArtifactStore",
                 return_value=artifacts,
             ),
-            mock.patch(
-                "trading_harness.qualification_cli.submit_qualification_once",
-                return_value=submission,
-            ) as send,
         ):
             result = run(
                 Path("/reviewed/config.toml"),
                 clock=lambda: at(300),
                 sleeper=sleeps.append,
                 worker_id_factory=lambda: worker,
+                role_transport=lambda _endpoint, _payload: {
+                    "role": "agent",
+                    "data": {"user": self.config.main_account_address},
+                },
+                artifact_store=artifacts,  # type: ignore[arg-type]
+                sender=send_once,
+                cancel_reauthorization_store=cancel_store,  # type: ignore[arg-type]
             )
 
         self.assertEqual(result["worker_id"], worker)
         self.assertEqual(prepare_phase.call_args.kwargs["worker_id"], worker)
         self.assertEqual(sign_phase.call_args.kwargs["worker_id"], worker)
-        self.assertEqual(send.call_args.kwargs["worker_id"], worker)
-        self.assertEqual(send.call_count, 1)
+        self.assertEqual(len(sends), 1)
+        self.assertEqual(sends[0]["worker_id"], worker)
         self.assertEqual(sleeps, [QUALIFICATION_QUEUE_POLL_SECONDS])
         self.assertLess(QUALIFICATION_QUEUE_POLL_SECONDS, 0.25)
+
+    def test_foreground_worker_drives_place_reads_cancel_once_and_terminal(self) -> None:
+        intent, authority, _ = self._signed_fixture()
+        worker = authority.worker_id
+
+        class Store:
+            state = "queued"
+            phase = "place"
+
+            def normalize_expired_claims(self, *, at):
+                return 0
+
+            def list_commands(self):
+                return (SimpleNamespace(state=self.state, command_id="command-1"),)
+
+            def get_command(self, command_id):
+                return SimpleNamespace(state=self.state, current_phase=self.phase)
+
+            def get_outbox(self, command_id):
+                return SimpleNamespace(
+                    current_attempt_id=f"attempt-{self.phase}", fencing_token=1
+                )
+
+            def load_workflow(self, command_id):
+                return SimpleNamespace(
+                    state=SimpleNamespace(value="complete"),
+                    as_dict=lambda: {"state": self.state},
+                )
+
+            def record_role_attestation(self, *args, **kwargs):
+                return args[0]
+
+        store = Store()
+        cancel_store = SimpleNamespace(
+            normalize_expired=lambda **_kwargs: 0,
+            list_records=lambda: (),
+        )
+        sends: list[str] = []
+        reconciles: list[str] = []
+        open_polls = iter((True, True, False))
+        terminal_polls = iter((True, False))
+
+        def reconcile_open_step(*args, **kwargs):
+            reconciles.append("open")
+            pending = next(open_polls)
+            if not pending:
+                store.state = "queued"
+                store.phase = "cancel"
+            return {"read_pending": pending}
+
+        def reconcile_terminal_step(*args, **kwargs):
+            reconciles.append("terminal")
+            pending = next(terminal_polls)
+            if not pending:
+                store.state = "terminal"
+            return {"read_pending": pending}
+
+        def current_action(*args, **kwargs):
+            phase = QualificationAttemptPhase(store.phase)
+            action_hash = f"{store.phase}-action"
+            return intent, SimpleNamespace(action_hash=action_hash), phase
+
+        def signed_for(_command, phase):
+            return SimpleNamespace(
+                action_hash=f"{phase.value}-action",
+                signing_authority_hash=f"{phase.value}-authority",
+                execution_store_evidence=lambda: SimpleNamespace(
+                    evidence_hash=f"{phase.value}-evidence"
+                ),
+            )
+
+        artifacts = SimpleNamespace(load=signed_for)
+
+        def send_once(*args, **kwargs):
+            sends.append(store.phase)
+            store.state = "reconciling"
+            return SimpleNamespace(
+                result=SimpleNamespace(as_dict=lambda: {"phase": store.phase})
+            )
+
+        role_counter = 0
+
+        def role_attestation(*args, **kwargs):
+            nonlocal role_counter
+            role_counter += 1
+            return SimpleNamespace(attestation_hash=f"role-{role_counter}")
+
+        sleeps: list[float] = []
+        with (
+            mock.patch.object(
+                cli_module.qualification_store_module,
+                "QUALIFICATION_SUBMISSION_ENABLED",
+                True,
+            ),
+            mock.patch(
+                "trading_harness.qualification_cli.load_executor_config",
+                return_value=self.config,
+            ),
+            mock.patch("trading_harness.qualification_cli._require_role"),
+            mock.patch(
+                "trading_harness.qualification_cli._qualification_store",
+                return_value=store,
+            ),
+            mock.patch("trading_harness.qualification_cli.prepare"),
+            mock.patch(
+                "trading_harness.qualification_cli.sign",
+                return_value={"signed": True},
+            ),
+            mock.patch(
+                "trading_harness.qualification_cli._current_action",
+                side_effect=current_action,
+            ),
+            mock.patch(
+                "trading_harness.qualification_cli._collect_phase_role_attestation",
+                side_effect=role_attestation,
+            ),
+            mock.patch(
+                "trading_harness.qualification_cli.reconcile_open",
+                side_effect=reconcile_open_step,
+            ),
+            mock.patch(
+                "trading_harness.qualification_cli.reconcile_terminal",
+                side_effect=reconcile_terminal_step,
+            ),
+        ):
+            result = run(
+                Path("/reviewed/config.toml"),
+                clock=lambda: at(300),
+                sleeper=sleeps.append,
+                worker_id_factory=lambda: worker,
+                role_transport=lambda *_args: {},
+                artifact_store=artifacts,  # type: ignore[arg-type]
+                sender=send_once,
+                cancel_reauthorization_store=cancel_store,  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(sends, ["place", "cancel"])
+        self.assertEqual(reconciles, ["open", "open", "open", "terminal", "terminal"])
+        self.assertEqual(role_counter, 2)
+        self.assertEqual(result["state"], "terminal")
+        self.assertEqual(len(result["phase_results"]), 2)
+        self.assertTrue(all(item["transport"] for item in result["phase_results"]))
+        self.assertEqual(
+            sleeps,
+            [QUALIFICATION_QUEUE_POLL_SECONDS] * 3,
+        )
+
+    def test_monotonic_read_deadline_halts_and_retains_without_cancel_send(self) -> None:
+        intent, authority, signed = self._signed_fixture()
+
+        class Store:
+            state = "queued"
+            halted = False
+            retained = False
+
+            def normalize_expired_claims(self, *, at):
+                return 0
+
+            def list_commands(self):
+                return (SimpleNamespace(state=self.state, command_id="command-1"),)
+
+            def get_command(self, command_id):
+                return SimpleNamespace(state=self.state, current_phase="place")
+
+            def get_outbox(self, command_id):
+                return SimpleNamespace(current_attempt_id="attempt-place", fencing_token=1)
+
+            def load_workflow(self, command_id):
+                return SimpleNamespace(
+                    state=SimpleNamespace(value="place_pending_query"),
+                    as_dict=lambda: {},
+                )
+
+            def record_role_attestation(self, *args, **kwargs):
+                return args[0]
+
+            def halt_for_reconciliation_deadline(self, command_id, *, at):
+                self.state = "halted"
+                self.halted = True
+
+            def retain_for_reconciliation_deadline(self, command_id, *, at):
+                self.retained = True
+
+        store = Store()
+        cancel_store = SimpleNamespace(
+            normalize_expired=lambda **_kwargs: 0,
+            list_records=lambda: (),
+        )
+        artifacts = SimpleNamespace(load=lambda _command, _phase: signed)
+        sends: list[str] = []
+
+        def send_once(*args, **kwargs):
+            sends.append("place")
+            store.state = "reconciling"
+            return SimpleNamespace(result=SimpleNamespace(as_dict=lambda: {}))
+
+        times = iter((0.0, 1.0, 1.0, 9.0))
+        with (
+            mock.patch.object(
+                cli_module.qualification_store_module,
+                "QUALIFICATION_SUBMISSION_ENABLED",
+                True,
+            ),
+            mock.patch(
+                "trading_harness.qualification_cli.load_executor_config",
+                return_value=self.config,
+            ),
+            mock.patch("trading_harness.qualification_cli._require_role"),
+            mock.patch(
+                "trading_harness.qualification_cli._qualification_store",
+                return_value=store,
+            ),
+            mock.patch("trading_harness.qualification_cli.prepare"),
+            mock.patch(
+                "trading_harness.qualification_cli.sign", return_value={}
+            ),
+            mock.patch(
+                "trading_harness.qualification_cli._current_action",
+                return_value=(intent, intent.primary_action, QualificationAttemptPhase.PLACE),
+            ),
+            mock.patch(
+                "trading_harness.qualification_cli._collect_phase_role_attestation",
+                return_value=SimpleNamespace(attestation_hash="role"),
+            ),
+        ):
+            with self.assertRaisesRegex(StateConflict, "deadline"):
+                run(
+                    Path("/reviewed/config.toml"),
+                    clock=lambda: at(300),
+                    monotonic=lambda: next(times),
+                    sleeper=lambda _seconds: None,
+                    worker_id_factory=lambda: authority.worker_id,
+                    role_transport=lambda *_args: {},
+                    artifact_store=artifacts,  # type: ignore[arg-type]
+                    sender=send_once,
+                    cancel_reauthorization_store=cancel_store,  # type: ignore[arg-type]
+                )
+        self.assertEqual(sends, ["place"])
+        self.assertFalse(store.halted)
+        self.assertTrue(store.retained)
+        self.assertEqual(store.state, "reconciling")
 
     def test_explicit_recover_delegates_only_to_no_resend_normalization(self) -> None:
         calls: list[datetime] = []
@@ -580,6 +882,9 @@ class QualificationCliTests(unittest.TestCase):
             self.config,
             clock=lambda: at(20_000),
             store=Store(),  # type: ignore[arg-type]
+            cancel_store=SimpleNamespace(
+                normalize_expired=lambda **_kwargs: 0
+            ),  # type: ignore[arg-type]
         )
         self.assertEqual(result["normalized_count"], 2)
         self.assertFalse(result["retry_performed"])
@@ -591,12 +896,14 @@ class QualificationCliTests(unittest.TestCase):
         result = status(
             self.config,
             store=SimpleNamespace(list_commands=lambda: ()),  # type: ignore[arg-type]
+            cancel_store=SimpleNamespace(list_records=lambda: ()),  # type: ignore[arg-type]
         )
         self.assertFalse(result["submission_enabled"])
         self.assertFalse(result["live_lifecycle_ready"])
+        self.assertTrue(result["foreground_lifecycle_contract_implemented"])
         self.assertFalse(result["split_prepare_sign_public"])
-        self.assertFalse(result["expired_cancel_reauthorization_implemented"])
-        self.assertFalse(result["pre_send_user_role_recheck_implemented"])
+        self.assertTrue(result["expired_cancel_reauthorization_implemented"])
+        self.assertTrue(result["pre_send_user_role_recheck_implemented"])
 
     def _pending_cancel_workflows(self):
         intent = canary_intent(account_id=self.config.account_id)
@@ -667,6 +974,42 @@ class QualificationCliTests(unittest.TestCase):
         self.assertTrue(result["resumed"])
         self.assertTrue(result["cancel_queued"])
         self.assertFalse(result["retry_performed"])
+
+    def test_missing_open_poll_remains_ephemeral_and_does_not_poison_query_slot(self) -> None:
+        workflow, _, _, _, _ = self._pending_cancel_workflows()
+
+        class Store:
+            recorded = 0
+
+            def normalize_expired_claims(self, *, at):
+                return 0
+
+            def load_workflow(self, command_id):
+                return workflow
+
+            def load_query_evidence(self, command_id, kind):
+                raise RecordNotFound("missing")
+
+            def record_query_evidence(self, *args, **kwargs):
+                self.recorded += 1
+
+        store = Store()
+        calls: list[dict[str, object]] = []
+
+        def transport(endpoint, payload):
+            calls.append(dict(payload))
+            return {"status": "unknownOid"}
+
+        result = reconcile_open(
+            self.config,
+            "qualification-command-pending",
+            transport=transport,
+            clock=lambda: at(1_100),
+            store=store,  # type: ignore[arg-type]
+        )
+        self.assertTrue(result["read_pending"])
+        self.assertEqual(store.recorded, 0)
+        self.assertEqual(len(calls), 1)
 
     def test_terminal_reconciliation_resumes_persisted_query_snapshot_without_network(self) -> None:
         _, _, _, cancel_ready, cancel_action = self._pending_cancel_workflows()
@@ -864,6 +1207,7 @@ class QualificationCliTests(unittest.TestCase):
                 "verify",
                 "authorize-canary",
                 "authorize-close",
+                "reauthorize-cancel",
                 "run",
                 "reconcile-open",
                 "reconcile-terminal",

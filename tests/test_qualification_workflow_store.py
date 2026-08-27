@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 import hashlib
+import json
 import unittest
 from unittest import mock
 
-from trading_harness.canonical import canonical_decimal, domain_hash
-from trading_harness.errors import RecordNotFound, StateConflict, StorageError
+from trading_harness.canonical import canonical_decimal, canonical_json, domain_hash
+from trading_harness.errors import (
+    AdmissionDenied,
+    RecordNotFound,
+    StateConflict,
+    StorageError,
+)
 from trading_harness.qualification_signer import (
     QualificationSignature,
     QualificationSignerPolicy,
@@ -15,7 +22,18 @@ from trading_harness.qualification_signer import (
 )
 from trading_harness.qualification_store import (
     QualificationStore,
+    QualificationSigningAuthority,
     QualificationSubmissionAuthority,
+)
+from trading_harness.qualification_cancel_reauthorization import (
+    AttendedCancelReauthorizationAuthority,
+    build_cancel_reauthorization_intent,
+    verified_cancel_reauthorization_permit,
+)
+from trading_harness.qualification_cancel_store import CancelReauthorizationStore
+from trading_harness.qualification_role_attestation import (
+    QualificationRoleAttestationStage,
+    collect_testnet_user_role_attestation,
 )
 from trading_harness import qualification_store as store_module
 from trading_harness.qualification_transport import (
@@ -42,6 +60,7 @@ from tests.test_testnet_qualification import (
     authority,
     canary_intent,
     market,
+    open_order,
     position,
     rebound_status_symbol,
     retained,
@@ -137,6 +156,36 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             fencing_token=claim.fencing_token,
             at=at(claim_ms + 100),
         )
+        role_times = iter(
+            (
+                at(claim_ms + 150),
+                at(claim_ms + 160),
+                at(claim_ms + 170),
+            )
+        )
+        pre_key_role = collect_testnet_user_role_attestation(
+            api_wallet_address=intent.api_wallet_address,
+            expected_main_account_address=intent.main_account_address,
+            stage=QualificationRoleAttestationStage.PRE_KEY,
+            command_id=command.command_id,
+            phase=phase,
+            action_hash=action.action_hash,
+            signing_authority_hash=signing.authority_hash,
+            worker_id="qualification-worker",
+            fencing_token=claim.fencing_token,
+            attempt_id=None,
+            signed_evidence_hash=None,
+            transport=lambda _method, _endpoint, _payload: {
+                "role": "agent",
+                "data": {"user": intent.main_account_address},
+            },
+            clock=lambda: next(role_times),
+        )
+        self.qualification.record_role_attestation(
+            pre_key_role,
+            lane="qualification",
+            at=at(claim_ms + 180),
+        )
         signed_ms = int(at(claim_ms + 200).timestamp() * 1_000)
         envelope = freeze_signed_qualification_envelope(
             intent,
@@ -159,6 +208,7 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             policy=self.policy,
             signed=envelope,
             signature_verifier=recover_api_wallet,
+            pre_key_role_attestation_hash=pre_key_role.attestation_hash,
             worker_id="qualification-worker",
             fencing_token=claim.fencing_token,
             at=at(claim_ms + 300),
@@ -176,6 +226,93 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
         """Test-only SQL fixture; no runtime function can create this row."""
 
         issued_at = at(issued_ms)
+        probe = self.store._connect()
+        try:
+            signing_row = probe.execute(
+                """
+                SELECT * FROM execution_qualification_signing_authorities
+                WHERE command_id = ? AND phase = ?
+                """,
+                (command_id, phase.value),
+            ).fetchone()
+            prepared_row = probe.execute(
+                """
+                SELECT * FROM execution_qualification_attempts
+                WHERE attempt_id = ?
+                """,
+                (attempt_id,),
+            ).fetchone()
+            binding_row = probe.execute(
+                """
+                SELECT * FROM execution_qualification_attempt_role_bindings
+                WHERE lane = 'qualification' AND attempt_id = ?
+                """,
+                (attempt_id,),
+            ).fetchone()
+            existing_pre_send_row = (
+                None
+                if binding_row is None
+                or binding_row["pre_send_attestation_hash"] is None
+                else probe.execute(
+                    """
+                    SELECT * FROM execution_qualification_role_attestations
+                    WHERE attestation_hash = ?
+                    """,
+                    (binding_row["pre_send_attestation_hash"],),
+                ).fetchone()
+            )
+        finally:
+            probe.close()
+        self.assertIsNotNone(signing_row)
+        self.assertIsNotNone(prepared_row)
+        prepared = self.qualification._attempt_from_row(prepared_row)
+        signing = QualificationSigningAuthority(
+            command_id=command_id,
+            phase=phase,
+            action_hash=signing_row["action_hash"],
+            worker_id=signing_row["worker_id"],
+            fencing_token=signing_row["fencing_token"],
+            issued_at=store_module._parse_time(
+                signing_row["issued_at"], "issued_at"
+            ),
+            lease_expires_at=store_module._parse_time(
+                signing_row["lease_expires_at"], "lease_expires_at"
+            ),
+            authority_hash=signing_row["authority_hash"],
+        )
+        source_intent = self.qualification.load_workflow(command_id).intent
+        if existing_pre_send_row is None:
+            role_times = iter(
+                (at(issued_ms - 30), at(issued_ms - 20), at(issued_ms - 10))
+            )
+            pre_send = collect_testnet_user_role_attestation(
+                api_wallet_address=source_intent.api_wallet_address,
+                expected_main_account_address=source_intent.main_account_address,
+                stage=QualificationRoleAttestationStage.PRE_SEND,
+                command_id=command_id,
+                phase=phase,
+                action_hash=signing.action_hash,
+                signing_authority_hash=signing.authority_hash,
+                worker_id=signing.worker_id,
+                fencing_token=signing.fencing_token,
+                attempt_id=attempt_id,
+                signed_evidence_hash=prepared.signed_evidence_hash,
+                transport=lambda _method, _endpoint, _payload: {
+                    "role": "agent",
+                    "data": {"user": source_intent.main_account_address},
+                },
+                clock=lambda: next(role_times),
+            )
+            self.qualification.record_role_attestation(
+                pre_send,
+                lane="qualification",
+                at=at(issued_ms - 5),
+            )
+        else:
+            pre_send = self.qualification._role_attestation_from_row(
+                existing_pre_send_row,
+                at=issued_at,
+            )
         with self.store._transaction() as connection:
             attempt_row = connection.execute(
                 "SELECT * FROM execution_qualification_attempts WHERE attempt_id = ?",
@@ -214,6 +351,8 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
                 "fencing_token": attempt.fencing_token,
                 "issued_at": store_module._time(issued_at),
                 "lease_expires_at": store_module._time(outbox.lease_expires_at),
+                "pre_send_attestation_hash": pre_send.attestation_hash,
+                "pre_send_expires_at_ms": pre_send.expires_at_ms,
                 "environment": "testnet",
             }
             authority_hash = domain_hash(
@@ -226,8 +365,10 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
                 INSERT INTO execution_qualification_submission_authorities (
                     authority_hash, command_id, phase, attempt_id,
                     signed_evidence_hash, worker_id, fencing_token, issued_at,
-                    lease_expires_at, payload_json, content_hash, record_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    lease_expires_at, pre_send_attestation_hash,
+                    pre_send_expires_at_ms, payload_json, content_hash,
+                    record_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     authority_hash,
@@ -239,6 +380,8 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
                     attempt.fencing_token,
                     store_module._time(issued_at),
                     store_module._time(outbox.lease_expires_at),
+                    pre_send.attestation_hash,
+                    pre_send.expires_at_ms,
                     payload_json,
                     content_hash,
                     store_module._record_hash(
@@ -293,6 +436,8 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             fencing_token=attempt.fencing_token,
             issued_at=issued_at,
             lease_expires_at=outbox.lease_expires_at,  # type: ignore[arg-type]
+            pre_send_attestation_hash=pre_send.attestation_hash,
+            pre_send_expires_at_ms=pre_send.expires_at_ms,
             authority_hash=authority_hash,
         )
 
@@ -393,6 +538,13 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
         self.assertEqual(
             self.store.get_reserved_exposure(),
             (intent.reserved_loss, intent.reserved_notional),
+        )
+        self.qualification.retain_for_reconciliation_deadline(
+            command.command_id, at=at(700)
+        )
+        self.assertEqual(
+            self.qualification.get_command(command.command_id).current_phase,
+            "place",
         )
         with self.assertRaises(StateConflict):
             self.qualification.record_transport_result(
@@ -509,6 +661,13 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             attempt_id="qualification-attempt-cancel",
             attempted_ms=1_700,
             outcome=QualificationTransportOutcome.RESPONSE_RECEIVED,
+        )
+        self.qualification.retain_for_reconciliation_deadline(
+            command.command_id, at=at(1_800)
+        )
+        self.assertEqual(
+            self.qualification.get_command(command.command_id).current_phase,
+            "cancel",
         )
         terminal = parse_qualification_order_status(
             status_response(
@@ -736,6 +895,13 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             attempted_ms=1_800,
             outcome=QualificationTransportOutcome.RESPONSE_RECEIVED,
         )
+        self.qualification.retain_for_reconciliation_deadline(
+            close_command.command_id, at=at(1_900)
+        )
+        self.assertEqual(
+            self.qualification.get_command(close_command.command_id).current_phase,
+            "close",
+        )
         terminal = parse_qualification_order_status(
             status_response(
                 close_intent.primary_action,
@@ -801,6 +967,8 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             fencing_token=1,
             issued_at=at(500),
             lease_expires_at=at(15_100),
+            pre_send_attestation_hash="e" * 64,
+            pre_send_expires_at_ms=int(at(2_500).timestamp() * 1_000),
             authority_hash="f" * 64,
         )
         result = freeze_qualification_transport_result(
@@ -1167,6 +1335,487 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             self.store.get_reserved_exposure(),
             (intent.reserved_loss, intent.reserved_notional),
         )
+
+    def test_expired_unsent_cancel_admits_exactly_one_fresh_same_cloid_successor(self) -> None:
+        evidence = retained()
+        intent = canary_intent(account_id=self.store.account_id)
+        workflow, command = self.admit_intent(
+            evidence,
+            intent,
+            command_id="qualification-command-reauth-source",
+            permit_id="qualification-permit-reauth-source",
+            at_ms=0,
+        )
+        envelope, signed, _ = self.prepare_envelope(
+            command,
+            intent,
+            intent.primary_action,
+            QualificationAttemptPhase.PLACE,
+            attempt_id="qualification-attempt-reauth-place",
+            claim_ms=100,
+        )
+        send_authority = self.seed_future_point_of_no_return(
+            command.command_id,
+            QualificationAttemptPhase.PLACE,
+            attempt_id="qualification-attempt-reauth-place",
+            issued_ms=500,
+        )
+        workflow, _ = self.record_result(
+            command.command_id,
+            workflow,
+            envelope,
+            signed,
+            send_authority,
+            attempt_id="qualification-attempt-reauth-place",
+            attempted_ms=600,
+            outcome=QualificationTransportOutcome.RESPONSE_RECEIVED,
+        )
+        by_cloid = parse_qualification_order_status(
+            status_response(intent.primary_action, oid=44, status_at=at(900)),
+            intent.primary_action,
+            requested_identifier=intent.primary_action.cloid,
+            at=at(900),
+        )
+        by_oid = parse_qualification_order_status(
+            status_response(intent.primary_action, oid=44, status_at=at(1_000)),
+            intent.primary_action,
+            requested_identifier=44,
+            at=at(1_000),
+        )
+        self.qualification.record_query_evidence(
+            command.command_id,
+            query_kind="open_by_cloid",
+            evidence=by_cloid,
+            observed_at=at(900),
+            account_snapshot=retained(retained_at=at(900)),
+        )
+        self.qualification.record_query_evidence(
+            command.command_id,
+            query_kind="open_by_oid",
+            evidence=by_oid,
+            observed_at=at(1_000),
+            account_snapshot=retained(retained_at=at(1_000)),
+        )
+        workflow, cancel = self.qualification.advance_and_queue_canary_cancel(
+            command.command_id,
+            current_workflow=workflow,
+            by_cloid=by_cloid,
+            by_oid=by_oid,
+            at=at(1_100),
+        )
+        self.assertIsNotNone(cancel)
+        self.assertEqual(
+            self.qualification.normalize_expired_claims(at=at(11_200)), 1
+        )
+        source = self.qualification.get_command(command.command_id)
+        self.assertEqual(source.state, "halted")
+        self.assertFalse(source.reservation_released)
+
+        fresh_cloid = parse_qualification_order_status(
+            status_response(intent.primary_action, oid=44, status_at=at(1_000)),
+            intent.primary_action,
+            requested_identifier=intent.primary_action.cloid,
+            at=at(17_000),
+        )
+        fresh_oid = parse_qualification_order_status(
+            status_response(intent.primary_action, oid=44, status_at=at(1_000)),
+            intent.primary_action,
+            requested_identifier=44,
+            at=at(17_100),
+        )
+        fresh_snapshot = retained(
+            orders=[open_order(intent.primary_action.cloid)],
+            server_time_ms=int(at(17_200).timestamp() * 1_000),
+            retained_at=at(17_200),
+        )
+        reauth_intent = build_cancel_reauthorization_intent(
+            reauthorization_id="cancel-reauthorization-1",
+            source_command_id=command.command_id,
+            source_intent=intent,
+            by_cloid=fresh_cloid,
+            by_cloid_observed_at=at(17_000),
+            by_oid=fresh_oid,
+            by_oid_observed_at=at(17_100),
+            retained=fresh_snapshot,
+            at=at(17_200),
+        )
+        hmac_authority = AttendedCancelReauthorizationAuthority(
+            b"r" * 32,
+            issuer_id="cancel-reauthorization-control",
+            key_id="approval-hmac",
+            audience="cancel-reauthorization-worker",
+        )
+        authorization = hmac_authority.issue(
+            reauth_intent,
+            authorization_id="cancel-reauthorization-permit-1",
+            approver_id="operator-1",
+            confirmation=hmac_authority.confirmation_for(reauth_intent),
+            at=at(17_201),
+        )
+        permit = verified_cancel_reauthorization_permit(
+            hmac_authority,
+            authorization,
+            reauth_intent,
+            at=at(17_202),
+        )
+        reauthorizations = CancelReauthorizationStore(self.qualification)
+        self.qualification.register_snapshot(fresh_snapshot)
+        with self.assertRaisesRegex(AdmissionDenied, "provenance"):
+            reauthorizations.admit(
+                reauth_intent,
+                permit,
+                fresh_snapshot,
+                at=at(17_202),
+            )
+        reauthorizations.register_permit(
+            permit,
+            reauth_intent,
+            at=at(17_202),
+        )
+        admitted = reauthorizations.admit(
+            reauth_intent,
+            permit,
+            fresh_snapshot,
+            at=at(17_203),
+        )
+        self.assertEqual(admitted.state, "queued")
+        self.assertEqual(
+            reauthorizations.get_permit_state(permit.authorization_hash),
+            "consumed",
+        )
+        self.assertEqual(admitted.source_cloid, intent.primary_action.cloid)
+        self.assertNotEqual(admitted.action_hash, workflow.cancel_action.action_hash)
+        connection = self.store._connect()
+        try:
+            queued_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_cancel_reauthorizations
+                WHERE reauthorization_id = ?
+                """,
+                (reauth_intent.reauthorization_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        forged_payload = json.loads(queued_row["payload_json"])
+        forged_payload["authorization"]["same_cloid_only"] = False
+        forged_payload_json = canonical_json(forged_payload)
+        forged_content_hash = hashlib.sha256(
+            forged_payload_json.encode("utf-8")
+        ).hexdigest()
+        forged_payload_record = replace(
+            admitted,
+            payload_json=forged_payload_json,
+            content_hash=forged_content_hash,
+        )
+        forged_payload_row = dict(queued_row)
+        forged_payload_row.update(
+            payload_json=forged_payload_json,
+            content_hash=forged_content_hash,
+            record_hash=store_module._record_hash(
+                "cancel-reauthorization",
+                reauthorizations._record_material(forged_payload_record),
+            ),
+        )
+        with self.assertRaisesRegex(StorageError, "differs"):
+            reauthorizations._from_row(forged_payload_row)
+        forged_terminal = replace(
+            reauthorizations._from_row(queued_row),
+            state="terminal",
+            terminal_at=admitted.updated_at,
+        )
+        forged_terminal_row = dict(queued_row)
+        forged_terminal_row.update(
+            state="terminal",
+            terminal_at=store_module._time(admitted.updated_at),
+            record_hash=store_module._record_hash(
+                "cancel-reauthorization",
+                reauthorizations._record_material(forged_terminal),
+            ),
+        )
+        with self.assertRaisesRegex(StorageError, "differs"):
+            reauthorizations._from_row(forged_terminal_row)
+        self.assertEqual(
+            self.store.get_reserved_exposure(),
+            (intent.reserved_loss, intent.reserved_notional),
+        )
+        self.assertIsNone(
+            self.store.claim_next(
+                "normal-worker",
+                at=at(17_203),
+                lease_seconds=15,
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "rollback preemption probe"):
+            with self.store._transaction() as connection:
+                self.assertEqual(
+                    reauthorizations.preempt_for_account_recovery_locked(
+                        connection, at=at(17_203)
+                    ),
+                    1,
+                )
+                halted_row = connection.execute(
+                    """
+                    SELECT * FROM execution_qualification_cancel_reauthorizations
+                    WHERE reauthorization_id = ?
+                    """,
+                    (reauth_intent.reauthorization_id,),
+                ).fetchone()
+                self.assertEqual(
+                    reauthorizations._from_row(halted_row).state,
+                    "halted",
+                )
+                raise RuntimeError("rollback preemption probe")
+        self.assertEqual(
+            reauthorizations.get(reauth_intent.reauthorization_id).state,
+            "queued",
+        )
+        with self.assertRaises(AdmissionDenied):
+            reauthorizations.admit(
+                reauth_intent,
+                permit,
+                fresh_snapshot,
+                at=at(17_204),
+            )
+        claim = reauthorizations.claim(
+            reauth_intent.reauthorization_id,
+            worker_id="cancel-reauth-worker",
+            at=at(17_300),
+        )
+        signing = reauthorizations.require_signing_authority(
+            reauth_intent.reauthorization_id,
+            worker_id="cancel-reauth-worker",
+            fencing_token=claim.fencing_token,
+            at=at(17_400),
+        )
+        role_times = iter((at(17_500), at(17_510), at(17_520)))
+        pre_key = collect_testnet_user_role_attestation(
+            api_wallet_address=intent.api_wallet_address,
+            expected_main_account_address=intent.main_account_address,
+            stage=QualificationRoleAttestationStage.PRE_KEY,
+            command_id=reauth_intent.reauthorization_id,
+            phase=QualificationAttemptPhase.CANCEL,
+            action_hash=reauth_intent.action.action_hash,
+            signing_authority_hash=signing.authority_hash,
+            worker_id="cancel-reauth-worker",
+            fencing_token=claim.fencing_token,
+            attempt_id=None,
+            signed_evidence_hash=None,
+            transport=lambda _method, _endpoint, _payload: {
+                "role": "agent",
+                "data": {"user": intent.main_account_address},
+            },
+            clock=lambda: next(role_times),
+        )
+        self.qualification.record_role_attestation(
+            pre_key,
+            lane="cancel_reauthorization",
+            at=at(17_530),
+        )
+        self.assertEqual(
+            self.qualification.require_current_signing_authority(
+                reauth_intent.reauthorization_id,
+                intent=intent,
+                action=reauth_intent.action,
+                authority=signing,
+                worker_id="cancel-reauth-worker",
+                fencing_token=claim.fencing_token,
+                at=at(17_540),
+            ),
+            signing,
+        )
+        signed_at_ms = int(at(17_600).timestamp() * 1_000)
+        successor_envelope = freeze_signed_qualification_envelope(
+            intent,
+            reauth_intent.action,
+            signing,
+            self.policy,
+            nonce=signed_at_ms,
+            expires_after_ms=int(at(25_000).timestamp() * 1_000),
+            signed_at_ms=signed_at_ms,
+            signature=QualificationSignature(r="0x1", s="0x2", v=27),
+            signing_implementation="offline-cancel-reauth-v1",
+            signature_verifier=recover_api_wallet,
+        )
+        successor_evidence = reauthorizations.prepare_envelope_attempt(
+            reauth_intent.reauthorization_id,
+            attempt_id="cancel-reauth-attempt-1",
+            source_intent=intent,
+            authority=signing,
+            policy=self.policy,
+            signed=successor_envelope,
+            signature_verifier=recover_api_wallet,
+            pre_key_attestation_hash=pre_key.attestation_hash,
+            worker_id="cancel-reauth-worker",
+            fencing_token=claim.fencing_token,
+            at=at(17_700),
+        )
+        self.assertEqual(
+            successor_evidence.action_hash, reauth_intent.action.action_hash
+        )
+        self.assertEqual(
+            reauthorizations.get(reauth_intent.reauthorization_id).state,
+            "prepared",
+        )
+        connection = self.store._connect()
+        try:
+            prepared_attempt_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_cancel_reauth_attempts
+                WHERE reauthorization_id = ?
+                """,
+                (reauth_intent.reauthorization_id,),
+            ).fetchone()
+        finally:
+            connection.close()
+        prepared_attempt = reauthorizations._attempt_from_row(prepared_attempt_row)
+        forged_response_attempt = replace(
+            prepared_attempt,
+            state="response_received",
+        )
+        forged_response_row = dict(prepared_attempt_row)
+        forged_response_row.update(
+            state="response_received",
+            record_hash=store_module._record_hash(
+                "cancel-reauth-attempt",
+                reauthorizations._attempt_material(
+                    forged_response_attempt,
+                    content_hash=prepared_attempt_row["content_hash"],
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(StorageError, "differs"):
+            reauthorizations._attempt_from_row(forged_response_row)
+        pre_send_times = iter((at(17_720), at(17_730), at(17_740)))
+        pre_send = collect_testnet_user_role_attestation(
+            api_wallet_address=intent.api_wallet_address,
+            expected_main_account_address=intent.main_account_address,
+            stage=QualificationRoleAttestationStage.PRE_SEND,
+            command_id=reauth_intent.reauthorization_id,
+            phase=QualificationAttemptPhase.CANCEL,
+            action_hash=reauth_intent.action.action_hash,
+            signing_authority_hash=signing.authority_hash,
+            worker_id="cancel-reauth-worker",
+            fencing_token=claim.fencing_token,
+            attempt_id="cancel-reauth-attempt-1",
+            signed_evidence_hash=successor_evidence.evidence_hash,
+            transport=lambda _method, _endpoint, _payload: {
+                "role": "agent",
+                "data": {"user": intent.main_account_address},
+            },
+            clock=lambda: next(pre_send_times),
+        )
+        self.qualification.record_role_attestation(
+            pre_send,
+            lane="cancel_reauthorization",
+            at=at(17_750),
+        )
+        with self.assertRaisesRegex(StateConflict, "compiled off"):
+            reauthorizations.require_submission_authority(
+                reauth_intent.reauthorization_id,
+                attempt_id="cancel-reauth-attempt-1",
+                signed_evidence_hash=successor_evidence.evidence_hash,
+                worker_id="cancel-reauth-worker",
+                fencing_token=claim.fencing_token,
+                at=at(17_755),
+            )
+        self.assertEqual(
+            reauthorizations.get(reauth_intent.reauthorization_id).state,
+            "prepared",
+        )
+        with mock.patch.object(
+            store_module,
+            "QUALIFICATION_SUBMISSION_ENABLED",
+            True,
+        ):
+            submission = reauthorizations.require_submission_authority(
+                reauth_intent.reauthorization_id,
+                attempt_id="cancel-reauth-attempt-1",
+                signed_evidence_hash=successor_evidence.evidence_hash,
+                worker_id="cancel-reauth-worker",
+                fencing_token=claim.fencing_token,
+                at=at(17_760),
+            )
+        self.assertEqual(submission.attempt_id, "cancel-reauth-attempt-1")
+        self.assertEqual(
+            reauthorizations.normalize_expired(at=at(32_400)),
+            1,
+        )
+        self.assertEqual(
+            reauthorizations.get(reauth_intent.reauthorization_id).state,
+            "reconciling",
+        )
+        terminal = parse_qualification_order_status(
+            status_response(
+                intent.primary_action,
+                oid=44,
+                status="canceled",
+                status_at=at(32_500),
+            ),
+            intent.primary_action,
+            requested_identifier=intent.primary_action.cloid,
+            at=at(32_500),
+        )
+        flat = retained(
+            server_time_ms=int(at(32_500).timestamp() * 1_000),
+            retained_at=at(32_500),
+        )
+        future_flat = retained(
+            server_time_ms=int(at(33_701).timestamp() * 1_000),
+            retained_at=at(33_701),
+        )
+        with self.assertRaisesRegex(StateConflict, "causality"):
+            reauthorizations.finish_terminal_reconciliation(
+                reauth_intent.reauthorization_id,
+                terminal=terminal,
+                retained=future_flat,
+                at=at(32_600),
+            )
+        source_workflow_before = self.qualification.load_workflow(command.command_id)
+        source_cancel_step_before = self.qualification.get_step(
+            command.command_id, QualificationAttemptPhase.CANCEL
+        )
+        completed = reauthorizations.finish_terminal_reconciliation(
+            reauth_intent.reauthorization_id,
+            terminal=terminal,
+            retained=flat,
+            at=at(32_600),
+        )
+        self.assertTrue(completed.terminal_flat)
+        source_after = self.qualification.get_command(command.command_id)
+        source_workflow_after = self.qualification.load_workflow(command.command_id)
+        source_cancel_step_after = self.qualification.get_step(
+            command.command_id, QualificationAttemptPhase.CANCEL
+        )
+        self.assertEqual(source_after.state, "halted")
+        self.assertTrue(source_after.reservation_released)
+        self.assertEqual(source_workflow_after, source_workflow_before)
+        self.assertEqual(source_cancel_step_after, source_cancel_step_before)
+        self.assertEqual(source_cancel_step_after.state, "terminal_unsent")
+        self.assertNotEqual(
+            completed.successor_cancel_action_hash,
+            source_cancel_step_after.action_hash,
+        )
+        restarted = CancelReauthorizationStore(
+            QualificationStore(self.store)
+        ).load_terminal_completion(reauth_intent.reauthorization_id)
+        self.assertEqual(restarted, completed)
+        self.assertEqual(
+            restarted.source_workflow_hash, source_workflow_after.workflow_hash
+        )
+        self.assertEqual(
+            restarted.source_cancel_action_hash, source_cancel_step_after.action_hash
+        )
+        self.assertEqual(self.store.get_reserved_exposure(), (0, 0))
+        with self.store._transaction() as connection:
+            connection.execute(
+                """
+                DELETE FROM execution_qualification_cancel_reauth_terminal_evidence
+                WHERE reauthorization_id = ?
+                """,
+                (reauth_intent.reauthorization_id,),
+            )
+        with self.assertRaisesRegex(StorageError, "lost terminal evidence"):
+            reauthorizations.get(reauth_intent.reauthorization_id)
 
 
 if __name__ == "__main__":

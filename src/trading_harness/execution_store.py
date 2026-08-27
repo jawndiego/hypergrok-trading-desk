@@ -1365,6 +1365,255 @@ _SCHEMA_V11 = _Migration(
     ),
 )
 
+_SCHEMA_V12 = _Migration(
+    12,
+    "qualification_live_role_and_cancel_reauthorization",
+    (
+        """
+        CREATE TABLE execution_qualification_role_attestations (
+            attestation_hash TEXT PRIMARY KEY,
+            lane TEXT NOT NULL CHECK (
+                lane IN ('qualification', 'cancel_reauthorization')
+            ),
+            command_id TEXT NOT NULL,
+            phase TEXT NOT NULL CHECK (phase IN ('place', 'cancel', 'close')),
+            stage TEXT NOT NULL CHECK (stage IN ('pre_key', 'pre_send')),
+            action_hash TEXT NOT NULL,
+            signing_authority_hash TEXT NOT NULL,
+            attempt_id TEXT,
+            signed_evidence_hash TEXT,
+            worker_id TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+            endpoint TEXT NOT NULL CHECK (
+                endpoint = 'https://api.hyperliquid-testnet.xyz/info'
+            ),
+            main_account_address TEXT NOT NULL,
+            api_wallet_address TEXT NOT NULL,
+            first_response_hash TEXT NOT NULL,
+            second_response_hash TEXT NOT NULL,
+            started_at_ms INTEGER NOT NULL CHECK (started_at_ms >= 0),
+            first_received_at_ms INTEGER NOT NULL CHECK (first_received_at_ms >= 0),
+            second_received_at_ms INTEGER NOT NULL CHECK (second_received_at_ms >= 0),
+            expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms >= 0),
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL,
+            UNIQUE (lane, command_id, phase, stage),
+            CHECK (
+                (stage = 'pre_key' AND attempt_id IS NULL
+                    AND signed_evidence_hash IS NULL)
+                OR
+                (stage = 'pre_send' AND attempt_id IS NOT NULL
+                    AND signed_evidence_hash IS NOT NULL)
+            )
+        ) STRICT
+        """,
+        """
+        CREATE TABLE execution_qualification_attempt_role_bindings (
+            lane TEXT NOT NULL CHECK (
+                lane IN ('qualification', 'cancel_reauthorization')
+            ),
+            attempt_id TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            phase TEXT NOT NULL CHECK (phase IN ('place', 'cancel', 'close')),
+            pre_key_attestation_hash TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_role_attestations(attestation_hash),
+            pre_send_attestation_hash TEXT UNIQUE
+                REFERENCES execution_qualification_role_attestations(attestation_hash),
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL,
+            UNIQUE (lane, command_id, phase)
+        ) STRICT
+        """,
+        """
+        ALTER TABLE execution_qualification_submission_authorities
+        ADD COLUMN pre_send_attestation_hash TEXT NOT NULL
+            REFERENCES execution_qualification_role_attestations(attestation_hash)
+        """,
+        """
+        ALTER TABLE execution_qualification_submission_authorities
+        ADD COLUMN pre_send_expires_at_ms INTEGER NOT NULL
+            CHECK (pre_send_expires_at_ms >= 0)
+        """,
+        """
+        CREATE UNIQUE INDEX idx_execution_qualification_submission_role
+        ON execution_qualification_submission_authorities (
+            pre_send_attestation_hash
+        )
+        """,
+        """
+        CREATE TABLE execution_qualification_cancel_reauth_permits (
+            authorization_hash TEXT PRIMARY KEY,
+            permit_id TEXT NOT NULL UNIQUE,
+            intent_hash TEXT NOT NULL UNIQUE,
+            reauthorization_id TEXT NOT NULL UNIQUE,
+            source_command_id TEXT NOT NULL
+                REFERENCES execution_qualification_commands(command_id),
+            issuer_id TEXT NOT NULL,
+            key_id TEXT NOT NULL,
+            audience TEXT NOT NULL,
+            issued_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state IN ('issued', 'consumed', 'revoked')),
+            command_id TEXT UNIQUE,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE execution_qualification_cancel_reauthorizations (
+            reauthorization_id TEXT PRIMARY KEY,
+            source_command_id TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_commands(command_id),
+            source_intent_hash TEXT NOT NULL,
+            source_cancel_scope_hash TEXT NOT NULL,
+            source_cloid TEXT NOT NULL,
+            source_asset_id INTEGER NOT NULL CHECK (source_asset_id >= 0),
+            open_by_cloid_evidence_hash TEXT NOT NULL,
+            open_by_oid_evidence_hash TEXT NOT NULL,
+            source_snapshot_hash TEXT NOT NULL
+                REFERENCES execution_qualification_snapshots(snapshot_hash),
+            authorization_hash TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_cancel_reauth_permits(authorization_hash),
+            action_hash TEXT NOT NULL UNIQUE,
+            action_json TEXT NOT NULL,
+            action_content_hash TEXT NOT NULL,
+            action_expires_at_ms INTEGER NOT NULL CHECK (action_expires_at_ms >= 0),
+            state TEXT NOT NULL CHECK (
+                state IN (
+                    'queued', 'claimed', 'prepared', 'sending',
+                    'reconciling', 'terminal', 'halted'
+                )
+            ),
+            worker_id TEXT,
+            fencing_token INTEGER NOT NULL CHECK (fencing_token >= 0),
+            claimed_at TEXT,
+            lease_expires_at TEXT,
+            current_attempt_id TEXT,
+            attempt_count INTEGER NOT NULL CHECK (attempt_count BETWEEN 0 AND 1),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            terminal_at TEXT,
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE execution_qualification_cancel_reauth_signing_authorities (
+            authority_hash TEXT PRIMARY KEY,
+            reauthorization_id TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_cancel_reauthorizations(reauthorization_id),
+            action_hash TEXT NOT NULL,
+            worker_id TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+            issued_at TEXT NOT NULL,
+            lease_expires_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE execution_qualification_cancel_reauth_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            reauthorization_id TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_cancel_reauthorizations(reauthorization_id),
+            signed_evidence_hash TEXT NOT NULL UNIQUE,
+            nonce INTEGER NOT NULL CHECK (nonce >= 0),
+            action_hash TEXT NOT NULL,
+            wire_hash TEXT NOT NULL,
+            signature_hash TEXT NOT NULL,
+            envelope_hash TEXT NOT NULL,
+            signer_binding_hash TEXT NOT NULL,
+            expires_after_ms INTEGER NOT NULL CHECK (expires_after_ms >= 0),
+            signed_at_ms INTEGER NOT NULL CHECK (signed_at_ms >= 0),
+            state TEXT NOT NULL CHECK (
+                state IN ('prepared', 'sending', 'response_received', 'unknown')
+            ),
+            transport_evidence_hash TEXT,
+            prepared_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE execution_qualification_cancel_reauth_submission_authorities (
+            authority_hash TEXT PRIMARY KEY,
+            reauthorization_id TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_cancel_reauthorizations(reauthorization_id),
+            attempt_id TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_cancel_reauth_attempts(attempt_id),
+            signed_evidence_hash TEXT NOT NULL UNIQUE,
+            worker_id TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+            issued_at TEXT NOT NULL,
+            lease_expires_at TEXT NOT NULL,
+            pre_send_attestation_hash TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_role_attestations(attestation_hash),
+            pre_send_expires_at_ms INTEGER NOT NULL
+                CHECK (pre_send_expires_at_ms >= 0),
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE execution_qualification_cancel_reauth_transport_evidence (
+            evidence_hash TEXT PRIMARY KEY,
+            reauthorization_id TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_cancel_reauthorizations(reauthorization_id),
+            attempt_id TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_cancel_reauth_attempts(attempt_id),
+            signed_evidence_hash TEXT NOT NULL UNIQUE,
+            endpoint TEXT NOT NULL CHECK (
+                endpoint = 'https://api.hyperliquid-testnet.xyz/exchange'
+            ),
+            attempted_at_ms INTEGER NOT NULL CHECK (attempted_at_ms >= 0),
+            outcome TEXT NOT NULL CHECK (
+                outcome IN ('response_received', 'unknown')
+            ),
+            http_status INTEGER,
+            detail_code TEXT NOT NULL,
+            response_hash TEXT,
+            transport_attempt_hash TEXT NOT NULL,
+            send_count INTEGER NOT NULL CHECK (send_count = 1),
+            retry_performed INTEGER NOT NULL CHECK (retry_performed = 0),
+            recorded_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TABLE execution_qualification_cancel_reauth_terminal_evidence (
+            evidence_hash TEXT PRIMARY KEY,
+            reauthorization_id TEXT NOT NULL UNIQUE
+                REFERENCES execution_qualification_cancel_reauthorizations(reauthorization_id),
+            order_identity_hash TEXT NOT NULL,
+            account_snapshot_hash TEXT NOT NULL
+                REFERENCES execution_qualification_snapshots(snapshot_hash),
+            observed_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE INDEX idx_execution_qualification_cancel_reauth_state
+        ON execution_qualification_cancel_reauthorizations (
+            state, created_at, reauthorization_id
+        )
+        """,
+    ),
+)
+
 _MIGRATIONS = (
     _SCHEMA_V1,
     _SCHEMA_V2,
@@ -1377,8 +1626,9 @@ _MIGRATIONS = (
     _SCHEMA_V9,
     _SCHEMA_V10,
     _SCHEMA_V11,
+    _SCHEMA_V12,
 )
-EXECUTION_SCHEMA_VERSION = 11
+EXECUTION_SCHEMA_VERSION = 12
 
 
 def _execution_schema_objects(
@@ -2855,6 +3105,33 @@ class ExecutionStore:
                             "cannot migrate an active preflight without its exact "
                             "venue-server watermark"
                         )
+                if migration.version == 12 and seen:
+                    qualification_tables = (
+                        "execution_qualification_snapshots",
+                        "execution_qualification_permits",
+                        "execution_qualification_commands",
+                        "execution_qualification_outbox",
+                        "execution_qualification_steps",
+                        "execution_qualification_signing_authorities",
+                        "execution_qualification_signed_evidence",
+                        "execution_qualification_attempts",
+                        "execution_qualification_submission_authorities",
+                        "execution_qualification_transport_evidence",
+                        "execution_qualification_queries",
+                    )
+                    populated = [
+                        table
+                        for table in qualification_tables
+                        if connection.execute(
+                            f"SELECT 1 FROM {table} LIMIT 1"
+                        ).fetchone()
+                        is not None
+                    ]
+                    if populated:
+                        raise StorageError(
+                            "cannot migrate nonempty schema-v11 qualification "
+                            "state to role-bound schema v12"
+                        )
                 for statement in migration.statements:
                     connection.execute(statement)
                 connection.execute(
@@ -4189,6 +4466,16 @@ class ExecutionStore:
                     raise AdmissionDenied(
                         "ACCOUNT_QUALIFICATION_ACTIVE",
                         "qualification command or reservation blocks new risk",
+                    )
+                if connection.execute(
+                    """
+                    SELECT 1 FROM execution_qualification_cancel_reauthorizations
+                    WHERE state NOT IN ('terminal', 'halted') LIMIT 1
+                    """
+                ).fetchone() is not None:
+                    raise AdmissionDenied(
+                        "CANCEL_REAUTHORIZATION_ACTIVE",
+                        "safety cancel reauthorization blocks new risk",
                     )
                 active_command = connection.execute(
                     """
@@ -5923,6 +6210,13 @@ class ExecutionStore:
                 """
                 SELECT 1 FROM execution_recovery_commands
                 WHERE state != 'terminal' LIMIT 1
+                """
+            ).fetchone() is not None:
+                return None
+            if connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_cancel_reauthorizations
+                WHERE state NOT IN ('terminal', 'halted') LIMIT 1
                 """
             ).fetchone() is not None:
                 return None
@@ -8734,8 +9028,16 @@ class ExecutionStore:
             # the durable recovery outbox insert.  Reservation is retained;
             # any qualifier attempt is normalized to unknown.
             from .qualification_store import QualificationStore
+            from .qualification_cancel_store import CancelReauthorizationStore
 
-            QualificationStore(self)._preempt_for_account_safety_locked(
+            qualification = QualificationStore(self)
+            qualification._preempt_for_account_safety_locked(
+                connection,
+                at=checked_at,
+            )
+            CancelReauthorizationStore(
+                qualification
+            ).preempt_for_account_recovery_locked(
                 connection,
                 at=checked_at,
             )
@@ -8747,6 +9049,15 @@ class ExecutionStore:
                 """
             ).fetchone() is not None:
                 raise StorageError("qualification preemption was incomplete")
+            if connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_cancel_reauthorizations
+                WHERE state NOT IN ('terminal', 'halted') LIMIT 1
+                """
+            ).fetchone() is not None:
+                raise StorageError(
+                    "cancel reauthorization preemption was incomplete"
+                )
             permit_material = self._recovery_permit_material(
                 permit,
                 state="consumed",

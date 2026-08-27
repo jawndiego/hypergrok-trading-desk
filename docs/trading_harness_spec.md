@@ -295,11 +295,13 @@ ordinary attended reduce-only close, WebSocket recovery and forwarded-request
 response-loss injection. These are implementation requirements, not manual
 shortcuts to the existing protected-bracket signer.
 
-Execution-store schema v11 reserves a separate TESTNET qualification namespace
+Execution-store schema v12 reserves a separate TESTNET qualification namespace
 for retained account/agent evidence, short-lived attended permits, composite
-commands, per-phase signing/submission authority, query evidence and atomic
-notional/loss reservation. Qualification commands serialize against normal
-entry and incident recovery and MUST keep any sending/unknown attempt reserved.
+commands, per-phase signing/submission authority, short-lived pre-key/pre-send
+role attestations, query evidence, one fresh cancel-successor lane and atomic
+notional/loss reservation. Qualification and cancel-successor commands
+serialize against normal entry and incident recovery and MUST keep any
+sending/unknown attempt reserved.
 They MUST NOT be represented as a three-leg bracket or a fabricated recovery
 incident. The dedicated signer-envelope contract rechecks TESTNET
 account/API-wallet/action/nonce/wire bindings before persistence. Its pinned
@@ -309,10 +311,13 @@ recovery against an independently reconstructed msgpack/EIP-712 preimage. A
 schema-v2 global nonce database atomically binds each qualification allocation
 to its action and signing authority while sharing the normal/recovery nonce
 watermark. Schema v1 fails closed pending an explicit migration. The
-schema-v11 coordinator durably records one-shot response/unknown results,
+schema-v12 coordinator durably records one-shot response/unknown results,
 point-of-no-return crash unknowns, paired CLOID/OID queries, the bound cancel,
 attended full-residual close and causally ordered terminal-flat reservation
-release. These offline paths grant no venue capability: qualification
+release. Each send authority commits the exact current PRE_SEND role hash and
+expiry and reloads the complete PRE_KEY-to-attempt-to-PRE_SEND chain. A pause
+past the two-second role fence after point of no return skips HTTP and records
+UNKNOWN without retry. These offline paths grant no venue capability: qualification
 submission authority remains compiled off. The qualification sender can only
 obtain that exact durable authority internally; if a future reviewed build
 promotes it, the sender posts the frozen wire once to the compiled TESTNET
@@ -334,13 +339,14 @@ action derivation and exact `/dev/tty` approval-HMAC authorization. Executor
 UID 451 owns status, explicit crash normalization and REST reconciliation.
 Public split prepare/sign commands are compiled out. `run` is a pre-started,
 per-invocation-identity worker contract with a qualification-specific 100 ms
-queue poll (never the general executor's configurable poll), but submission remains compiled off
-and its current one-phase shape is not a complete live GTC/query/cancel
-lifecycle. It must fail before config, state, Keychain or network access until
-that promotion is separately reviewed. No verifier may be selected by caller,
-config or MCP, and no qualification action may become an MCP tool.
+queue poll (never the general executor's configurable poll). It composes the
+bounded place, paired-query, cancel and terminal reconciliation lifecycle and
+uses an interruptible absolute deadline for blocking info reads. Submission
+remains compiled off, so it must fail before config, state, Keychain or network
+access until promotion is separately reviewed. No verifier may be selected by
+caller, config or MCP, and no qualification action may become an MCP tool.
 
-The full signed wire is retained before schema-v11 digest preparation only as
+The full signed wire is retained before schema-v12 digest preparation only as
 a bearer-sensitive, create-only artifact under the executor-only nonce parent.
 It contains no private key and no harness durable submission authority, but it
 is externally relayable and therefore receives no weaker protection than the
@@ -351,18 +357,22 @@ pending/final/receipt crash state. A committed nonce without a receipt-complete
 artifact halts proven-unsent before another Keychain read. Expired queued work
 also halts atomically; an unsent place releases reservation while an unsent
 cancel retains it because the venue order may remain live.
-No fresh same-CLOID cancel reauthorization exists yet; that halted state is a
-hard live blocker until read-proven-open evidence can mint new bounded attended
-cancel authority without treating it as a retry.
-Because Hyperliquid's agent-signed wire does not encode the main account, live
-promotion also requires a fresh stable `userRole(api_wallet)` mapping to the
-configured main account after claim and immediately before key use/send, with
-that causal read bound into attempt evidence. Admission-time role evidence is
-insufficient by itself.
+If a cancel expires while provably unsent, the source history remains immutable
+and its reservation stays held. Schema v12 permits exactly one new attended
+same-CLOID successor only after fresh paired open-order reads and a fresh
+same-account snapshot. Its approval-HMAC permit is registered as durable
+`issued` provenance and atomically consumed with successor admission; the
+successor receives a new action expiry, envelope and global nonce and is never
+represented as a retry.
+Because Hyperliquid's agent-signed wire does not encode the main account, each
+key-use and send boundary requires a fresh, stable two-read
+`userRole(api_wallet)` mapping to the configured main account. The attestation
+is worker/action/fence-bound; PRE_SEND additionally binds the exact attempt and
+signed evidence. Admission-time role evidence is insufficient by itself.
 
 Reconciliation is restart-idempotent rather than order-status retrying: an
 existing query row and its hash-bound retained snapshot are hydrated from
-schema-v11 state. Paired CLOID/OID advancement and creation of a required
+schema-v12 state. Paired CLOID/OID advancement and creation of a required
 cancel step commit in one transaction, so no durable `OPEN_VERIFIED` state can
 exist without the cancel already queued. A crash after terminal-query
 persistence keeps that order evidence immutable. If its account fence becomes
@@ -609,7 +619,10 @@ Treat agents, webpages, social content, imported repositories, generated code, m
 
 Required controls:
 
-- Human approvers authenticate through a trusted UI with strong identity and MFA; approval in agent chat is invalid.
+- Human approvers authenticate through a trusted channel with strong identity
+  and MFA. Free-form agent chat is invalid; the reserved TESTNET proposal lane
+  may recognize only the exact proposal-ID command after its separate
+  provenance and anti-replay boundary is implemented.
 - Approval tokens are signed, audience-bound, expiring, single-use, and protected against replay and cross-environment use.
 - Services use mutually authenticated identities and least-privilege authorization.
 - Signer keys are generated, stored, rotated, and revoked in a managed KMS/HSM or equivalent isolated secret boundary.
@@ -778,7 +791,14 @@ The assessment verdict is `buy`, `sell`, `nothing`, or `unavailable`; risk eligi
 
 ### 7.1 Per-ticket human approval
 
-Human approval occurs only in the trusted approval UI, never in agent chat. It signs a schema-versioned, domain-separated semantic-intent hash covering:
+The currently implemented administrative approval fallback reads exact
+confirmation from `/dev/tty` and signs a schema-versioned, domain-separated
+semantic-intent hash. A distinct future TESTNET provenance lane may accept only
+the exact command `execute trade <proposal-id>` for an already-created,
+immutable and short-lived proposal. That lane is not implemented: a bare
+command, free-form chat, quoted/replayed text, or any changed proposal is not
+authority, and neither path exposes the signer or execution store to MCP. The
+approved semantic intent covers:
 
 - Venue, network, and account.
 - Instrument, side, quantity, and reduce-only state.
@@ -789,6 +809,11 @@ Human approval occurs only in the trusted approval UI, never in agent chat. It s
 - Client order IDs, intent expiry, and allowed runtime-field policy.
 
 Any economic-field change invalidates the approval. Runtime-only venue nonce, timestamp, and signature fields do not alter the semantic intent and are produced only by the isolated deterministic signer. The authorization token is signed, audience-bound, identity-attributed, expiring, single-use, and anti-replay protected.
+
+The reserved proposal-ID lane must use separate durable provenance rather than
+masquerading as the `/dev/tty` HMAC permit. Its proposal must bind entry, size,
+stop, target, maximum loss, account and policy version; the proposal ID is
+single-use, and the one-shot sender preserves UNKNOWN-without-retry semantics.
 
 ### 7.2 Account-safety policy
 

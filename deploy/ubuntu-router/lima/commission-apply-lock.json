@@ -1,0 +1,185 @@
+{
+  "blockers": {
+    "guest_freeze": "VM start is disabled until an exact local-image create configuration and pre-start APT race boundary are reviewed",
+    "guest_package_install": "Guest freeze and exact apt simulation receipts cannot exist while VM start is disabled",
+    "host_tools": "Root host-tool apply cannot run until the sealed Python runtime has a pre-exec symlink and dynamic-library closure proof",
+    "lima_home": "No reviewed non-agent operator identity can own writable Lima instance state while keeping UID 501 desktop agents unable to mutate it",
+    "media_seal": "Root media apply cannot run until the sealed Python runtime has a pre-exec symlink and dynamic-library closure proof",
+    "router_activation": "Router keys, netplan, nftables and WireGuard activation are outside this artifact",
+    "validate_fill": "Validate-fill cannot be retained at its permanent path until the Lima-home ownership boundary is resolved",
+    "vm_create": "The locked Lima YAML uses an HTTPS image location; a verified local-image import and its validate-fill digest are not locked",
+    "vm_start": "A newly booted guest can race apt timers before the complete 663-package baseline is frozen and checked"
+  },
+  "host": {
+    "architecture": "arm64",
+    "build_version": "25G83",
+    "operator_gid": 20,
+    "operator_uid": 501,
+    "os": "Darwin",
+    "product_version": "26.6.2"
+  },
+  "paths": {
+    "lima_home": "/private/var/db/trading-desk-lima",
+    "lima_install": "/opt/trading-desk-router-tools/lima-2.2.0",
+    "media_parent": "/private/var/db/trading-desk-router-commission-v1/media",
+    "operator_home": "/private/var/db/trading-desk-lima/home",
+    "quarantine_parent": "/private/var/db/trading-desk-router-commission-v1/quarantine",
+    "receipt_parent": "/private/var/db/trading-desk-router-commission-v1/receipts",
+    "socket_vmnet_install": "/opt/socket_vmnet",
+    "state_root": "/private/var/db/trading-desk-router-commission-v1",
+    "tools_parent": "/opt/trading-desk-router-tools"
+  },
+  "phases": {
+    "guest_freeze_apply_enabled": false,
+    "guest_package_install_apply_enabled": false,
+    "guest_package_simulation_apply_enabled": false,
+    "host_tools_apply_enabled": false,
+    "lima_home_apply_enabled": false,
+    "media_seal_apply_enabled": false,
+    "operator_verification_receipt_enabled": true,
+    "router_activation_apply_enabled": false,
+    "validate_fill_apply_enabled": false,
+    "vm_create_apply_enabled": false,
+    "vm_start_apply_enabled": false
+  },
+  "python_runtime": {
+    "external_install_receipt_required": true,
+    "path": "/opt/trading-desk/runtime/python-3.11.16/bin/python3.11",
+    "prefix": "/opt/trading-desk/runtime/python-3.11.16",
+    "version": "3.11.16"
+  },
+  "review_status": "operator_evidence_only_all_root_vm_guest_apply_disabled",
+  "schema_version": 1,
+  "stop_line": {
+    "credentials_authorized": false,
+    "executor_init_authorized": false,
+    "mainnet_authorized": false,
+    "network_changes_authorized": false,
+    "router_key_generation_authorized": false,
+    "venue_writes_authorized": false
+  },
+  "verifier_toolchain": {
+    "gh": {
+      "codesign_required": true,
+      "load_paths": [
+        "/usr/lib/libSystem.B.dylib",
+        "/usr/lib/libresolv.9.dylib",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "/System/Library/Frameworks/Security.framework/Versions/A/Security"
+      ],
+      "mode": "0555",
+      "owner_gid": 80,
+      "owner_uid": 501,
+      "path": "/opt/homebrew/Cellar/gh/2.66.1/bin/gh",
+      "sha256": "bc38b2a17ac99e58e0047f3160cc59ace8b327bf68afe418165184c1a562a2c6",
+      "size_bytes": 44110274,
+      "version": "2.66.1"
+    },
+    "gpgv": {
+      "codesign_required": true,
+      "load_paths": [
+        "/usr/lib/libz.1.dylib",
+        "/usr/lib/libbz2.1.0.dylib",
+        "/opt/homebrew/opt/gettext/lib/libintl.8.dylib",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices",
+        "/opt/homebrew/opt/libgcrypt/lib/libgcrypt.20.dylib",
+        "/opt/homebrew/opt/libassuan/lib/libassuan.9.dylib",
+        "/opt/homebrew/opt/npth/lib/libnpth.0.dylib",
+        "/opt/homebrew/opt/libgpg-error/lib/libgpg-error.0.dylib",
+        "/usr/lib/libiconv.2.dylib",
+        "/usr/lib/libSystem.B.dylib"
+      ],
+      "mode": "0555",
+      "owner_gid": 80,
+      "owner_uid": 501,
+      "path": "/opt/homebrew/Cellar/gnupg/2.5.21/bin/gpgv",
+      "sha256": "78996aa9c00ddbed5ab5152c9e6dd14ed389aa1b477b4ccbf7e1b08837e68eb7",
+      "size_bytes": 535808,
+      "version": "2.5.21"
+    },
+    "homebrew_dependencies": [
+      {
+        "codesign_required": true,
+        "load_paths": [
+          "/opt/homebrew/opt/gettext/lib/libintl.8.dylib",
+          "/usr/lib/libiconv.2.dylib",
+          "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+          "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices",
+          "/usr/lib/libSystem.B.dylib"
+        ],
+        "mode": "0444",
+        "opt_link": "/opt/homebrew/opt/gettext",
+        "opt_link_target": "../Cellar/gettext/1.0",
+        "path": "/opt/homebrew/Cellar/gettext/1.0/lib/libintl.8.dylib",
+        "sha256": "30ded805e7031579382ab18ef5ced9eea605207cd4a67654de4de12ecdb3f865",
+        "size_bytes": 212048
+      },
+      {
+        "codesign_required": true,
+        "load_paths": [
+          "/opt/homebrew/opt/libgcrypt/lib/libgcrypt.20.dylib",
+          "/opt/homebrew/opt/libgpg-error/lib/libgpg-error.0.dylib",
+          "/usr/lib/libSystem.B.dylib"
+        ],
+        "mode": "0444",
+        "opt_link": "/opt/homebrew/opt/libgcrypt",
+        "opt_link_target": "../Cellar/libgcrypt/1.12.2",
+        "path": "/opt/homebrew/Cellar/libgcrypt/1.12.2/lib/libgcrypt.20.dylib",
+        "sha256": "0f654b3a30ad91e76d0ad5e8af8f4596bc30c00866198876d13beb7180898e58",
+        "size_bytes": 974288
+      },
+      {
+        "codesign_required": true,
+        "load_paths": [
+          "/opt/homebrew/opt/libassuan/lib/libassuan.9.dylib",
+          "/opt/homebrew/opt/libgpg-error/lib/libgpg-error.0.dylib",
+          "/usr/lib/libSystem.B.dylib"
+        ],
+        "mode": "0444",
+        "opt_link": "/opt/homebrew/opt/libassuan",
+        "opt_link_target": "../Cellar/libassuan/3.0.2",
+        "path": "/opt/homebrew/Cellar/libassuan/3.0.2/lib/libassuan.9.dylib",
+        "sha256": "8e0946b2a81f9afab03945a7b98324b5522c40bf5a18fb7c7f4e8cfbcb8c77e6",
+        "size_bytes": 98896
+      },
+      {
+        "codesign_required": true,
+        "load_paths": [
+          "/opt/homebrew/opt/npth/lib/libnpth.0.dylib",
+          "/usr/lib/libSystem.B.dylib"
+        ],
+        "mode": "0444",
+        "opt_link": "/opt/homebrew/opt/npth",
+        "opt_link_target": "../Cellar/npth/1.8",
+        "path": "/opt/homebrew/Cellar/npth/1.8/lib/libnpth.0.dylib",
+        "sha256": "58e02d86e97d97b67054c293350254b2111bebb3c5bbb033043429c12455eff2",
+        "size_bytes": 54848
+      },
+      {
+        "codesign_required": true,
+        "load_paths": [
+          "/opt/homebrew/opt/libgpg-error/lib/libgpg-error.0.dylib",
+          "/opt/homebrew/opt/gettext/lib/libintl.8.dylib",
+          "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+          "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices",
+          "/usr/lib/libSystem.B.dylib"
+        ],
+        "mode": "0444",
+        "opt_link": "/opt/homebrew/opt/libgpg-error",
+        "opt_link_target": "../Cellar/libgpg-error/1.61",
+        "path": "/opt/homebrew/Cellar/libgpg-error/1.61/lib/libgpg-error.0.dylib",
+        "sha256": "d225a6788992cc6ee5a7e51fee5a16580852f2c6c8355600d276bbb81a685066",
+        "size_bytes": 181744
+      }
+    ],
+    "llvm_otool": {
+      "mode": "0755",
+      "owner_gid": 0,
+      "owner_uid": 0,
+      "path": "/Library/Developer/CommandLineTools/usr/bin/llvm-otool",
+      "sha256": "61ff2c63cf68eeeadf9c4700dadb8271740ff4960f98500f30db82b31521c0de",
+      "size_bytes": 138208
+    }
+  }
+}

@@ -801,7 +801,7 @@ class MigrationAndIdentityTests(ExecutionStoreTestCase):
         finally:
             connection.close()
         self.assertEqual(
-            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+            list(range(1, execution_store_module.EXECUTION_SCHEMA_VERSION + 1)),
             [row[0] for row in migrations],
         )
         self.assertTrue(all(len(row[1]) == 64 for row in migrations))
@@ -945,11 +945,92 @@ class MigrationAndIdentityTests(ExecutionStoreTestCase):
             ).fetchone()
         finally:
             connection.close()
-        self.assertEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], versions)
+        self.assertEqual(
+            list(range(1, execution_store_module.EXECUTION_SCHEMA_VERSION + 1)),
+            versions,
+        )
         self.assertIn("preflight_hash", columns)
         self.assertIn("signed_evidence_hash", columns)
         self.assertIn("transport_evidence_hash", columns)
         self.assertIsNotNone(preflight_table)
+
+    def test_nonempty_v11_qualification_lane_refuses_implicit_v12_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "execution.sqlite3"
+            ExecutionStore(
+                path,
+                environment=Environment.TESTNET,
+                account_id="testnet-account",
+                max_reserved_loss="100",
+                max_reserved_notional="2000",
+            )
+            v12_objects = (
+                "idx_execution_qualification_submission_role",
+                "idx_execution_qualification_cancel_reauth_state",
+                "execution_qualification_cancel_reauth_terminal_evidence",
+                "execution_qualification_cancel_reauth_transport_evidence",
+                "execution_qualification_cancel_reauth_submission_authorities",
+                "execution_qualification_cancel_reauth_attempts",
+                "execution_qualification_cancel_reauth_signing_authorities",
+                "execution_qualification_cancel_reauthorizations",
+                "execution_qualification_cancel_reauth_permits",
+                "execution_qualification_attempt_role_bindings",
+                "execution_qualification_role_attestations",
+            )
+            with closing(sqlite3.connect(path)) as connection, connection:
+                for name in v12_objects:
+                    kind = "INDEX" if name.startswith("idx_") else "TABLE"
+                    connection.execute(f"DROP {kind} {name}")
+                connection.execute(
+                    "DELETE FROM execution_schema_migrations WHERE version = 12"
+                )
+                connection.execute(
+                    """
+                    INSERT INTO execution_qualification_snapshots (
+                        snapshot_hash, account_id, main_account_address,
+                        api_wallet_address, account_server_time_ms, retained_at,
+                        payload_json, content_hash, record_hash
+                    ) VALUES (?, ?, ?, ?, 1, ?, '{}', ?, ?)
+                    """,
+                    (
+                        "a" * 64,
+                        "testnet-account",
+                        "0x" + "1" * 40,
+                        "0x" + "2" * 40,
+                        "2026-08-27T00:00:00.000000Z",
+                        "b" * 64,
+                        "c" * 64,
+                    ),
+                )
+
+            with self.assertRaisesRegex(StorageError, "nonempty schema-v11"):
+                ExecutionStore(
+                    path,
+                    environment=Environment.TESTNET,
+                    account_id="testnet-account",
+                    max_reserved_loss="100",
+                    max_reserved_notional="2000",
+                )
+
+            with closing(sqlite3.connect(path)) as connection:
+                versions = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM execution_schema_migrations ORDER BY version"
+                    )
+                ]
+                snapshot = connection.execute(
+                    "SELECT snapshot_hash FROM execution_qualification_snapshots"
+                ).fetchone()
+                role_table = connection.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE name = 'execution_qualification_role_attestations'
+                    """
+                ).fetchone()
+            self.assertEqual(versions, list(range(1, 12)))
+            self.assertEqual(snapshot, ("a" * 64,))
+            self.assertIsNone(role_table)
 
 
 class TicketApprovalAdmissionTests(ExecutionStoreTestCase):

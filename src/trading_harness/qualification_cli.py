@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import signal
 import sys
+import threading
 import time
 from typing import TextIO
 import uuid
@@ -52,6 +54,12 @@ from .qualification_evidence import (
     export_qualification_evidence_review_artifact,
     load_exported_qualification_evidence_review_artifact,
 )
+from .qualification_cancel_store import CancelReauthorizationStore
+from .qualification_cancel_reauthorization import (
+    AttendedCancelReauthorizationAuthority,
+    build_cancel_reauthorization_intent,
+    verified_cancel_reauthorization_permit,
+)
 from .qualification_envelope_artifact import (
     QualificationEnvelopeArtifactError,
     QualificationEnvelopeArtifactStore,
@@ -64,6 +72,11 @@ from .qualification_signer import (
     QualificationSignerPolicy,
     QualificationSigningAccount,
     SignedQualificationEnvelope,
+)
+from .qualification_role_attestation import (
+    QualificationRoleAttestationStage,
+    TestnetUserRoleAttestation,
+    collect_testnet_user_role_attestation,
 )
 from . import qualification_store as qualification_store_module
 from .qualification_store import QualificationStore
@@ -102,6 +115,75 @@ IdFactory = Callable[[str, Mapping[str, object]], str]
 _TESTNET_INFO_ENDPOINT = public_info_endpoint("testnet")
 QUALIFICATION_SPLIT_PHASE_COMMANDS_ENABLED = False
 QUALIFICATION_QUEUE_POLL_SECONDS = 0.1
+QUALIFICATION_MAX_READ_POLLS = 30
+QUALIFICATION_MAX_RECOVERY_POLLS = 200
+QUALIFICATION_LIFECYCLE_READ_DEADLINE_SECONDS = 8.0
+
+
+class QualificationLifecycleDeadlineExceeded(StateConflict):
+    """The monotonic read/cancel lifecycle deadline was durably exhausted."""
+
+
+def _call_with_absolute_read_deadline(
+    operation: Callable[[], object],
+    *,
+    remaining_seconds: float,
+) -> object:
+    """Interrupt one blocking info read at the remaining lifecycle budget."""
+
+    if not callable(operation):
+        raise TypeError("deadline operation must be callable")
+    if (
+        type(remaining_seconds) is not float
+        or not 0.0 < remaining_seconds <= QUALIFICATION_LIFECYCLE_READ_DEADLINE_SECONDS
+    ):
+        raise QualificationLifecycleDeadlineExceeded(
+            "qualification lifecycle read deadline was exhausted"
+        )
+    if (
+        not all(
+            hasattr(signal, name)
+            for name in ("SIGALRM", "ITIMER_REAL", "getitimer", "setitimer")
+        )
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        raise StateConflict(
+            "interruptible qualification read deadline is unavailable"
+        )
+    prior_timer = signal.getitimer(signal.ITIMER_REAL)
+    if prior_timer != (0.0, 0.0):
+        raise StateConflict(
+            "qualification read deadline refuses an active process timer"
+        )
+    prior_handler = signal.getsignal(signal.SIGALRM)
+    expired = False
+    result: object = None
+    caught: BaseException | None = None
+
+    def interrupt(_signum: int, _frame: object) -> None:
+        nonlocal expired
+        expired = True
+        raise QualificationLifecycleDeadlineExceeded(
+            "qualification lifecycle read deadline interrupted a blocking read"
+        )
+
+    signal.signal(signal.SIGALRM, interrupt)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, remaining_seconds)
+        try:
+            result = operation()
+        except BaseException as error:  # preserve process-level interruptions
+            caught = error
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, prior_handler)
+    if expired:
+        raise QualificationLifecycleDeadlineExceeded(
+            "qualification lifecycle read deadline interrupted a blocking read"
+        ) from None
+    if caught is not None:
+        raise caught
+    return result
 
 
 def _clock() -> datetime:
@@ -114,6 +196,12 @@ def _milliseconds(value: datetime) -> int:
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     delta = value.astimezone(timezone.utc) - epoch
     return delta.days * 86_400_000 + delta.seconds * 1_000 + delta.microseconds // 1_000
+
+
+def _datetime_from_ms(value: int) -> datetime:
+    if type(value) is not int or value < 0:
+        raise ValidationError("millisecond timestamp is invalid")
+    return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=value)
 
 
 def _absolute_path(value: str) -> Path:
@@ -281,6 +369,51 @@ def _checked_info_transport(transport: InfoTransport) -> InfoTransport:
         return transport(endpoint, payload)
 
     return checked
+
+
+def _collect_phase_role_attestation(
+    config: ExecutorConfig,
+    *,
+    stage: QualificationRoleAttestationStage,
+    command_id: str,
+    phase: QualificationAttemptPhase,
+    action_hash: str,
+    signing_authority_hash: str,
+    worker_id: str,
+    fencing_token: int,
+    attempt_id: str | None,
+    signed_evidence_hash: str | None,
+    transport: InfoTransport,
+    clock: Clock,
+) -> TestnetUserRoleAttestation:
+    """Collect the fixed explicit-POST role fence through the info adapter."""
+
+    checked = _checked_info_transport(transport)
+
+    def explicit_post(
+        method: str,
+        endpoint: str,
+        payload: Mapping[str, object],
+    ) -> object:
+        if method != "POST":
+            raise StateConflict("qualification role attestation requires POST")
+        return checked(endpoint, payload)
+
+    return collect_testnet_user_role_attestation(
+        api_wallet_address=config.api_wallet_address,
+        expected_main_account_address=config.main_account_address,
+        stage=stage,
+        command_id=command_id,
+        phase=phase,
+        action_hash=action_hash,
+        signing_authority_hash=signing_authority_hash,
+        worker_id=worker_id,
+        fencing_token=fencing_token,
+        attempt_id=attempt_id,
+        signed_evidence_hash=signed_evidence_hash,
+        transport=explicit_post,
+        clock=clock,
+    )
 
 
 def _collect_retained_snapshot(
@@ -616,6 +749,163 @@ def authorize_close(
     )
 
 
+def authorize_cancel_reauthorization(
+    config: ExecutorConfig,
+    source_command_id: str,
+    *,
+    prompt: Prompt = _terminal_prompt,
+    clock: Clock = _clock,
+    transport: InfoTransport = post_public_info,
+    secret_loader: SecretLoader = _approval_secret,
+    id_factory: IdFactory = _default_id,
+    store: QualificationStore | None = None,
+) -> dict[str, object]:
+    """Freshly prove open state and attend the sole same-CLOID successor."""
+
+    selected = _qualification_store(config) if store is None else store
+    source = selected.get_command(source_command_id)
+    workflow = selected.load_workflow(source_command_id)
+    if (
+        source.state != "halted"
+        or source.reservation_released
+        or workflow.state is not QualificationWorkflowState.CANCEL_READY
+        or workflow.cancel_action is None
+    ):
+        raise StateConflict(
+            "source cancel is not halted proven-unsent with reservation retained"
+        )
+    action = workflow.intent.primary_action
+    checked = _checked_info_transport(transport)
+    cloid_response = checked(
+        _TESTNET_INFO_ENDPOINT,
+        {
+            "type": "orderStatus",
+            "user": config.main_account_address,
+            "oid": action.cloid,
+        },
+    )
+    cloid_observed = clock()
+    by_cloid = parse_qualification_order_status(
+        cloid_response,
+        action,
+        requested_identifier=action.cloid,
+        at=cloid_observed,
+    )
+    if by_cloid.oid is None:
+        raise StateConflict("fresh CLOID read did not prove a venue OID")
+    oid_response = checked(
+        _TESTNET_INFO_ENDPOINT,
+        {
+            "type": "orderStatus",
+            "user": config.main_account_address,
+            "oid": by_cloid.oid,
+        },
+    )
+    oid_observed = clock()
+    by_oid = parse_qualification_order_status(
+        oid_response,
+        action,
+        requested_identifier=by_cloid.oid,
+        at=oid_observed,
+    )
+    retained = _collect_retained_snapshot(config, transport=checked, clock=clock)
+    created = clock()
+    reauthorization_id = id_factory(
+        "cancel-reauthorization",
+        {
+            "config_hash": config.config_hash,
+            "source_command_id": source_command_id,
+            "open_by_cloid_evidence_hash": by_cloid.evidence_hash,
+            "open_by_oid_evidence_hash": by_oid.evidence_hash,
+            "snapshot_hash": retained.snapshot_hash,
+        },
+    )
+    intent = build_cancel_reauthorization_intent(
+        reauthorization_id=reauthorization_id,
+        source_command_id=source_command_id,
+        source_intent=workflow.intent,
+        by_cloid=by_cloid,
+        by_cloid_observed_at=cloid_observed,
+        by_oid=by_oid,
+        by_oid_observed_at=oid_observed,
+        retained=retained,
+        at=created,
+    )
+    required = AttendedCancelReauthorizationAuthority.confirmation_for(intent)
+    _json(
+        {
+            "schema_version": "testnet_cancel_reauthorization_prompt.v1",
+            "reauthorization_id": intent.reauthorization_id,
+            "source_command_id": intent.source_command_id,
+            "intent_hash": intent.intent_hash,
+            "action_hash": intent.action.action_hash,
+            "cloid": intent.action.scope.cloid,
+            "remaining_size": intent.remaining_size,
+            "required_confirmation": required,
+            "confirmation_source": "/dev/tty",
+            "prior_cancel_proven_unsent_required": True,
+            "retry_performed": False,
+            "mainnet_authorized": False,
+        }
+    )
+    supplied = prompt(f'Type exactly: "{required}"\n> ')
+    if supplied != required:
+        raise ValidationError("cancel reauthorization confirmation differs")
+    issued_at = clock()
+    if (
+        not intent.created_at <= issued_at < intent.expires_at
+        or _milliseconds(issued_at) >= intent.action.expires_at_ms
+    ):
+        raise StateConflict(
+            "cancel reauthorization expired during attended confirmation"
+        )
+    authority = AttendedCancelReauthorizationAuthority(
+        secret_loader(config),
+        issuer_id=f"cancel-reauthorization-authority-{config.config_hash[:24]}",
+        key_id=config.approval_credential.account,
+        audience=f"cancel-reauthorization-admission-{config.config_hash[:24]}",
+    )
+    authorization = authority.issue(
+        intent,
+        authorization_id=id_factory(
+            "cancel-reauthorization-permit",
+            {
+                "config_hash": config.config_hash,
+                "intent_hash": intent.intent_hash,
+            },
+        ),
+        approver_id=f"attended-control-{config.config_hash[:32]}",
+        confirmation=supplied,
+        at=issued_at,
+    )
+    permit = verified_cancel_reauthorization_permit(
+        authority, authorization, intent, at=issued_at
+    )
+    lane = CancelReauthorizationStore(selected)
+    selected.register_snapshot(retained)
+    lane.register_permit(permit, intent, at=issued_at)
+    admitted = lane.admit(
+        intent,
+        permit,
+        retained,
+        at=issued_at,
+    )
+    return {
+        "schema_version": "testnet_cancel_reauthorization_result.v1",
+        "reauthorization_id": admitted.reauthorization_id,
+        "source_command_id": admitted.source_command_id,
+        "action_hash": admitted.action_hash,
+        "cloid": admitted.source_cloid,
+        "state": admitted.state,
+        "new_nonce_required": True,
+        "retry_performed": False,
+        "approval_credential_loaded": True,
+        "signer_credential_loaded": False,
+        "venue_write_attempted": False,
+        "mainnet_authorized": False,
+    }
+
+
 def prepare(
     config: ExecutorConfig,
     command_id: str,
@@ -682,6 +972,7 @@ def sign(
     command_id: str,
     *,
     worker_id: str,
+    live_role_transport: InfoTransport,
     clock: Clock = _clock,
     wallet_loader: WalletLoader = _wallet,
     store: QualificationStore | None = None,
@@ -736,6 +1027,7 @@ def sign(
             )
         raise
     resumed = orphan is not None
+    pre_key_role_hash: str | None = None
     if orphan is not None:
         orphan.verify_binding(
             intent=intent,
@@ -746,6 +1038,20 @@ def sign(
         )
         _verify_orphan_nonce(orphan, nonce)
         signed = orphan
+        prior_role = selected.require_current_role_attestation(
+            lane="qualification",
+            command_id=command_id,
+            phase=phase,
+            stage=QualificationRoleAttestationStage.PRE_KEY,
+            action_hash=action.action_hash,
+            signing_authority_hash=authority.authority_hash,
+            worker_id=worker_id,
+            fencing_token=authority.fencing_token,
+            attempt_id=None,
+            signed_evidence_hash=None,
+            at=_datetime_from_ms(signed.signed_at_ms),
+        )
+        pre_key_role_hash = prior_role.attestation_hash
     else:
         prior = nonce.find_qualification_reservation(
             command_id=command_id,
@@ -762,6 +1068,39 @@ def sign(
                 "qualification nonce was committed without a complete envelope; "
                 "the proven-unsent command was halted"
             )
+        pre_key_role = _collect_phase_role_attestation(
+            config,
+            stage=QualificationRoleAttestationStage.PRE_KEY,
+            command_id=command_id,
+            phase=phase,
+            action_hash=action.action_hash,
+            signing_authority_hash=authority.authority_hash,
+            worker_id=worker_id,
+            fencing_token=authority.fencing_token,
+            attempt_id=None,
+            signed_evidence_hash=None,
+            transport=live_role_transport,
+            clock=clock,
+        )
+        selected.record_role_attestation(
+            pre_key_role,
+            lane="qualification",
+            at=clock(),
+        )
+        selected.require_current_role_attestation(
+            lane="qualification",
+            command_id=command_id,
+            phase=phase,
+            stage=QualificationRoleAttestationStage.PRE_KEY,
+            action_hash=action.action_hash,
+            signing_authority_hash=authority.authority_hash,
+            worker_id=worker_id,
+            fencing_token=authority.fencing_token,
+            attempt_id=None,
+            signed_evidence_hash=None,
+            at=clock(),
+        )
+        pre_key_role_hash = pre_key_role.attestation_hash
         # All state/nonce/artifact checks precede the only signer lookup.
         signed = sign_qualification_action(
             intent,
@@ -794,6 +1133,7 @@ def sign(
         policy=policy,
         signed=signed,
         signature_verifier=recover_qualification_signer,
+        pre_key_role_attestation_hash=pre_key_role_hash,
         worker_id=worker_id,
         fencing_token=authority.fencing_token,
         at=clock(),
@@ -810,6 +1150,334 @@ def sign(
         "orphan_resumed": resumed,
         "credential_loaded": not resumed,
         "private_key_exposed": False,
+        "pre_key_role_attestation_hash": pre_key_role_hash,
+        "venue_write_attempted": False,
+        "mainnet_authorized": False,
+    }
+
+
+def prepare_cancel_reauthorization(
+    config: ExecutorConfig,
+    reauthorization_id: str,
+    *,
+    worker_id: str,
+    clock: Clock = _clock,
+    store: QualificationStore | None = None,
+) -> dict[str, object]:
+    selected = _qualification_store(config) if store is None else store
+    lane = CancelReauthorizationStore(selected)
+    now = clock()
+    lane.normalize_expired(at=now)
+    claim = lane.claim(
+        reauthorization_id,
+        worker_id=worker_id,
+        at=now,
+    )
+    authority = lane.require_signing_authority(
+        reauthorization_id,
+        worker_id=worker_id,
+        fencing_token=claim.fencing_token,
+        at=clock(),
+    )
+    return {
+        "schema_version": "testnet_cancel_reauthorization_prepare_result.v1",
+        "reauthorization_id": reauthorization_id,
+        "action_hash": claim.action_hash,
+        "worker_id": worker_id,
+        "fencing_token": claim.fencing_token,
+        "signing_authority_hash": authority.authority_hash,
+        "credential_loaded": False,
+        "venue_write_attempted": False,
+        "retry_performed": False,
+    }
+
+
+def sign_cancel_reauthorization(
+    config: ExecutorConfig,
+    reauthorization_id: str,
+    *,
+    worker_id: str,
+    role_transport: InfoTransport,
+    clock: Clock = _clock,
+    wallet_loader: WalletLoader = _wallet,
+    store: QualificationStore | None = None,
+    nonce_authority: PersistentNonceAllocator | None = None,
+    artifact_store: QualificationEnvelopeArtifactStore | None = None,
+) -> dict[str, object]:
+    selected = _qualification_store(config) if store is None else store
+    lane = CancelReauthorizationStore(selected)
+    lane.normalize_expired(at=clock())
+    record = lane.get(reauthorization_id)
+    intent = record.intent()
+    source_intent = selected.load_workflow(record.source_command_id).intent
+    authority = lane.load_signing_authority(
+        reauthorization_id,
+        worker_id=worker_id,
+        at=clock(),
+    )
+    nonce = (
+        _nonce_authority(config, clock=clock)
+        if nonce_authority is None
+        else nonce_authority
+    )
+    artifacts = (
+        QualificationEnvelopeArtifactStore(config)
+        if artifact_store is None
+        else artifact_store
+    )
+    orphan = artifacts.load_if_present(
+        reauthorization_id, QualificationAttemptPhase.CANCEL
+    )
+    pre_key_hash: str
+    if orphan is not None:
+        orphan.verify_binding(
+            intent=source_intent,
+            action=intent.action,
+            authority=authority,
+            policy=_policy(config),
+            signature_verifier=recover_qualification_signer,
+        )
+        _verify_orphan_nonce(orphan, nonce)
+        role = selected.require_current_role_attestation(
+            lane="cancel_reauthorization",
+            command_id=reauthorization_id,
+            phase=QualificationAttemptPhase.CANCEL,
+            stage=QualificationRoleAttestationStage.PRE_KEY,
+            action_hash=intent.action.action_hash,
+            signing_authority_hash=authority.authority_hash,
+            worker_id=worker_id,
+            fencing_token=authority.fencing_token,
+            attempt_id=None,
+            signed_evidence_hash=None,
+            at=_datetime_from_ms(orphan.signed_at_ms),
+        )
+        pre_key_hash = role.attestation_hash
+        signed = orphan
+        resumed = True
+    else:
+        if nonce.find_qualification_reservation(
+            command_id=reauthorization_id,
+            phase="cancel",
+        ) is not None:
+            raise StateConflict(
+                "cancel reauthorization nonce exists without its complete envelope"
+            )
+        role = _collect_phase_role_attestation(
+            config,
+            stage=QualificationRoleAttestationStage.PRE_KEY,
+            command_id=reauthorization_id,
+            phase=QualificationAttemptPhase.CANCEL,
+            action_hash=intent.action.action_hash,
+            signing_authority_hash=authority.authority_hash,
+            worker_id=worker_id,
+            fencing_token=authority.fencing_token,
+            attempt_id=None,
+            signed_evidence_hash=None,
+            transport=role_transport,
+            clock=clock,
+        )
+        selected.record_role_attestation(
+            role,
+            lane="cancel_reauthorization",
+            at=clock(),
+        )
+        pre_key_hash = role.attestation_hash
+        selected.require_current_role_attestation(
+            lane="cancel_reauthorization",
+            command_id=reauthorization_id,
+            phase=QualificationAttemptPhase.CANCEL,
+            stage=QualificationRoleAttestationStage.PRE_KEY,
+            action_hash=intent.action.action_hash,
+            signing_authority_hash=authority.authority_hash,
+            worker_id=worker_id,
+            fencing_token=authority.fencing_token,
+            attempt_id=None,
+            signed_evidence_hash=None,
+            at=clock(),
+        )
+        signed = sign_qualification_action(
+            source_intent,
+            intent.action,
+            authority,
+            _policy(config),
+            wallet=wallet_loader(config),
+            nonce_authority=nonce,
+            authority_store=selected,
+            clock=clock,
+        )
+        artifacts.persist(signed)
+        resumed = False
+    attempt_id = _default_id(
+        "cancel-reauthorization-attempt",
+        {
+            "config_hash": config.config_hash,
+            "reauthorization_id": reauthorization_id,
+            "envelope_hash": signed.envelope_hash,
+        },
+    )
+    evidence = lane.prepare_envelope_attempt(
+        reauthorization_id,
+        attempt_id=attempt_id,
+        source_intent=source_intent,
+        authority=authority,
+        policy=_policy(config),
+        signed=signed,
+        signature_verifier=recover_qualification_signer,
+        pre_key_attestation_hash=pre_key_hash,
+        worker_id=worker_id,
+        fencing_token=authority.fencing_token,
+        at=clock(),
+    )
+    return {
+        "schema_version": "testnet_cancel_reauthorization_sign_result.v1",
+        "reauthorization_id": reauthorization_id,
+        "attempt_id": attempt_id,
+        "signed_evidence_hash": evidence.evidence_hash,
+        "wire_hash": evidence.wire_hash,
+        "nonce": evidence.nonce,
+        "pre_key_role_attestation_hash": pre_key_hash,
+        "orphan_resumed": resumed,
+        "venue_write_attempted": False,
+        "retry_performed": False,
+    }
+
+
+def send_cancel_reauthorization_once(
+    config: ExecutorConfig,
+    reauthorization_id: str,
+    *,
+    worker_id: str,
+    role_transport: InfoTransport,
+    clock: Clock = _clock,
+    store: QualificationStore | None = None,
+    artifact_store: QualificationEnvelopeArtifactStore | None = None,
+    sender: Callable[..., object] = submit_qualification_once,
+) -> dict[str, object]:
+    selected = _qualification_store(config) if store is None else store
+    lane = CancelReauthorizationStore(selected)
+    record = lane.get(reauthorization_id)
+    attempt_id = record.current_attempt_id
+    if record.state != "prepared" or attempt_id is None:
+        raise StateConflict("cancel reauthorization has no prepared successor")
+    artifacts = (
+        QualificationEnvelopeArtifactStore(config)
+        if artifact_store is None
+        else artifact_store
+    )
+    signed = artifacts.load(
+        reauthorization_id, QualificationAttemptPhase.CANCEL
+    )
+    evidence = signed.execution_store_evidence()
+    role = _collect_phase_role_attestation(
+        config,
+        stage=QualificationRoleAttestationStage.PRE_SEND,
+        command_id=reauthorization_id,
+        phase=QualificationAttemptPhase.CANCEL,
+        action_hash=signed.action_hash,
+        signing_authority_hash=signed.signing_authority_hash,
+        worker_id=worker_id,
+        fencing_token=record.fencing_token,
+        attempt_id=attempt_id,
+        signed_evidence_hash=evidence.evidence_hash,
+        transport=role_transport,
+        clock=clock,
+    )
+    selected.record_role_attestation(
+        role,
+        lane="cancel_reauthorization",
+        at=clock(),
+    )
+    source_workflow = selected.load_workflow(record.source_command_id)
+    submission = sender(
+        selected,
+        signed,
+        current_workflow=source_workflow,
+        attempt_id=attempt_id,
+        signed_evidence_hash=evidence.evidence_hash,
+        worker_id=worker_id,
+        fencing_token=record.fencing_token,
+        clock=clock,
+    )
+    return {
+        "schema_version": "testnet_cancel_reauthorization_send_result.v1",
+        "reauthorization_id": reauthorization_id,
+        "attempt_id": attempt_id,
+        "transport": submission.result.as_dict(),
+        "pre_send_role_attestation_hash": role.attestation_hash,
+        "retry_performed": False,
+        "mainnet_authorized": False,
+    }
+
+
+def reconcile_cancel_reauthorization(
+    config: ExecutorConfig,
+    reauthorization_id: str,
+    *,
+    transport: InfoTransport = post_public_info,
+    clock: Clock = _clock,
+    store: QualificationStore | None = None,
+) -> dict[str, object]:
+    selected = _qualification_store(config) if store is None else store
+    lane = CancelReauthorizationStore(selected)
+    current = lane.get(reauthorization_id)
+    if current.state == "terminal":
+        return {
+            "schema_version": "testnet_cancel_reauthorization_terminal_result.v1",
+            "reauthorization_id": reauthorization_id,
+            "state": "terminal",
+            "read_pending": False,
+            "resumed": True,
+            "retry_performed": False,
+        }
+    if current.state != "reconciling":
+        raise StateConflict("cancel reauthorization is not awaiting terminal evidence")
+    source_intent = selected.load_workflow(current.source_command_id).intent
+    checked = _checked_info_transport(transport)
+    response = checked(
+        _TESTNET_INFO_ENDPOINT,
+        {
+            "type": "orderStatus",
+            "user": config.main_account_address,
+            "oid": current.source_cloid,
+        },
+    )
+    observed = clock()
+    terminal = parse_qualification_order_status(
+        response,
+        source_intent.primary_action,
+        requested_identifier=current.source_cloid,
+        at=observed,
+    )
+    if terminal.missing or not terminal.terminal:
+        return {
+            "schema_version": "testnet_cancel_reauthorization_terminal_result.v1",
+            "reauthorization_id": reauthorization_id,
+            "state": "reconciling",
+            "read_pending": True,
+            "retry_performed": False,
+            "venue_write_attempted": False,
+        }
+    retained = _collect_retained_snapshot(config, transport=checked, clock=clock)
+    completed = lane.finish_terminal_reconciliation(
+        reauthorization_id,
+        terminal=terminal,
+        retained=retained,
+        at=clock(),
+    )
+    final = lane.get(reauthorization_id)
+    return {
+        "schema_version": "testnet_cancel_reauthorization_terminal_result.v1",
+        "reauthorization_id": reauthorization_id,
+        "state": final.state,
+        "terminal_flat": completed is not None and completed.terminal_flat,
+        "source_workflow_state": selected.load_workflow(
+            current.source_command_id
+        ).state.value,
+        "read_pending": False,
+        "reservation_released": (
+            selected.get_command(current.source_command_id).reservation_released
+        ),
+        "retry_performed": False,
         "venue_write_attempted": False,
         "mainnet_authorized": False,
     }
@@ -820,9 +1488,16 @@ def run(
     *,
     clock: Clock = _clock,
     sleeper: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
     worker_id_factory: Callable[[], str] = _new_worker_id,
+    role_transport: InfoTransport = post_public_info,
+    wallet_loader: WalletLoader = _wallet,
+    nonce_authority: PersistentNonceAllocator | None = None,
+    artifact_store: QualificationEnvelopeArtifactStore | None = None,
+    sender: Callable[..., object] = submit_qualification_once,
+    cancel_reauthorization_store: CancelReauthorizationStore | None = None,
 ) -> dict[str, object]:
-    """Wait for and execute one admitted phase in a single executor process."""
+    """Drive one authorized canary through its full bounded TESTNET lifecycle."""
 
     # Keep this first. Even config/UID/state reads are intentionally below the
     # compiled promotion boundary so a disabled build cannot probe Keychain or
@@ -832,77 +1507,371 @@ def run(
     config = load_executor_config(config_path)
     _require_role(config, "executor")
     store = _qualification_store(config)
-    if not callable(sleeper) or not callable(worker_id_factory):
+    cancel_store = (
+        CancelReauthorizationStore(store)
+        if cancel_reauthorization_store is None
+        else cancel_reauthorization_store
+    )
+    if not all(callable(item) for item in (sleeper, monotonic, worker_id_factory)):
         raise TypeError("run timing and worker factories must be callable")
     worker_id = worker_id_factory()
     if not isinstance(worker_id, str) or not worker_id.startswith(
         "qualification-worker-"
     ):
         raise ValidationError("run worker identity is invalid")
-    while True:
-        normalized = store.normalize_expired_claims(at=clock())
-        queued = [item for item in store.list_commands() if item.state == "queued"]
-        if len(queued) > 1:
-            raise StateConflict("more than one qualification command is queued")
-        if queued:
-            command_id = queued[0].command_id
-            break
-        if normalized:
-            raise StateConflict(
-                "expired/crashed qualification was normalized without resend"
+    artifacts = (
+        QualificationEnvelopeArtifactStore(config)
+        if artifact_store is None
+        else artifact_store
+    )
+    selected_lane: str | None = None
+    selected_id: str | None = None
+    phase_results: list[dict[str, object]] = []
+    read_polls = 0
+    recovery_polls = 0
+    read_deadline: float | None = None
+
+    def halt_deadline() -> None:
+        if selected_lane == "qualification" and selected_id is not None:
+            command = store.get_command(selected_id)
+            if command.state == "reconciling":
+                store.retain_for_reconciliation_deadline(
+                    selected_id, at=clock()
+                )
+            elif command.state == "claimed":
+                outbox = store.get_outbox(selected_id)
+                if outbox.current_attempt_id is None:
+                    store.halt_unused_signing_authority(
+                        selected_id,
+                        worker_id=worker_id,
+                        fencing_token=outbox.fencing_token,
+                        at=clock(),
+                    )
+                else:
+                    store.halt_prepared_attempt_for_missing_envelope(
+                        selected_id,
+                        worker_id=worker_id,
+                        fencing_token=outbox.fencing_token,
+                        at=clock(),
+                    )
+            else:
+                store.halt_for_reconciliation_deadline(selected_id, at=clock())
+        elif selected_lane == "cancel_reauthorization" and selected_id is not None:
+            reauthorization = cancel_store.get(selected_id)
+            if reauthorization.state == "reconciling":
+                cancel_store.retain_for_reconciliation_deadline(
+                    selected_id, at=clock()
+                )
+            else:
+                cancel_store.halt_proven_unsent_for_deadline(
+                    selected_id, at=clock()
+                )
+
+    def require_read_deadline() -> float | None:
+        if read_deadline is None:
+            return None
+        remaining = read_deadline - monotonic()
+        if remaining <= 0.0:
+            halt_deadline()
+            raise QualificationLifecycleDeadlineExceeded(
+                "qualification lifecycle read deadline was exhausted; "
+                "reservation retained and no write retried"
             )
-        sleeper(QUALIFICATION_QUEUE_POLL_SECONDS)
-    prepare(
-        config,
-        command_id,
-        worker_id=worker_id,
-        clock=clock,
-        store=store,
-    )
-    sign_result = sign(
-        config,
-        command_id,
-        worker_id=worker_id,
-        clock=clock,
-        store=store,
-    )
-    _, _, phase = _current_action(store, command_id)
-    outbox = store.get_outbox(command_id)
-    if outbox.current_attempt_id is None:
-        raise StateConflict("qualification has no prepared attempt")
-    artifacts = QualificationEnvelopeArtifactStore(config)
-    try:
-        signed = artifacts.load(command_id, phase)
-    except QualificationEnvelopeArtifactError:
-        store.halt_prepared_attempt_for_missing_envelope(
+        return remaining
+
+    def bounded_read_transport(
+        endpoint: str,
+        payload: Mapping[str, object],
+    ) -> object:
+        remaining = require_read_deadline()
+        if remaining is None:
+            raise StateConflict("qualification read deadline was not initialized")
+        try:
+            result = _call_with_absolute_read_deadline(
+                lambda: role_transport(endpoint, payload),
+                remaining_seconds=float(remaining),
+            )
+        except QualificationLifecycleDeadlineExceeded:
+            halt_deadline()
+            raise
+        require_read_deadline()
+        return result
+
+    def dispatch_primary(command_id: str) -> None:
+        command_before = store.get_command(command_id)
+        require_read_deadline()
+        bounded_role_transport = bounded_read_transport
+        prepare(
+            config,
             command_id,
             worker_id=worker_id,
+            clock=clock,
+            store=store,
+        )
+        sign_result = sign(
+            config,
+            command_id,
+            worker_id=worker_id,
+            clock=clock,
+            wallet_loader=wallet_loader,
+            store=store,
+            nonce_authority=nonce_authority,
+            artifact_store=artifacts,
+            live_role_transport=bounded_role_transport,
+        )
+        _, _, phase = _current_action(store, command_id)
+        outbox = store.get_outbox(command_id)
+        if outbox.current_attempt_id is None:
+            raise StateConflict("qualification has no prepared attempt")
+        try:
+            signed = artifacts.load(command_id, phase)
+        except QualificationEnvelopeArtifactError:
+            store.halt_prepared_attempt_for_missing_envelope(
+                command_id,
+                worker_id=worker_id,
+                fencing_token=outbox.fencing_token,
+                at=clock(),
+            )
+            raise
+        evidence = signed.execution_store_evidence()
+        pre_send_role = _collect_phase_role_attestation(
+            config,
+            stage=QualificationRoleAttestationStage.PRE_SEND,
+            command_id=command_id,
+            phase=phase,
+            action_hash=signed.action_hash,
+            signing_authority_hash=signed.signing_authority_hash,
+            worker_id=worker_id,
             fencing_token=outbox.fencing_token,
+            attempt_id=outbox.current_attempt_id,
+            signed_evidence_hash=evidence.evidence_hash,
+            transport=bounded_role_transport,
+            clock=clock,
+        )
+        store.record_role_attestation(
+            pre_send_role,
+            lane="qualification",
             at=clock(),
         )
-        raise
-    evidence = signed.execution_store_evidence()
-    submission = submit_qualification_once(
-        store,
-        signed,
-        current_workflow=store.load_workflow(command_id),
-        attempt_id=outbox.current_attempt_id,
-        signed_evidence_hash=evidence.evidence_hash,
-        worker_id=worker_id,
-        fencing_token=outbox.fencing_token,
-        clock=clock,
-    )
-    return {
-        "schema_version": "testnet_qualification_run_result.v1",
-        "command_id": command_id,
-        "phase": phase.value,
-        "worker_id": worker_id,
-        "sign_result": sign_result,
-        "workflow": submission.workflow.as_dict(),
-        "transport": submission.result.as_dict(),
-        "retry_performed": False,
-        "mainnet_authorized": False,
-    }
+        require_read_deadline()
+        submission = sender(
+            store,
+            signed,
+            current_workflow=store.load_workflow(command_id),
+            attempt_id=outbox.current_attempt_id,
+            signed_evidence_hash=evidence.evidence_hash,
+            worker_id=worker_id,
+            fencing_token=outbox.fencing_token,
+            clock=clock,
+        )
+        phase_results.append(
+            {
+                "phase": phase.value,
+                "sign": sign_result,
+                "pre_send_role_attestation_hash": pre_send_role.attestation_hash,
+                "transport": submission.result.as_dict(),
+            }
+        )
+
+    def dispatch_reauthorization(reauthorization_id: str) -> None:
+        require_read_deadline()
+
+        def bounded_sender(*args, **kwargs):
+            require_read_deadline()
+            return sender(*args, **kwargs)
+
+        prepare_cancel_reauthorization(
+            config,
+            reauthorization_id,
+            worker_id=worker_id,
+            clock=clock,
+            store=store,
+        )
+        sign_result = sign_cancel_reauthorization(
+            config,
+            reauthorization_id,
+            worker_id=worker_id,
+            role_transport=bounded_read_transport,
+            clock=clock,
+            wallet_loader=wallet_loader,
+            store=store,
+            nonce_authority=nonce_authority,
+            artifact_store=artifacts,
+        )
+        send_result = send_cancel_reauthorization_once(
+            config,
+            reauthorization_id,
+            worker_id=worker_id,
+            role_transport=bounded_read_transport,
+            clock=clock,
+            store=store,
+            artifact_store=artifacts,
+            sender=bounded_sender,
+        )
+        phase_results.append(
+            {
+                "phase": "cancel_reauthorization",
+                "sign": sign_result,
+                "transport": send_result["transport"],
+                "pre_send_role_attestation_hash": send_result[
+                    "pre_send_role_attestation_hash"
+                ],
+            }
+        )
+
+    while True:
+        now = clock()
+        normalized = store.normalize_expired_claims(at=now)
+        normalized += cancel_store.normalize_expired(at=now)
+        if selected_lane is None:
+            primary = [
+                item
+                for item in store.list_commands()
+                if item.state in {"queued", "claimed", "reconciling"}
+            ]
+            reauthorizations = [
+                item
+                for item in cancel_store.list_records()
+                if item.state
+                in {"queued", "claimed", "prepared", "sending", "reconciling"}
+            ]
+            if len(primary) + len(reauthorizations) > 1:
+                raise StateConflict("more than one qualification mutation is active")
+            if primary:
+                selected_lane, selected_id = "qualification", primary[0].command_id
+            elif reauthorizations:
+                selected_lane, selected_id = (
+                    "cancel_reauthorization",
+                    reauthorizations[0].reauthorization_id,
+                )
+            elif normalized:
+                raise StateConflict(
+                    "expired/crashed qualification was normalized without resend"
+                )
+            else:
+                sleeper(QUALIFICATION_QUEUE_POLL_SECONDS)
+                continue
+        assert selected_id is not None
+        if selected_lane == "qualification":
+            command = store.get_command(selected_id)
+            if command.state == "queued":
+                if read_deadline is None:
+                    read_deadline = (
+                        monotonic()
+                        + QUALIFICATION_LIFECYCLE_READ_DEADLINE_SECONDS
+                    )
+                dispatch_primary(selected_id)
+                read_polls = 0
+                continue
+            if command.state == "reconciling":
+                if read_deadline is None:
+                    read_deadline = (
+                        monotonic()
+                        + QUALIFICATION_LIFECYCLE_READ_DEADLINE_SECONDS
+                    )
+                require_read_deadline()
+                if command.current_phase == "place":
+                    result = reconcile_open(
+                        config,
+                        selected_id,
+                        transport=bounded_read_transport,
+                        clock=clock,
+                        store=store,
+                    )
+                elif command.current_phase in {"cancel", "close"}:
+                    result = reconcile_terminal(
+                        config,
+                        selected_id,
+                        transport=bounded_read_transport,
+                        clock=clock,
+                        store=store,
+                    )
+                else:
+                    raise StateConflict("qualification reconciliation phase is invalid")
+                if result.get("read_pending") is True:
+                    read_polls += 1
+                    if read_polls > QUALIFICATION_MAX_READ_POLLS:
+                        halt_deadline()
+                        raise StateConflict(
+                            "bounded qualification REST reconciliation exhausted"
+                        )
+                    sleeper(QUALIFICATION_QUEUE_POLL_SECONDS)
+                else:
+                    read_polls = 0
+                if store.get_command(selected_id).state not in {"terminal", "halted"}:
+                    require_read_deadline()
+                continue
+            if command.state in {"terminal", "halted"}:
+                workflow = store.load_workflow(selected_id)
+                return {
+                    "schema_version": "testnet_qualification_run_result.v2",
+                    "lane": "qualification",
+                    "command_id": selected_id,
+                    "worker_id": worker_id,
+                    "state": command.state,
+                    "workflow_state": workflow.state.value,
+                    "phase_results": phase_results,
+                    "retry_performed": False,
+                    "mainnet_authorized": False,
+                }
+        else:
+            reauthorization = cancel_store.get(selected_id)
+            if reauthorization.state == "queued":
+                if read_deadline is None:
+                    read_deadline = (
+                        monotonic()
+                        + QUALIFICATION_LIFECYCLE_READ_DEADLINE_SECONDS
+                    )
+                dispatch_reauthorization(selected_id)
+                read_polls = 0
+                continue
+            if reauthorization.state == "reconciling":
+                if read_deadline is None:
+                    read_deadline = (
+                        monotonic()
+                        + QUALIFICATION_LIFECYCLE_READ_DEADLINE_SECONDS
+                    )
+                require_read_deadline()
+                result = reconcile_cancel_reauthorization(
+                    config,
+                    selected_id,
+                    transport=bounded_read_transport,
+                    clock=clock,
+                    store=store,
+                )
+                if result.get("read_pending") is True:
+                    read_polls += 1
+                    if read_polls > QUALIFICATION_MAX_READ_POLLS:
+                        halt_deadline()
+                        raise StateConflict(
+                            "bounded cancel reauthorization reconciliation exhausted"
+                        )
+                    sleeper(QUALIFICATION_QUEUE_POLL_SECONDS)
+                else:
+                    read_polls = 0
+                if cancel_store.get(selected_id).state not in {"terminal", "halted"}:
+                    require_read_deadline()
+                continue
+            if reauthorization.state in {"terminal", "halted"}:
+                return {
+                    "schema_version": "testnet_qualification_run_result.v2",
+                    "lane": "cancel_reauthorization",
+                    "reauthorization_id": selected_id,
+                    "source_command_id": reauthorization.source_command_id,
+                    "worker_id": worker_id,
+                    "state": reauthorization.state,
+                    "terminal_flat": reauthorization.state == "terminal",
+                    "source_reservation_released": store.get_command(
+                        reauthorization.source_command_id
+                    ).reservation_released,
+                    "phase_results": phase_results,
+                    "retry_performed": False,
+                    "mainnet_authorized": False,
+                }
+        recovery_polls += 1
+        if recovery_polls > QUALIFICATION_MAX_RECOVERY_POLLS:
+            raise StateConflict("qualification recovery wait exceeded its bound")
+        sleeper(QUALIFICATION_QUEUE_POLL_SECONDS)
 
 
 def reconcile_open(
@@ -985,6 +1954,17 @@ def reconcile_open(
             requested_identifier=action.cloid,
             at=cloid_at,
         )
+        if by_cloid.missing or by_cloid.oid is None:
+            return {
+                "schema_version": "testnet_qualification_open_reconciliation.v1",
+                "command_id": command_id,
+                "workflow_state": workflow.state.value,
+                "read_pending": True,
+                "cancel_queued": False,
+                "retry_performed": False,
+                "venue_write_attempted": False,
+                "mainnet_authorized": False,
+            }
         cloid_snapshot = _collect_retained_snapshot(
             config, transport=checked, clock=clock
         )
@@ -995,8 +1975,6 @@ def reconcile_open(
             observed_at=cloid_at,
             account_snapshot=cloid_snapshot,
         )
-    if by_cloid.oid is None:
-        raise StateConflict("CLOID query did not return a venue OID")
     try:
         by_oid, _ = selected.load_query_evidence(command_id, "open_by_oid")
         resumed = True
@@ -1016,6 +1994,17 @@ def reconcile_open(
             requested_identifier=by_cloid.oid,
             at=oid_at,
         )
+        if by_oid.missing or by_oid.oid is None:
+            return {
+                "schema_version": "testnet_qualification_open_reconciliation.v1",
+                "command_id": command_id,
+                "workflow_state": workflow.state.value,
+                "read_pending": True,
+                "cancel_queued": False,
+                "retry_performed": False,
+                "venue_write_attempted": False,
+                "mainnet_authorized": False,
+            }
         oid_snapshot = _collect_retained_snapshot(
             config, transport=checked, clock=clock
         )
@@ -1113,6 +2102,16 @@ def reconcile_terminal(
             requested_identifier=action.cloid,
             at=observed,
         )
+        if terminal.missing or not terminal.terminal:
+            return {
+                "schema_version": "testnet_qualification_terminal_reconciliation.v1",
+                "command_id": command_id,
+                "workflow_state": workflow.state.value,
+                "read_pending": True,
+                "retry_performed": False,
+                "venue_write_attempted": False,
+                "mainnet_authorized": False,
+            }
         retained = _collect_retained_snapshot(
             config, transport=checked, clock=clock
         )
@@ -1184,14 +2183,24 @@ def recover(
     *,
     clock: Clock = _clock,
     store: QualificationStore | None = None,
+    cancel_store: CancelReauthorizationStore | None = None,
 ) -> dict[str, object]:
     """Normalize expired claims/PONR crashes without signing or resending."""
 
     selected = _qualification_store(config) if store is None else store
-    changed = selected.normalize_expired_claims(at=clock())
+    now = clock()
+    changed = selected.normalize_expired_claims(at=now)
+    selected_cancel = (
+        CancelReauthorizationStore(selected)
+        if cancel_store is None
+        else cancel_store
+    )
+    cancel_changed = selected_cancel.normalize_expired(at=now)
     return {
         "schema_version": "testnet_qualification_recovery_result.v1",
-        "normalized_count": changed,
+        "normalized_count": changed + cancel_changed,
+        "qualification_normalized_count": changed,
+        "cancel_reauthorization_normalized_count": cancel_changed,
         "retry_performed": False,
         "credential_loaded": False,
         "venue_write_attempted": False,
@@ -1203,17 +2212,25 @@ def status(
     config: ExecutorConfig,
     *,
     store: QualificationStore | None = None,
+    cancel_store: CancelReauthorizationStore | None = None,
 ) -> dict[str, object]:
     selected = _qualification_store(config) if store is None else store
     commands = selected.list_commands()
+    selected_cancel = (
+        CancelReauthorizationStore(selected)
+        if cancel_store is None
+        else cancel_store
+    )
+    cancel_reauthorizations = selected_cancel.list_records()
     return {
         "schema_version": "testnet_qualification_status.v1",
         "config_hash": config.config_hash,
         "submission_enabled": False,
         "live_lifecycle_ready": False,
+        "foreground_lifecycle_contract_implemented": True,
         "split_prepare_sign_public": False,
-        "expired_cancel_reauthorization_implemented": False,
-        "pre_send_user_role_recheck_implemented": False,
+        "expired_cancel_reauthorization_implemented": True,
+        "pre_send_user_role_recheck_implemented": True,
         "commands": [
             {
                 "command_id": item.command_id,
@@ -1225,6 +2242,17 @@ def status(
                 "revision": item.revision,
             }
             for item in commands
+        ],
+        "cancel_reauthorizations": [
+            {
+                "reauthorization_id": item.reauthorization_id,
+                "source_command_id": item.source_command_id,
+                "state": item.state,
+                "reservation_owned_by_source": True,
+                "attempt_count": item.attempt_count,
+                "revision": item.revision,
+            }
+            for item in cancel_reauthorizations
         ],
         "credential_loaded": False,
         "venue_write_attempted": False,
@@ -1267,6 +2295,13 @@ def build_parser() -> argparse.ArgumentParser:
     close.add_argument("--config", type=_absolute_path, required=True)
     close.add_argument("--instrument", required=True)
 
+    reauthorize = commands.add_parser(
+        "reauthorize-cancel",
+        help="freshly prove open state and attend the sole same-CLOID cancel successor",
+    )
+    reauthorize.add_argument("--config", type=_absolute_path, required=True)
+    reauthorize.add_argument("--source-command-id", required=True)
+
     for name, help_text in (
         ("reconcile-open", "record paired CLOID/OID evidence and queue cancel"),
         ("reconcile-terminal", "record terminal order/account evidence"),
@@ -1306,6 +2341,10 @@ def _dispatch(arguments: argparse.Namespace, config: ExecutorConfig) -> dict[str
         return authorize_canary(config, arguments.output, arguments.instrument)
     if arguments.command == "authorize-close":
         return authorize_close(config, arguments.instrument)
+    if arguments.command == "reauthorize-cancel":
+        return authorize_cancel_reauthorization(
+            config, arguments.source_command_id
+        )
     if arguments.command == "reconcile-open":
         return reconcile_open(config, arguments.command_id)
     if arguments.command == "reconcile-terminal":
@@ -1333,6 +2372,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "verify",
                 "authorize-canary",
                 "authorize-close",
+                "reauthorize-cancel",
             }
             _require_role(
                 config,
@@ -1353,17 +2393,16 @@ if __name__ == "__main__":
 
 __all__ = (
     "authorize_canary",
+    "authorize_cancel_reauthorization",
     "authorize_close",
     "build_parser",
     "collect_canary",
     "main",
-    "prepare",
     "qualification_advisory_websocket_client",
     "recover",
     "reconcile_open",
     "reconcile_terminal",
     "run",
-    "sign",
     "status",
     "verify_canary",
 )

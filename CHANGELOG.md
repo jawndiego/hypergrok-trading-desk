@@ -40,13 +40,19 @@
   renderer, nftables/WireGuard checks and an explicit TESTNET commissioning gap
   register. The local VM is network-only, preserves the host public IP and is
   not represented as VPN or mainnet qualification.
-- Added a separately namespaced schema-v11 TESTNET qualification core for
+- Added a separately namespaced schema-v12 TESTNET qualification core for
   retained account/agent evidence, a fixed minimum GTC canary, bound cancel,
   full-residual attended close, atomic reservation, per-step single-use
   authority and crash normalization. Added the pinned SDK signer/recovery
-  adapter, dormant one-shot sender, bearer-sensitive envelope receipts and a
-  role-bound terminal CLI; submission and the complete live lifecycle remain
-  compiled off and unqualified.
+  adapter, dormant one-shot sender, bearer-sensitive envelope receipts,
+  pre-key/pre-send role fences, a full bounded foreground lifecycle and one
+  fresh same-CLOID cancel successor. Submission remains compiled off and live
+  qualification has not run.
+- Added a pure TESTNET chat-approval foundation with immutable account/risk-
+  bound proposals, 192-bit short-lived IDs, exact
+  `execute trade <proposal-id>` parsing and single-use approval transitions.
+  The future Codex bridge and local broker remain unimplemented; model-selected
+  tool calls are explicitly not treated as cryptographic human attestation.
 - Added credential-free, plan-gated macOS APFS quota, final-path pre/post-init
   ACL, exact offline install and storage-headroom guard artifacts. No machine
   mutation or service activation is implied.
@@ -61,6 +67,10 @@
   and Noble indexes, and a 116-package closure are locked and replayable;
   trusted-tool installation, VM creation, guest apply and preflight remain
   blocked.
+- Added a reviewed router host-commissioning specification with root-sealed
+  media, immutable host-tool extraction and dormant guest package phases. All
+  root/Lima/VM/guest/network/key gates remain false pending pre-exec runtime
+  closure and non-agent Lima-state ownership.
 - Disabled ambient urllib proxy discovery for exact Hyperliquid info/exchange
   clients and made executor config reject proxy, CA-bundle and TLS-key-log
   environment variables before state, credentials or network access.

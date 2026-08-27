@@ -1,9 +1,10 @@
 # Local Ubuntu VM router for TESTNET qualification
 
 Status: **repository-rendered guest configuration plus a pinned, plan-only
-Lima/VZ VM bundle; immutable public-input replay is implemented, while host
-installation, VM apply and boot orchestration remain unapplied/unqualified;
-not VPN-qualified or a capital security boundary**.
+Lima/VZ VM bundle; immutable public-input replay and a root host-preparation
+artifact are implemented, while every phase remains unapplied and writable
+Lima state, VM apply and boot orchestration remain disabled/unqualified; not
+VPN-qualified or a capital security boundary**.
 
 This design keeps the signer/executor on macOS, where the reviewed System
 Keychain and UID/ACL model exist, and puts only network routing in a dedicated
@@ -161,6 +162,52 @@ dependency ambiguity and any package-transaction widening. `gh` uses only the
 embedded offline bundles and trusted root; credential/token variables and
 ambient config/cache locations are not passed to it.
 
+## Root host-preparation specification — apply disabled
+
+The rendered VM bundle now includes `commission-apply.py`, its root-only
+`commission-apply-launcher.sh`, dormant `commission-guest.py`, and the exact
+`commission-apply-lock.json`. Running the Python commissioners with no argument
+prints their plans. Only the unprivileged informational receipt is enabled:
+
+1. `operator-verify` replays the public verifier with the exact current
+   `gh`/`gpgv` binaries, their complete Homebrew dylib closure and the pinned
+   root-owned `llvm-otool`. Its durable receipt is informational only. A root
+   phase never executes those UID-501/Homebrew paths and never treats that
+   receipt as installation authority.
+2. The disabled `apply-seal-media` implementation independently matches every public evidence file to the
+   root-sealed commission lock and copies only a fixed basename allowlist from
+   the already root-sealed controller. It publishes root-owned mode-`0500`
+   media with exclusive rename and exact `INSTALLING`/`READY` markers.
+3. The disabled `apply-host-tools` implementation extracts the exact attested archives into
+   `/opt/trading-desk-router-tools/lima-2.2.0` and `/opt/socket_vmnet`. Every
+   installed path is root-owned and non-writable, the entire archive tree is
+   byte-compared, and the three installed binaries retain their locked hashes
+   and valid code signatures.
+
+The root launcher currently prints `root_apply_enabled=false` and exits before
+Python. The drafted boundary requires a canonical root-owned/no-ACL controller
+chain, retained controller-manifest digest, and schema-bound sealed-Python
+receipt; Python itself requires `-I -B` and an empty environment. All drafted
+promotions use Darwin `renameatx_np(RENAME_EXCL)` and full file/directory
+durability barriers. Exact interrupted state is modeled as resumable, while
+non-adoptable state uses a transaction-receipted resumable quarantine. None of
+that root code is reachable until the launcher's pre-exec runtime symlink and
+dynamic-library closure can be proved. Nothing is automatically deleted or
+silently replaced.
+The VM manifest's top-level and nested apply-authority fields are false. The
+only enabled phase name is the UID-501 informational verification receipt; no
+root host mutator is exposed.
+
+Although code drafts describe later behavior, the lock keeps Lima-home,
+validate-fill, VM create/start, guest freeze/simulation/install and router
+activation false. In particular, a UID-501-owned writable `LIMA_HOME` would
+also be writable by desktop agents. No separate reviewed non-agent operator
+identity exists, so neither the permanent Lima home nor `validate --fill` may
+be applied yet. The locked YAML also still uses an HTTPS image URL rather than
+a reviewed local-image import, and a first boot could race APT timers before a
+complete 663-package baseline check. Those are hard blockers, not steps to
+improvise.
+
 ## VM network contract
 
 Use an Ubuntu 24.04 ARM64 VM with two distinct NICs. The reviewed Lima plan
@@ -208,7 +255,7 @@ default-drop output, pinned peer IP/UDP, tunnel-only DNS/NTP and NAT only onto
 the remote WireGuard interface. Do not convert modes with an environment
 variable or a small live edit.
 
-## Attended setup — currently blocked before apply
+## Attended setup — host preparation only
 
 Before any router or venue credential is created, confirm the Mac remains on a
 currently supported security release and retain reboot/runtime/test evidence.
@@ -217,27 +264,28 @@ The current host was updated from macOS 15.3.1 to 26.6.2 build 25G83 on
 requalified. Repeat after any later OS/runtime change. Apple publishes current
 security releases at <https://support.apple.com/100100>.
 
-No VM/package/network/key command is authorized yet. The legacy unpinned
+No root-host, VM, guest-package, network or key command is authorized yet. A
+narrowly bounded root media/host-tool implementation exists behind false
+gates. The legacy unpinned
 `apt-get update`, unversioned package install and immediate `wg genkey`
 sequence has been removed because it bypassed the reviewed locks.
 
-The next attended change must be a separately reviewed apply artifact that:
+The next attended change must first close the root runtime/launcher blocker and
+then separately promote the reviewed media/host-tool phases. After that later
+host-only stop line, another review must:
 
-1. replays `commission-public.py --verify-inputs`, then installs the already
-   verified archives without substituting bytes; installs the exact
-   hash-checked Lima and root-owned socket_vmnet binaries; creates a dedicated mode-`0700`
-   `/var/db/trading-desk-lima`,
-   installs only the rendered `networks.yaml`, and proves `default.yaml` and
-   `override.yaml` are absent;
-2. runs the rendered `host-preflight.sh --check` and retains the exact
+1. establish a non-agent operator identity for writable Lima instance state,
+   create its dedicated mode-`0700` `LIMA_HOME`, install only the rendered
+   `networks.yaml`, and prove `default.yaml` and `override.yaml` are absent;
+2. run the rendered `host-preflight.sh --check` and retain the exact
    `limactl validate --fill` digest before every create/start;
-3. replays the locked signed Ubuntu snapshot/cloud-image/dependency evidence,
-   then proves from a console-side `apt-get --simulate` that the actual guest
-   proposes exactly `wireguard-tools` and no upgrade/removal before any package
-   mutation is separately authorized;
-4. creates the VM without mounts, forwarded agent, proxy/DNS inheritance or a
-   third NIC, then runs `guest-preflight.sh --pre-key` from its console;
-5. installs the separately rendered guest router bundle, applies netplan from
+3. bind a local verified image into the validated config and create the VM
+   without mounts, forwarded agent, proxy/DNS inheritance or a third NIC;
+4. start it only after a race-free first-boot APT freeze exists, run
+   `guest-preflight.sh --pre-key`, and prove from a console-side
+   `apt-get --simulate` that the local package proposes exactly
+   `wireguard-tools` with no upgrade/removal before guest package mutation;
+5. install the separately rendered guest router bundle, apply netplan from
    the console, and passes `guest-preflight.sh --post-netplan` with exactly
    `192.168.106.2/24`; and only then
 6. generates the VM WireGuard private key in the VM and the Mac key in the
@@ -296,24 +344,23 @@ reviewed application and host enforcement implement one.
 ## Current stop line and shortest attended sequence
 
 Today the safe sequence stops after rendering and verifying both manifests,
-running `bootstrap-public.sh --plan` and `host-preflight.sh --plan`, and
-optionally replaying the exact public evidence with
-`commission-public.py --verify-inputs`. There is no reviewed command that
-installs Lima/socket_vmnet, creates or starts the VM, installs guest packages,
-activates nftables/WireGuard or changes Mac routes. A successful public-input
-replay deliberately does not cross that stop line. Do not improvise those
+running all plan modes, and optionally replaying the exact public evidence and
+retaining its informational receipt. There is no reviewed root command that
+seals media or installs host tools, and no command that creates writable
+Lima instance state, creates or starts the VM, installs guest packages,
+activates nftables/WireGuard or changes Mac routes. Do not improvise those
 apply steps from this document.
 
-The exact remaining apply blockers are intentional: the repository does not
-provision or seal the operator-trusted `gh`/`gpgv` verifier executables; it has
-no reviewed root installer for the verified host archives, socket_vmnet
-sudoers/launchd material or dedicated `LIMA_HOME`; it has not run the effective
-Lima validation against those installed bytes; and it has no guest-console
-first-boot APT/timer freeze or `apt-get --simulate`/install transcript. VM
-create/start, package mutation and network/key activation therefore remain
-disabled even after a green immutable input replay.
+The exact remaining apply blockers are intentional: the root controller and
+sealed Python runtime do not yet have a pre-exec-contained symlink/dylib proof;
+no non-agent identity owns
+writable Lima state; socket_vmnet sudoers/launchd activation is absent; the
+verified image has no locked local-image create configuration; and there is no
+race-free first-boot APT freeze or console simulation transcript. Lima-home,
+VM create/start, package mutation and network/key activation therefore remain
+disabled; host-tool preparation has not been promoted or run.
 
-After a separately reviewed apply artifact consumes (without weakening) the
+After a later promotion consumes (without weakening) the
 immutable-input gate, the shortest attended sequence is: replay archive hashes,
 signatures, closure and attestations; create
 the dedicated `LIMA_HOME`; retain `limactl validate --fill`; create the exact

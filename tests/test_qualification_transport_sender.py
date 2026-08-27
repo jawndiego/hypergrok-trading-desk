@@ -23,6 +23,10 @@ from trading_harness.qualification_store import (
     QUALIFICATION_SUBMISSION_ENABLED,
     QualificationStore,
 )
+from trading_harness.qualification_role_attestation import (
+    QualificationRoleAttestationStage,
+    collect_testnet_user_role_attestation,
+)
 from trading_harness import qualification_transport as transport_module
 from trading_harness.qualification_transport import (
     QUALIFICATION_TRANSPORT_RESPONSE_HASH_DOMAIN,
@@ -236,6 +240,42 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             attempt_id=f"{command_id}-attempt",
             claim_ms=100,
         )
+        signing_row = self.store._connect()
+        try:
+            row = signing_row.execute(
+                """
+                SELECT * FROM execution_qualification_signing_authorities
+                WHERE command_id = ? AND phase = 'place'
+                """,
+                (command.command_id,),
+            ).fetchone()
+        finally:
+            signing_row.close()
+        self.assertIsNotNone(row)
+        times = iter((at(420), at(430), at(440)))
+        pre_send = collect_testnet_user_role_attestation(
+            api_wallet_address=intent.api_wallet_address,
+            expected_main_account_address=intent.main_account_address,
+            stage=QualificationRoleAttestationStage.PRE_SEND,
+            command_id=command.command_id,
+            phase=QualificationAttemptPhase.PLACE,
+            action_hash=intent.primary_action.action_hash,
+            signing_authority_hash=row["authority_hash"],
+            worker_id="qualification-worker",
+            fencing_token=claim.fencing_token,
+            attempt_id=f"{command_id}-attempt",
+            signed_evidence_hash=evidence.evidence_hash,
+            transport=lambda _method, _endpoint, _payload: {
+                "role": "agent",
+                "data": {"user": intent.main_account_address},
+            },
+            clock=lambda: next(times),
+        )
+        self.qualification.record_role_attestation(
+            pre_send,
+            lane="qualification",
+            at=at(450),
+        )
         return intent, workflow, command, envelope, evidence, claim
 
     def seed_and_arguments(self):
@@ -373,6 +413,52 @@ class QualificationSenderTests(ExecutionStoreTestCase):
                 )
         self.assertEqual(len(sender.calls), 1)
         self.assertNotEqual(workflow.workflow_hash, recorded.workflow.workflow_hash)
+
+    def test_pause_after_authority_past_role_fence_skips_http_and_records_unknown(self) -> None:
+        _, _, command, envelope, _, authority, arguments = self.seed_and_arguments()
+        self.assertLess(
+            authority.pre_send_expires_at_ms,
+            envelope.expires_after_ms,
+        )
+        sender = FakeSender(
+            FakeResponse(
+                status=200,
+                final_url=envelope.exchange_url,
+                body=b'{"status":"ok"}',
+            )
+        )
+        with (
+            mock.patch.object(
+                QualificationStore,
+                "require_submission_authority",
+                return_value=authority,
+            ),
+            mock.patch.object(
+                transport_module.urlrequest,
+                "build_opener",
+                return_value=sender,
+            ) as build,
+        ):
+            recorded = submit_qualification_once(
+                self.qualification,
+                envelope,
+                clock=ClockSequence(at(600), at(2_441)),
+                **arguments,
+            )
+        build.assert_not_called()
+        self.assertEqual(sender.calls, [])
+        self.assertIs(
+            recorded.result.outcome,
+            QualificationTransportOutcome.UNKNOWN,
+        )
+        self.assertEqual(
+            recorded.result.detail_code,
+            "role_attestation_expired_after_authority",
+        )
+        self.assertEqual(
+            self.qualification.get_command(command.command_id).state,
+            "reconciling",
+        )
 
     def test_timeout_bad_status_redirect_oversize_and_bad_json_are_unknown(self) -> None:
         cases = (

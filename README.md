@@ -9,8 +9,8 @@ This fork is becoming a Codex-first, agent-runtime-neutral trading desk for
 Hyperliquid. It can track an asset, ingest completed candles, calculate
 deterministic TA, record sourced sentiment evidence, classify the registered
 setup as buy/sell/nothing/unavailable, and evaluate a strategy after costs.
-Capital-bearing actions remain behind a separate local approval, isolated
-credential, and live-qualification path.
+Capital-bearing actions remain behind a separate controlled approval,
+isolated credential, and live-qualification path.
 
 The immediate objective is infrastructure learning, not a profitability
 claim: every analysis, abstention, staged bracket, approval reference,
@@ -41,10 +41,11 @@ staged under an explicit `profitability_qualified: false` grant.
 | Reduce-only close/cancel/same-nonce recovery | Implemented with durable permit, outbox, dispatch and reconciliation |
 | Isolated credential provider | Schema-v3 native role readers, sealed provisioner and nonprinting UID probe implemented; exact pack install and live pre/post-reboot probe evidence pending; no key present |
 | Always-on serialized executor runtime | Implemented with fenced lease, daily-loss sync, strict recovery priority and graceful drain |
-| Direct attended control CLI | Implemented; confirmation is read from `/dev/tty`, never MCP/chat/stdin |
-| TESTNET qualification canary/close core | Typed GTC/query/cancel and full-residual close semantics, pinned SDK 0.24.0 signing/independent recovery, dormant one-shot sender, advisory WS decoder, schema-v11 authority state, schema-v2 global nonce binding and a role-bound terminal qualification surface implemented; submission authority stays compiled off and no complete live lifecycle worker is promoted |
+| Direct attended control CLI | Implemented as an administrative fallback; confirmation is read from `/dev/tty`, never argv/stdin/MCP |
+| Future remote TESTNET approval | Reserved design: exact `execute trade <proposal-id>` over one immutable, short-lived, fully risk-bound proposal; not implemented, and bare/free-form chat is not authority |
+| TESTNET qualification canary/close core | Schema-v12 typed GTC/query/cancel/terminal and full-residual close semantics, pinned SDK 0.24.0 signing/independent recovery, pre-key/pre-send role fences, one fresh attended same-CLOID cancel successor, dormant bounded foreground worker, one-shot sender and advisory WS decoder implemented; submission stays compiled off and no live venue qualification has run |
 | macOS storage/ACL/install plan | Credential-free, rollback-safe plan/apply artifacts implemented; not applied; encryption, reboot and exhaustion evidence pending |
-| Local Ubuntu VM egress router | Secret-free router/Lima plans and immutable public-input replay implemented; host/guest apply, VM creation and live qualification pending; not VPN-qualified |
+| Local Ubuntu VM egress router | Public-input replay plus an apply-disabled root media/host-tool specification implemented; all root/Lima/VM/guest/network phases and live qualification pending; not VPN-qualified |
 | Live Hyperliquid testnet | **No account configured; first responsible write remains blocked because submission/lifecycle promotion and commissioning gates are incomplete** |
 | Live Hyperliquid mainnet | **Hard-disabled in store, signer and transport** |
 
@@ -90,7 +91,7 @@ bounded MCP research tools + local research database
 non-authoritative TESTNET staging inbox
         |
         v
-direct-terminal approval + atomic execution store (not MCP/chat)
+administrative `/dev/tty` approval fallback + atomic execution store
         |
         v
 daily-loss sync + independent reconciliation + protection watchdog
@@ -110,7 +111,9 @@ immutable fill/fee/slippage/PnL review by exact component version
 
 Agents explain and route evidence. Deterministic code owns indicators,
 classification, risk arithmetic, hashes, state transitions, signing policy,
-and reconciliation. A chat message is never approval.
+and reconciliation. Free-form chat is never approval. A separate future
+TESTNET lane may accept only the exact `execute trade <proposal-id>` command
+for an immutable, expiring, single-use proposal; that lane is not implemented.
 
 ## Codex/ChatGPT plugin
 
@@ -378,8 +381,10 @@ The execution path now includes:
 - immutable projection of command states plus fully evidenced parent and
   recovery-close fills into the learning ledger.
 
-There is intentionally no execution MCP tool. A chat message is not a trusted
-approval, and the model process never receives the wallet object. The macOS
+There is intentionally no execution MCP tool. The current `/dev/tty` HMAC path
+is the administrative fallback; the reserved proposal-ID chat provenance lane
+is not implemented or connected to the signer/store. The model process never
+receives the wallet object. The macOS
 launchd executor template is separate from the credential-free research
 service. Linux execution is not advertised because no Linux secret provider
 is implemented; the systemd template is for the credential-free research/MCP
@@ -400,10 +405,12 @@ account (see the [full qualification checklist](docs/testnet_qualification.md)):
 8. restart with zero unresolved outbox records;
 9. final flat account with no orphan orders.
 
-This is a target checklist, not the current CLI surface. The GTC canary,
-cancel and ordinary-close semantics now have an isolated durable core plus a
-pinned SDK signer and independent recovery verifier, but their direct-terminal
-CLI remains disabled. A credential-free advisory WebSocket decoder and local
+This is a target checklist, not evidence of a completed live run. The GTC
+canary, paired queries, cancel, terminal reconciliation, one fresh
+read-proven-open cancel successor and ordinary-close semantics now have an
+isolated schema-v12 core, pinned SDK signer/independent recovery verifier and a
+complete foreground orchestration path. Its submission gate remains compiled
+off, so it cannot load the key or reach the venue. A credential-free advisory WebSocket decoder and local
 accept-then-drop/crash harness exist, but live WebSocket adaptation and
 real-request response-drop forwarding remain commissioning gaps tracked in
 [`docs/testnet_commissioning.md`](docs/testnet_commissioning.md); the first

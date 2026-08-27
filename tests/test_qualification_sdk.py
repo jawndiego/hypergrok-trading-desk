@@ -31,6 +31,10 @@ from trading_harness.qualification_signer import (
     QualificationSigningAccount,
 )
 from trading_harness.qualification_store import QualificationStore
+from trading_harness.qualification_role_attestation import (
+    QualificationRoleAttestationStage,
+    collect_testnet_user_role_attestation,
+)
 from trading_harness.testnet_qualification import (
     QualificationAttemptPhase,
     build_attended_close_intent,
@@ -80,6 +84,45 @@ def retained_for_wallet(*, positions=None):
         user_role_response={"role": "agent", "data": {"user": MAIN_ACCOUNT}},
         at=NOW,
     )
+
+
+def record_pre_key_role(
+    store: QualificationStore,
+    intent,
+    authority,
+    *,
+    start_ms: int = 250,
+):
+    times = iter((at(start_ms), at(start_ms + 10), at(start_ms + 20)))
+
+    def transport(method, endpoint, payload):
+        del method, endpoint
+        return {
+            "role": "agent",
+            "data": {"user": intent.main_account_address},
+        }
+
+    attestation = collect_testnet_user_role_attestation(
+        api_wallet_address=intent.api_wallet_address,
+        expected_main_account_address=intent.main_account_address,
+        stage=QualificationRoleAttestationStage.PRE_KEY,
+        command_id=authority.command_id,
+        phase=authority.phase,
+        action_hash=authority.action_hash,
+        signing_authority_hash=authority.authority_hash,
+        worker_id=authority.worker_id,
+        fencing_token=authority.fencing_token,
+        attempt_id=None,
+        signed_evidence_hash=None,
+        transport=transport,
+        clock=lambda: next(times),
+    )
+    store.record_role_attestation(
+        attestation,
+        lane="qualification",
+        at=at(start_ms + 30),
+    )
+    return attestation
 
 
 def sdk_canary(*, account_id: str = ACCOUNT_ID):
@@ -156,6 +199,11 @@ class PinnedQualificationSdkTests(unittest.TestCase):
         )
         self.durable_policy = sdk_policy(
             account_id=self.execution_fixture.store.account_id
+        )
+        record_pre_key_role(
+            self.authority_store,
+            self.durable_intent,
+            self.durable_authority,
         )
 
     def tearDown(self) -> None:
@@ -607,6 +655,11 @@ class PinnedQualificationSdkStoreIntegrationTests(ExecutionStoreTestCase):
             at=at(200),
         )
         policy = sdk_policy(account_id=self.store.account_id)
+        pre_key_role = record_pre_key_role(
+            qualification,
+            intent,
+            signing,
+        )
         nonce_authority = PersistentNonceAllocator(
             Path(self.temporary.name) / "nonce.sqlite3",
             signer_address=WALLET_ADDRESS,
@@ -632,6 +685,7 @@ class PinnedQualificationSdkStoreIntegrationTests(ExecutionStoreTestCase):
             policy=policy,
             signed=signed,
             signature_verifier=recover_qualification_signer,
+            pre_key_role_attestation_hash=pre_key_role.attestation_hash,
             worker_id="qualification-worker",
             fencing_token=claim.fencing_token,
             at=at(400),

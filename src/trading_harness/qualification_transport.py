@@ -26,7 +26,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from .canonical import canonical_json, domain_hash
-from .errors import HarnessError, StateConflict, ValidationError
+from .errors import HarnessError, RecordNotFound, StateConflict, ValidationError
 from .hyperliquid_wire import HyperliquidNetwork
 from .qualification_signer import SignedQualificationEnvelope
 from .testnet_qualification import (
@@ -67,6 +67,7 @@ _UNKNOWN_DETAILS = frozenset(
         "http_status_not_200",
         "invalid_response",
         "expired_after_authority",
+        "role_attestation_expired_after_authority",
         "clock_invalid_after_authority",
         "point_of_no_return_crash",
     }
@@ -477,6 +478,7 @@ def freeze_qualification_transport_result(
     if type(authority) is not QualificationSubmissionAuthority:
         raise TypeError("authority must be exact QualificationSubmissionAuthority")
     signed.verify_integrity()
+    authority.verify_integrity()
     checked_attempt = _identifier(attempt_id, "attempt_id")
     checked_signed = _hash(signed_evidence_hash, "signed_evidence_hash")
     if type(attempted_at_ms) is not int:
@@ -494,6 +496,7 @@ def freeze_qualification_transport_result(
         or attempted_at_ms < _datetime_ms(authority.issued_at, "authority.issued_at")
         or attempted_at_ms
         >= _datetime_ms(authority.lease_expires_at, "authority.lease_expires_at")
+        or attempted_at_ms >= authority.pre_send_expires_at_ms
         or attempted_at_ms < signed.signed_at_ms
         or attempted_at_ms >= signed.expires_after_ms
     ):
@@ -719,7 +722,15 @@ def submit_qualification_once(
         raise QualificationSubmissionError(
             "qualification signed evidence hash differs before submission"
         )
-    durable_workflow = store.load_workflow(signed.command_id)
+    cancel_reauthorization_store = None
+    try:
+        durable_workflow = store.load_workflow(signed.command_id)
+    except RecordNotFound:
+        from .qualification_cancel_store import CancelReauthorizationStore
+
+        cancel_reauthorization_store = CancelReauthorizationStore(store)
+        reauthorization = cancel_reauthorization_store.get(signed.command_id)
+        durable_workflow = store.load_workflow(reauthorization.source_command_id)
     if durable_workflow.workflow_hash != current_workflow.workflow_hash:
         raise StateConflict("qualification workflow is stale before submission")
     _require_absolute_deadline_support()
@@ -741,14 +752,24 @@ def submit_qualification_once(
     # This is the sole point-of-no-return transition.  It is compiled off in
     # production today.  A later promoted implementation must atomically move
     # the prepared attempt to sending before returning this authority.
-    authority = store.require_submission_authority(
-        signed.command_id,
-        checked_attempt,
-        checked_signed,
-        worker_id=checked_worker,
-        fencing_token=fencing_token,
-        at=authority_requested_at,
-    )
+    if cancel_reauthorization_store is None:
+        authority = store.require_submission_authority(
+            signed.command_id,
+            checked_attempt,
+            checked_signed,
+            worker_id=checked_worker,
+            fencing_token=fencing_token,
+            at=authority_requested_at,
+        )
+    else:
+        authority = cancel_reauthorization_store.require_submission_authority(
+            signed.command_id,
+            attempt_id=checked_attempt,
+            signed_evidence_hash=checked_signed,
+            worker_id=checked_worker,
+            fencing_token=fencing_token,
+            at=authority_requested_at,
+        )
 
     try:
         if type(authority) is not QualificationSubmissionAuthority:
@@ -758,7 +779,7 @@ def submit_qualification_once(
             authority.lease_expires_at,
             "authority.lease_expires_at",
         )
-        _hash(authority.authority_hash, "authority.authority_hash")
+        authority.verify_integrity()
         if (
             authority.command_id != signed.command_id
             or authority.phase is not signed.phase
@@ -772,6 +793,8 @@ def submit_qualification_once(
             or authority.fencing_token != fencing_token
             or authority.fencing_token != signed.fencing_token
             or authority_lease_ms != signed.lease_expires_at_ms
+            or authority.pre_send_expires_at_ms
+            <= authority_requested_at_ms
             or authority_requested_at_ms < authority_issued_ms
             or authority_requested_at_ms >= authority_lease_ms
         ):
@@ -853,6 +876,11 @@ def submit_qualification_once(
         or send_at_ms >= authority_lease_ms
     ):
         skip_detail = "expired_after_authority"
+    elif (
+        skip_detail is None
+        and send_at_ms >= authority.pre_send_expires_at_ms
+    ):
+        skip_detail = "role_attestation_expired_after_authority"
 
     if skip_detail is not None:
         # Authority consumption is conservatively treated as point of no
@@ -917,12 +945,20 @@ def submit_qualification_once(
         except Exception as error:
             raise QualificationPostPONRFailure("store_transition_failed") from error
     try:
-        updated = store.record_transport_result(
-            signed.command_id,
-            current_workflow=current_workflow,
-            result=result,
-            at=recorded_at,
-        )
+        if cancel_reauthorization_store is None:
+            updated = store.record_transport_result(
+                signed.command_id,
+                current_workflow=current_workflow,
+                result=result,
+                at=recorded_at,
+            )
+        else:
+            cancel_reauthorization_store.record_transport_result(
+                signed.command_id,
+                result,
+                at=recorded_at,
+            )
+            updated = current_workflow
     except Exception as error:
         raise QualificationPostPONRFailure("store_transition_failed") from error
     return RecordedQualificationSubmission(workflow=updated, result=result)
@@ -946,6 +982,7 @@ def freeze_point_of_no_return_crash_result(
     if type(authority) is not QualificationSubmissionAuthority:
         raise TypeError("authority must be exact QualificationSubmissionAuthority")
     signed.verify_integrity()
+    authority.verify_integrity()
     if type(attempted_at_ms) is not int:
         raise TypeError("attempted_at_ms must be int")
     issued_ms = _datetime_ms(authority.issued_at, "authority.issued_at")
@@ -966,6 +1003,7 @@ def freeze_point_of_no_return_crash_result(
         or attempted_at_ms < signed.signed_at_ms
         or attempted_at_ms >= signed.expires_after_ms
         or attempted_at_ms >= lease_ms
+        or attempted_at_ms >= authority.pre_send_expires_at_ms
     ):
         raise StateConflict("crash-unknown authority differs from signed evidence")
     return _freeze_result(

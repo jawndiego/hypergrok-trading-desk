@@ -1,7 +1,7 @@
 """Durable TESTNET-only state for attended qualification workflows.
 
 This store is an internal wrapper over the exact :class:`ExecutionStore`
-database and its schema-v11 qualification tables.  It is intentionally not a
+database and its schema-v12 qualification tables.  It is intentionally not a
 sender.  Its final public boundary stops at a single-use submission authority;
 no function in this module calls a signer, credential provider, SDK, HTTP
 client, or venue endpoint.
@@ -36,6 +36,11 @@ from .errors import (
 from .execution_store import ExecutionStore
 from .hyperliquid_wire import HyperliquidNetwork
 from .policy import decimal_add, decimal_subtract, exact_decimal
+from .qualification_role_attestation import (
+    QualificationRoleAttestationStage,
+    TestnetUserRoleAttestation,
+    testnet_user_role_attestation_from_dict,
+)
 from .testnet_qualification import (
     QUALIFICATION_WORKFLOW_HASH_DOMAIN,
     QualificationAction,
@@ -537,11 +542,41 @@ class QualificationSubmissionAuthority:
     fencing_token: int
     issued_at: datetime
     lease_expires_at: datetime
+    pre_send_attestation_hash: str
+    pre_send_expires_at_ms: int
     authority_hash: str
+
+    def verify_integrity(self) -> None:
+        _identifier(self.command_id, "command_id")
+        if type(self.phase) is not QualificationAttemptPhase:
+            raise TypeError("phase must be exact QualificationAttemptPhase")
+        _identifier(self.attempt_id, "attempt_id")
+        for field in (
+            "signed_evidence_hash",
+            "action_hash",
+            "wire_hash",
+            "pre_send_attestation_hash",
+            "authority_hash",
+        ):
+            _hash(getattr(self, field), field)
+        _identifier(self.worker_id, "worker_id")
+        if type(self.nonce) is not int or self.nonce < 0:
+            raise ValidationError("nonce must be a nonnegative integer")
+        if type(self.fencing_token) is not int or self.fencing_token <= 0:
+            raise ValidationError("fencing_token must be a positive integer")
+        issued = _utc(self.issued_at, "issued_at")
+        lease = _utc(self.lease_expires_at, "lease_expires_at")
+        if (
+            type(self.pre_send_expires_at_ms) is not int
+            or self.pre_send_expires_at_ms < 0
+            or not issued < lease
+            or _milliseconds(issued) >= self.pre_send_expires_at_ms
+        ):
+            raise ValidationError("submission authority expiry is invalid")
 
 
 class QualificationStore:
-    """Exact schema-v11 qualification state over one execution database."""
+    """Exact schema-v12 qualification state over one execution database."""
 
     def __init__(self, execution_store: ExecutionStore) -> None:
         if type(execution_store) is not ExecutionStore:
@@ -549,6 +584,437 @@ class QualificationStore:
         if execution_store.environment is not Environment.TESTNET:
             raise ValidationError("qualification store is TESTNET-only")
         self.execution_store = execution_store
+
+    @staticmethod
+    def _role_attestation_record(
+        attestation: TestnetUserRoleAttestation,
+        *,
+        lane: str,
+        content_hash: str,
+    ) -> dict[str, object]:
+        return {
+            "attestation_hash": attestation.attestation_hash,
+            "lane": lane,
+            "command_id": attestation.command_id,
+            "phase": attestation.phase.value,
+            "stage": attestation.stage.value,
+            "action_hash": attestation.action_hash,
+            "signing_authority_hash": attestation.signing_authority_hash,
+            "attempt_id": attestation.attempt_id,
+            "signed_evidence_hash": attestation.signed_evidence_hash,
+            "worker_id": attestation.worker_id,
+            "fencing_token": attestation.fencing_token,
+            "endpoint": "https://api.hyperliquid-testnet.xyz/info",
+            "main_account_address": attestation.expected_main_account_address,
+            "api_wallet_address": attestation.api_wallet_address,
+            "first_response_hash": attestation.canonical_response_hashes[0],
+            "second_response_hash": attestation.canonical_response_hashes[1],
+            "started_at_ms": attestation.collection_started_at_ms,
+            "first_received_at_ms": attestation.first_received_at_ms,
+            "second_received_at_ms": attestation.second_received_at_ms,
+            "expires_at_ms": attestation.expires_at_ms,
+            "content_hash": content_hash,
+        }
+
+    @classmethod
+    def _role_attestation_from_row(
+        cls,
+        row: Mapping[str, object],
+        *,
+        at: datetime | None = None,
+    ) -> TestnetUserRoleAttestation:
+        payload = _decode(
+            row["payload_json"],
+            row["content_hash"],
+            field="qualification role attestation",
+        )
+        if not isinstance(payload, dict):
+            raise StorageError("qualification role attestation is not an object")
+        try:
+            attestation = testnet_user_role_attestation_from_dict(payload)
+            attestation.verify_integrity(at=at)
+        except (TypeError, ValueError, ValidationError, StateConflict) as error:
+            raise StorageError("qualification role attestation is invalid") from error
+        material = cls._role_attestation_record(
+            attestation,
+            lane=str(row["lane"]),
+            content_hash=str(row["content_hash"]),
+        )
+        if (
+            row["attestation_hash"] != attestation.attestation_hash
+            or row["command_id"] != attestation.command_id
+            or row["phase"] != attestation.phase.value
+            or row["stage"] != attestation.stage.value
+            or row["action_hash"] != attestation.action_hash
+            or row["signing_authority_hash"]
+            != attestation.signing_authority_hash
+            or row["attempt_id"] != attestation.attempt_id
+            or row["signed_evidence_hash"] != attestation.signed_evidence_hash
+            or row["worker_id"] != attestation.worker_id
+            or int(row["fencing_token"]) != attestation.fencing_token
+            or row["endpoint"] != "https://api.hyperliquid-testnet.xyz/info"
+            or row["main_account_address"]
+            != attestation.expected_main_account_address
+            or row["api_wallet_address"] != attestation.api_wallet_address
+            or row["first_response_hash"]
+            != attestation.canonical_response_hashes[0]
+            or row["second_response_hash"]
+            != attestation.canonical_response_hashes[1]
+            or int(row["started_at_ms"])
+            != attestation.collection_started_at_ms
+            or int(row["first_received_at_ms"])
+            != attestation.first_received_at_ms
+            or int(row["second_received_at_ms"])
+            != attestation.second_received_at_ms
+            or int(row["expires_at_ms"]) != attestation.expires_at_ms
+            or _record_hash("role-attestation", material) != row["record_hash"]
+        ):
+            raise StorageError("qualification role attestation row differs")
+        return attestation
+
+    @staticmethod
+    def _attempt_role_binding_from_row(
+        row: Mapping[str, object],
+    ) -> dict[str, object]:
+        payload = _decode(
+            row["payload_json"],
+            row["content_hash"],
+            field="qualification attempt role binding",
+        )
+        if not isinstance(payload, dict):
+            raise StorageError("qualification attempt role binding is invalid")
+        expected = {
+            "schema_version": "testnet_qualification_attempt_role_binding.v1",
+            "lane": row["lane"],
+            "attempt_id": row["attempt_id"],
+            "command_id": row["command_id"],
+            "phase": row["phase"],
+            "pre_key_attestation_hash": row["pre_key_attestation_hash"],
+            "pre_send_attestation_hash": row["pre_send_attestation_hash"],
+        }
+        if (
+            payload != expected
+            or _record_hash(
+                "attempt-role-binding",
+                {**payload, "content_hash": row["content_hash"]},
+            )
+            != row["record_hash"]
+        ):
+            raise StorageError("qualification attempt role binding row differs")
+        return payload
+
+    def record_role_attestation(
+        self,
+        attestation: TestnetUserRoleAttestation,
+        *,
+        lane: str,
+        at: datetime,
+    ) -> TestnetUserRoleAttestation:
+        """Persist one current pre-key/pre-send mapping fence."""
+
+        if type(attestation) is not TestnetUserRoleAttestation:
+            raise TypeError("attestation must be exact TestnetUserRoleAttestation")
+        if lane not in {"qualification", "cancel_reauthorization"}:
+            raise ValidationError("qualification role attestation lane is invalid")
+        checked_at = _utc(at, "at")
+        attestation.verify_integrity(at=checked_at)
+        payload_json, content_hash = _payload(attestation.as_dict())
+        material = self._role_attestation_record(
+            attestation, lane=lane, content_hash=content_hash
+        )
+        with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
+            if lane == "qualification":
+                command, outbox, step = self._require_claim_locked(
+                    connection,
+                    command_id=attestation.command_id,
+                    worker_id=attestation.worker_id,
+                    fencing_token=attestation.fencing_token,
+                    at=checked_at,
+                )
+                signing_row = connection.execute(
+                    """
+                    SELECT * FROM execution_qualification_signing_authorities
+                    WHERE command_id = ? AND phase = ?
+                    """,
+                    (attestation.command_id, attestation.phase.value),
+                ).fetchone()
+                if signing_row is None:
+                    raise RecordNotFound("qualification signing authority is missing")
+                self._verify_signing_authority_row(signing_row)
+                intent = self._intent_from_payload(json.loads(command.intent_json))
+                attempt_row = connection.execute(
+                    """
+                    SELECT * FROM execution_qualification_attempts
+                    WHERE command_id = ? AND phase = ?
+                    """,
+                    (attestation.command_id, attestation.phase.value),
+                ).fetchone()
+                attempt = (
+                    None
+                    if attempt_row is None
+                    else self._attempt_from_row(attempt_row)
+                )
+                signed_row = (
+                    None
+                    if attempt is None
+                    else connection.execute(
+                        """
+                        SELECT * FROM execution_qualification_signed_evidence
+                        WHERE evidence_hash = ?
+                        """,
+                        (attempt.signed_evidence_hash,),
+                    ).fetchone()
+                )
+                exact = (
+                    command.current_phase == attestation.phase.value
+                    and step.phase is attestation.phase
+                    and step.action_hash == attestation.action_hash
+                    and signing_row["authority_hash"]
+                    == attestation.signing_authority_hash
+                    and attestation.collection_started_at_ms
+                    >= _milliseconds(
+                        _parse_time(signing_row["issued_at"], "issued_at")
+                    )
+                    and intent.main_account_address
+                    == attestation.expected_main_account_address
+                    and intent.api_wallet_address == attestation.api_wallet_address
+                    and outbox.worker_id == attestation.worker_id
+                    and outbox.fencing_token == attestation.fencing_token
+                )
+                if attestation.stage is QualificationRoleAttestationStage.PRE_KEY:
+                    exact = exact and step.state == "claimed" and attempt is None
+                else:
+                    exact = (
+                        exact
+                        and step.state == "prepared"
+                        and attempt is not None
+                        and outbox.current_attempt_id == attestation.attempt_id
+                        and attempt.attempt_id == attestation.attempt_id
+                        and attempt.signed_evidence_hash
+                        == attestation.signed_evidence_hash
+                        and signed_row is not None
+                        and attestation.second_received_at_ms
+                        >= int(signed_row["signed_at_ms"])
+                        and attestation.second_received_at_ms
+                        >= _milliseconds(attempt.prepared_at)
+                    )
+            else:
+                row = connection.execute(
+                    """
+                    SELECT * FROM execution_qualification_cancel_reauthorizations
+                    WHERE reauthorization_id = ?
+                    """,
+                    (attestation.command_id,),
+                ).fetchone()
+                signing_row = connection.execute(
+                    """
+                    SELECT * FROM execution_qualification_cancel_reauth_signing_authorities
+                    WHERE reauthorization_id = ?
+                    """,
+                    (attestation.command_id,),
+                ).fetchone()
+                if row is None or signing_row is None:
+                    raise RecordNotFound(
+                        "cancel reauthorization role authority is missing"
+                    )
+                from .qualification_cancel_store import CancelReauthorizationStore
+
+                command = CancelReauthorizationStore(self)._from_row(row)
+                intent = command.intent()
+                attempt_row = connection.execute(
+                    """
+                    SELECT * FROM execution_qualification_cancel_reauth_attempts
+                    WHERE reauthorization_id = ?
+                    """,
+                    (attestation.command_id,),
+                ).fetchone()
+                parsed_attempt = (
+                    None
+                    if attempt_row is None
+                    else CancelReauthorizationStore._attempt_from_row(attempt_row)
+                )
+                exact = (
+                    attestation.phase is QualificationAttemptPhase.CANCEL
+                    and command.worker_id == attestation.worker_id
+                    and command.fencing_token == attestation.fencing_token
+                    and command.action_hash == attestation.action_hash
+                    and signing_row["authority_hash"]
+                    == attestation.signing_authority_hash
+                    and attestation.collection_started_at_ms
+                    >= _milliseconds(
+                        _parse_time(signing_row["issued_at"], "issued_at")
+                    )
+                    and intent.main_account_address
+                    == attestation.expected_main_account_address
+                    and intent.api_wallet_address == attestation.api_wallet_address
+                )
+                if attestation.stage is QualificationRoleAttestationStage.PRE_KEY:
+                    exact = (
+                        exact
+                        and command.state == "claimed"
+                        and attempt_row is None
+                        and attestation.attempt_id is None
+                    )
+                else:
+                    exact = (
+                        exact
+                        and command.state == "prepared"
+                        and parsed_attempt is not None
+                        and command.current_attempt_id == attestation.attempt_id
+                        and parsed_attempt.attempt_id == attestation.attempt_id
+                        and parsed_attempt.signed.evidence_hash
+                        == attestation.signed_evidence_hash
+                        and attestation.second_received_at_ms
+                        >= parsed_attempt.signed.signed_at_ms
+                        and attestation.second_received_at_ms
+                        >= _milliseconds(parsed_attempt.prepared_at)
+                    )
+            if not exact:
+                raise StateConflict(
+                    "qualification role attestation differs from durable authority"
+                )
+            existing = connection.execute(
+                """
+                SELECT * FROM execution_qualification_role_attestations
+                WHERE lane = ? AND command_id = ? AND phase = ? AND stage = ?
+                """,
+                (
+                    lane,
+                    attestation.command_id,
+                    attestation.phase.value,
+                    attestation.stage.value,
+                ),
+            ).fetchone()
+            if existing is not None:
+                persisted = self._role_attestation_from_row(existing, at=checked_at)
+                if persisted == attestation:
+                    return attestation
+                raise StateConflict("qualification role attestation stage is consumed")
+            connection.execute(
+                """
+                INSERT INTO execution_qualification_role_attestations (
+                    attestation_hash, lane, command_id, phase, stage,
+                    action_hash, signing_authority_hash, attempt_id,
+                    signed_evidence_hash, worker_id, fencing_token, endpoint,
+                    main_account_address, api_wallet_address,
+                    first_response_hash, second_response_hash, started_at_ms,
+                    first_received_at_ms, second_received_at_ms, expires_at_ms,
+                    payload_json, content_hash, record_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attestation.attestation_hash,
+                    lane,
+                    attestation.command_id,
+                    attestation.phase.value,
+                    attestation.stage.value,
+                    attestation.action_hash,
+                    attestation.signing_authority_hash,
+                    attestation.attempt_id,
+                    attestation.signed_evidence_hash,
+                    attestation.worker_id,
+                    attestation.fencing_token,
+                    "https://api.hyperliquid-testnet.xyz/info",
+                    attestation.expected_main_account_address,
+                    attestation.api_wallet_address,
+                    attestation.canonical_response_hashes[0],
+                    attestation.canonical_response_hashes[1],
+                    attestation.collection_started_at_ms,
+                    attestation.first_received_at_ms,
+                    attestation.second_received_at_ms,
+                    attestation.expires_at_ms,
+                    payload_json,
+                    content_hash,
+                    _record_hash("role-attestation", material),
+                ),
+            )
+            if attestation.stage is QualificationRoleAttestationStage.PRE_SEND:
+                binding_row = connection.execute(
+                    """
+                    SELECT * FROM execution_qualification_attempt_role_bindings
+                    WHERE lane = ? AND attempt_id = ? AND command_id = ?
+                    """,
+                    (lane, attestation.attempt_id, attestation.command_id),
+                ).fetchone()
+                if binding_row is None or binding_row["pre_send_attestation_hash"] is not None:
+                    raise StateConflict(
+                        "qualification attempt role binding is missing or consumed"
+                    )
+                binding_payload = self._attempt_role_binding_from_row(binding_row)
+                updated_payload = dict(binding_payload)
+                updated_payload["pre_send_attestation_hash"] = attestation.attestation_hash
+                updated_json, updated_hash = _payload(updated_payload)
+                record = {
+                    **updated_payload,
+                    "content_hash": updated_hash,
+                }
+                changed = connection.execute(
+                    """
+                    UPDATE execution_qualification_attempt_role_bindings SET
+                        pre_send_attestation_hash = ?, payload_json = ?,
+                        content_hash = ?, record_hash = ?
+                    WHERE lane = ? AND attempt_id = ?
+                      AND pre_send_attestation_hash IS NULL
+                    """,
+                    (
+                        attestation.attestation_hash,
+                        updated_json,
+                        updated_hash,
+                        _record_hash("attempt-role-binding", record),
+                        lane,
+                        attestation.attempt_id,
+                    ),
+                )
+                if changed.rowcount != 1:
+                    raise StateConflict(
+                        "qualification role binding changed concurrently"
+                    )
+        return attestation
+
+    def require_current_role_attestation(
+        self,
+        *,
+        lane: str,
+        command_id: str,
+        phase: QualificationAttemptPhase,
+        stage: QualificationRoleAttestationStage,
+        action_hash: str,
+        signing_authority_hash: str,
+        worker_id: str,
+        fencing_token: int,
+        attempt_id: str | None,
+        signed_evidence_hash: str | None,
+        at: datetime,
+    ) -> TestnetUserRoleAttestation:
+        """Load one exact unexpired stage fence from a query-only snapshot."""
+
+        checked_at = _utc(at, "at")
+        connection = self.execution_store._connect()  # type: ignore[attr-defined]
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_role_attestations
+                WHERE lane = ? AND command_id = ? AND phase = ? AND stage = ?
+                """,
+                (lane, command_id, phase.value, stage.value),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            raise RecordNotFound("qualification role attestation is missing")
+        attestation = self._role_attestation_from_row(row, at=checked_at)
+        if (
+            attestation.action_hash != action_hash
+            or attestation.signing_authority_hash != signing_authority_hash
+            or attestation.worker_id != worker_id
+            or attestation.fencing_token != fencing_token
+            or attestation.attempt_id != attempt_id
+            or attestation.signed_evidence_hash != signed_evidence_hash
+        ):
+            raise StateConflict("qualification role attestation binding differs")
+        return attestation
 
     @staticmethod
     def _snapshot_record(
@@ -1108,9 +1574,9 @@ class QualificationStore:
             raise StorageError("qualification attempt record hash differs")
         return record
 
-    @classmethod
     def _submission_authority_from_row(
-        cls,
+        self,
+        connection,
         row: Mapping[str, object],
         attempt: QualificationAttemptRecord,
     ) -> QualificationSubmissionAuthority:
@@ -1134,6 +1600,8 @@ class QualificationStore:
             "fencing_token": attempt.fencing_token,
             "issued_at": str(row["issued_at"]),
             "lease_expires_at": str(row["lease_expires_at"]),
+            "pre_send_attestation_hash": row["pre_send_attestation_hash"],
+            "pre_send_expires_at_ms": int(row["pre_send_expires_at_ms"]),
             "environment": "testnet",
         }
         if payload != expected:
@@ -1149,6 +1617,10 @@ class QualificationStore:
             or row["signed_evidence_hash"] != attempt.signed_evidence_hash
             or row["worker_id"] != attempt.worker_id
             or int(row["fencing_token"]) != attempt.fencing_token
+            or row["pre_send_attestation_hash"]
+            != payload["pre_send_attestation_hash"]
+            or int(row["pre_send_expires_at_ms"])
+            != payload["pre_send_expires_at_ms"]
             or row["authority_hash"] != authority_hash
             or _record_hash(
                 "submission-authority",
@@ -1161,9 +1633,86 @@ class QualificationStore:
         lease_expires_at = _parse_time(
             row["lease_expires_at"], "lease_expires_at"
         )
-        if not issued_at < lease_expires_at:
+        role_row = connection.execute(
+            """
+            SELECT * FROM execution_qualification_role_attestations
+            WHERE attestation_hash = ?
+            """,
+            (row["pre_send_attestation_hash"],),
+        ).fetchone()
+        if role_row is None:
+            raise StorageError(
+                "qualification submission authority lost its role attestation"
+            )
+        role = self._role_attestation_from_row(role_row)
+        binding_row = connection.execute(
+            """
+            SELECT * FROM execution_qualification_attempt_role_bindings
+            WHERE lane = 'qualification' AND attempt_id = ?
+              AND command_id = ? AND phase = ?
+            """,
+            (attempt.attempt_id, attempt.command_id, attempt.phase.value),
+        ).fetchone()
+        signed_row = connection.execute(
+            """
+            SELECT * FROM execution_qualification_signed_evidence
+            WHERE evidence_hash = ?
+            """,
+            (attempt.signed_evidence_hash,),
+        ).fetchone()
+        if binding_row is None or signed_row is None:
+            raise StorageError(
+                "qualification submission authority lost its role chain"
+            )
+        binding = self._attempt_role_binding_from_row(binding_row)
+        pre_key_row = connection.execute(
+            """
+            SELECT * FROM execution_qualification_role_attestations
+            WHERE attestation_hash = ?
+            """,
+            (binding_row["pre_key_attestation_hash"],),
+        ).fetchone()
+        if pre_key_row is None:
+            raise StorageError(
+                "qualification submission authority lost its pre-key role"
+            )
+        pre_key = self._role_attestation_from_row(pre_key_row)
+        signed = self._signed_from_row(signed_row)
+        if (
+            not issued_at < lease_expires_at
+            or role_row["lane"] != "qualification"
+            or role.stage is not QualificationRoleAttestationStage.PRE_SEND
+            or role.command_id != attempt.command_id
+            or role.phase is not attempt.phase
+            or role.attempt_id != attempt.attempt_id
+            or role.signed_evidence_hash != attempt.signed_evidence_hash
+            or role.action_hash != attempt.action_hash
+            or role.worker_id != attempt.worker_id
+            or role.fencing_token != attempt.fencing_token
+            or role.attestation_hash != row["pre_send_attestation_hash"]
+            or role.expires_at_ms != int(row["pre_send_expires_at_ms"])
+            or binding["pre_key_attestation_hash"]
+            != pre_key.attestation_hash
+            or binding["pre_send_attestation_hash"] != role.attestation_hash
+            or pre_key_row["lane"] != "qualification"
+            or pre_key.stage is not QualificationRoleAttestationStage.PRE_KEY
+            or pre_key.command_id != attempt.command_id
+            or pre_key.phase is not attempt.phase
+            or pre_key.action_hash != attempt.action_hash
+            or pre_key.signing_authority_hash
+            != role.signing_authority_hash
+            or pre_key.worker_id != attempt.worker_id
+            or pre_key.fencing_token != attempt.fencing_token
+            or pre_key.attempt_id is not None
+            or pre_key.signed_evidence_hash is not None
+            or signed.evidence_hash != attempt.signed_evidence_hash
+            or signed.signing_authority_hash
+            != pre_key.signing_authority_hash
+            or pre_key.second_received_at_ms > signed.signed_at_ms
+            or pre_key.expires_at_ms <= signed.signed_at_ms
+        ):
             raise StorageError("qualification submission authority expiry is invalid")
-        return QualificationSubmissionAuthority(
+        result = QualificationSubmissionAuthority(
             command_id=attempt.command_id,
             phase=attempt.phase,
             attempt_id=attempt.attempt_id,
@@ -1175,8 +1724,14 @@ class QualificationStore:
             fencing_token=attempt.fencing_token,
             issued_at=issued_at,
             lease_expires_at=lease_expires_at,
+            pre_send_attestation_hash=str(
+                row["pre_send_attestation_hash"]
+            ),
+            pre_send_expires_at_ms=int(row["pre_send_expires_at_ms"]),
             authority_hash=authority_hash,
         )
+        result.verify_integrity()
+        return result
 
     @staticmethod
     def _require_exact_workflow(
@@ -1254,6 +1809,16 @@ class QualificationStore:
         reserved_notional = intent.reserved_notional
 
         with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
+            if connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_cancel_reauthorizations
+                WHERE reauthorization_id = ?
+                """,
+                (checked_command,),
+            ).fetchone() is not None:
+                raise StateConflict(
+                    "qualification command identity collides with cancel reauthorization"
+                )
             permit_row = connection.execute(
                 "SELECT * FROM execution_qualification_permits WHERE permit_id = ?",
                 (permit.permit_id,),
@@ -1313,6 +1878,16 @@ class QualificationStore:
                 raise AdmissionDenied(
                     "QUALIFICATION_ALREADY_ACTIVE",
                     "another qualification command is active",
+                )
+            if connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_cancel_reauthorizations
+                WHERE state NOT IN ('terminal', 'halted') LIMIT 1
+                """
+            ).fetchone() is not None:
+                raise AdmissionDenied(
+                    "CANCEL_REAUTHORIZATION_ACTIVE",
+                    "safety cancel reauthorization blocks qualification admission",
                 )
             unresolved_rows = connection.execute(
                 """
@@ -2023,6 +2598,15 @@ class QualificationStore:
                 """
             ).fetchone() is not None:
                 raise StateConflict("account recovery preempts qualification")
+            if connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_cancel_reauthorizations
+                WHERE state NOT IN ('terminal', 'halted') LIMIT 1
+                """
+            ).fetchone() is not None:
+                raise StateConflict(
+                    "safety cancel reauthorization preempts qualification"
+                )
             phase = QualificationAttemptPhase(command.current_phase)
             step_row = connection.execute(
                 """
@@ -2358,6 +2942,37 @@ class QualificationStore:
         action.verify_integrity()
         authority.verify_integrity()
         checked_at = _utc(at, "at")
+        probe = self.execution_store._connect()  # type: ignore[attr-defined]
+        try:
+            primary = probe.execute(
+                "SELECT 1 FROM execution_qualification_commands WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            reauthorization = probe.execute(
+                """
+                SELECT 1 FROM execution_qualification_cancel_reauthorizations
+                WHERE reauthorization_id = ?
+                """,
+                (checked_command,),
+            ).fetchone()
+        finally:
+            probe.close()
+        if primary is not None and reauthorization is not None:
+            raise StorageError("qualification command identity is cross-lane ambiguous")
+        if primary is None and reauthorization is not None:
+            from .qualification_cancel_store import CancelReauthorizationStore
+
+            return CancelReauthorizationStore(
+                self
+            ).require_current_signing_authority(
+                checked_command,
+                source_intent=intent,
+                action=action,
+                authority=authority,
+                worker_id=checked_worker,
+                fencing_token=fencing_token,
+                at=checked_at,
+            )
         connection = self.execution_store._connect()  # type: ignore[attr-defined]
         try:
             connection.execute("PRAGMA query_only = ON")
@@ -2397,6 +3012,19 @@ class QualificationStore:
                 WHERE severity = 'critical' AND state != 'closed' LIMIT 1
                 """
             ).fetchone()
+            role_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_role_attestations
+                WHERE lane = 'qualification' AND command_id = ?
+                  AND phase = ? AND stage = 'pre_key'
+                """,
+                (checked_command, step.phase.value),
+            ).fetchone()
+            if role_row is None:
+                raise StateConflict(
+                    "current pre-key userRole attestation is required"
+                )
+            role = self._role_attestation_from_row(role_row, at=checked_at)
             if (
                 command.intent_hash != intent.intent_hash
                 or command.intent_json != canonical_json(intent.as_dict())
@@ -2411,6 +3039,11 @@ class QualificationStore:
                 or outbox.current_attempt_id is not None
                 or active_attempt is not None
                 or critical is not None
+                or role.action_hash != action.action_hash
+                or role.signing_authority_hash != authority.authority_hash
+                or role.worker_id != checked_worker
+                or role.fencing_token != fencing_token
+                or role.attempt_id is not None
                 or authority.command_id != checked_command
                 or authority.action_hash != action.action_hash
                 or authority.worker_id != checked_worker
@@ -2478,6 +3111,7 @@ class QualificationStore:
         *,
         attempt_id: str,
         signed: QualificationSignedEvidence,
+        pre_key_role_attestation_hash: str | None,
         worker_id: str,
         fencing_token: int,
         at: datetime,
@@ -2487,6 +3121,14 @@ class QualificationStore:
         checked_command = _identifier(command_id, "command_id")
         checked_attempt = _identifier(attempt_id, "attempt_id")
         checked_worker = _identifier(worker_id, "worker_id")
+        checked_role = (
+            None
+            if pre_key_role_attestation_hash is None
+            else _hash(
+                pre_key_role_attestation_hash,
+                "pre_key_role_attestation_hash",
+            )
+        )
         if not isinstance(signed, QualificationSignedEvidence):
             raise TypeError("signed must be QualificationSignedEvidence")
         signed.verify_integrity()
@@ -2509,6 +3151,26 @@ class QualificationStore:
             if authority_row is None:
                 raise StateConflict("qualification signing authority is missing")
             self._verify_signing_authority_row(authority_row)
+            role_row = (
+                None
+                if checked_role is None
+                else connection.execute(
+                    """
+                    SELECT * FROM execution_qualification_role_attestations
+                    WHERE attestation_hash = ? AND lane = 'qualification'
+                      AND command_id = ? AND phase = ? AND stage = 'pre_key'
+                    """,
+                    (checked_role, checked_command, step.phase.value),
+                ).fetchone()
+            )
+            role_attestation = (
+                None
+                if role_row is None
+                else self._role_attestation_from_row(
+                    role_row,
+                    at=_EPOCH + timedelta(milliseconds=signed.signed_at_ms),
+                )
+            )
             if (
                 step.state != "claimed"
                 or signed.command_id != checked_command
@@ -2524,6 +3186,21 @@ class QualificationStore:
                 or signed.expires_after_ms > step.expires_at_ms
                 or outbox.current_attempt_id is not None
                 or outbox.attempt_count >= 2
+                or (
+                    checked_role is not None
+                    and (
+                        role_attestation is None
+                        or role_attestation.action_hash != step.action_hash
+                        or role_attestation.signing_authority_hash
+                        != authority_row["authority_hash"]
+                        or role_attestation.worker_id != checked_worker
+                        or role_attestation.fencing_token != fencing_token
+                        or role_attestation.second_received_at_ms
+                        > signed.signed_at_ms
+                        or role_attestation.expires_at_ms
+                        <= signed.signed_at_ms
+                    )
+                )
             ):
                 raise StateConflict("qualification signed evidence differs from claim")
             payload_json, content_hash = _payload(signed.material())
@@ -2562,6 +3239,41 @@ class QualificationStore:
                     _record_hash("signed-evidence", evidence_record),
                 ),
             )
+            if checked_role is not None:
+                binding_payload = {
+                    "schema_version": "testnet_qualification_attempt_role_binding.v1",
+                    "lane": "qualification",
+                    "attempt_id": checked_attempt,
+                    "command_id": checked_command,
+                    "phase": step.phase.value,
+                    "pre_key_attestation_hash": checked_role,
+                    "pre_send_attestation_hash": None,
+                }
+                binding_json, binding_content_hash = _payload(binding_payload)
+                connection.execute(
+                    """
+                    INSERT INTO execution_qualification_attempt_role_bindings (
+                        lane, attempt_id, command_id, phase,
+                        pre_key_attestation_hash, pre_send_attestation_hash,
+                        payload_json, content_hash, record_hash
+                    ) VALUES ('qualification', ?, ?, ?, ?, NULL, ?, ?, ?)
+                    """,
+                    (
+                        checked_attempt,
+                        checked_command,
+                        step.phase.value,
+                        checked_role,
+                        binding_json,
+                        binding_content_hash,
+                        _record_hash(
+                            "attempt-role-binding",
+                            {
+                                **binding_payload,
+                                "content_hash": binding_content_hash,
+                            },
+                        ),
+                    ),
+                )
             attempt_material = self._attempt_material(
                 attempt_id=checked_attempt,
                 command_id=checked_command,
@@ -2628,6 +3340,7 @@ class QualificationStore:
         policy: QualificationSignerPolicy,
         signed: SignedQualificationEnvelope,
         signature_verifier: QualificationSignatureVerifier,
+        pre_key_role_attestation_hash: str | None = None,
         worker_id: str,
         fencing_token: int,
         at: datetime,
@@ -2637,7 +3350,7 @@ class QualificationStore:
         This adds no signing or send capability.  It closes the former
         digest-only gap by requiring the full frozen wire and independently
         revalidating its typed action, account/API-wallet, lease and policy
-        bindings before the existing schema-v11 evidence is admitted.
+        bindings before the schema-v12 evidence and role fence are admitted.
         """
 
         from .qualification_signer import (
@@ -2683,6 +3396,7 @@ class QualificationStore:
             checked_command,
             attempt_id=attempt_id,
             signed=evidence,
+            pre_key_role_attestation_hash=pre_key_role_attestation_hash,
             worker_id=worker_id,
             fencing_token=fencing_token,
             at=at,
@@ -2748,6 +3462,43 @@ class QualificationStore:
             ).fetchone()
             if signing_row is None:
                 raise RecordNotFound("qualification signing authority is missing")
+            binding_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_attempt_role_bindings
+                WHERE lane = 'qualification' AND attempt_id = ?
+                  AND command_id = ? AND phase = ?
+                """,
+                (checked_attempt, checked_command, step.phase.value),
+            ).fetchone()
+            if binding_row is None:
+                raise RecordNotFound("qualification attempt role binding is missing")
+            binding_payload = _decode(
+                binding_row["payload_json"],
+                binding_row["content_hash"],
+                field="qualification attempt role binding",
+            )
+            if not isinstance(binding_payload, dict):
+                raise StorageError("qualification attempt role binding is invalid")
+            pre_key_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_role_attestations
+                WHERE attestation_hash = ?
+                """,
+                (binding_row["pre_key_attestation_hash"],),
+            ).fetchone()
+            pre_send_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_role_attestations
+                WHERE attestation_hash = ?
+                """,
+                (binding_row["pre_send_attestation_hash"],),
+            ).fetchone()
+            if pre_key_row is None or pre_send_row is None:
+                raise RecordNotFound("qualification role attestation chain is incomplete")
+            pre_key = self._role_attestation_from_row(pre_key_row)
+            pre_send = self._role_attestation_from_row(
+                pre_send_row, at=checked_at
+            )
             attempt = self._attempt_from_row(attempt_row)
             signed = self._signed_from_row(signed_row)
             self._verify_signing_authority_row(signing_row)
@@ -2778,16 +3529,149 @@ class QualificationStore:
                 or command.authorization_hash == ""
                 or _milliseconds(checked_at) >= signed.expires_after_ms
                 or _milliseconds(checked_at) >= step.expires_at_ms
+                or binding_payload
+                != {
+                    "schema_version": "testnet_qualification_attempt_role_binding.v1",
+                    "lane": "qualification",
+                    "attempt_id": checked_attempt,
+                    "command_id": checked_command,
+                    "phase": step.phase.value,
+                    "pre_key_attestation_hash": pre_key.attestation_hash,
+                    "pre_send_attestation_hash": pre_send.attestation_hash,
+                }
+                or _record_hash(
+                    "attempt-role-binding",
+                    {**binding_payload, "content_hash": binding_row["content_hash"]},
+                )
+                != binding_row["record_hash"]
+                or pre_key.stage is not QualificationRoleAttestationStage.PRE_KEY
+                or pre_send.stage is not QualificationRoleAttestationStage.PRE_SEND
+                or pre_key.action_hash != signed.action_hash
+                or pre_send.action_hash != signed.action_hash
+                or pre_key.signing_authority_hash
+                != signed.signing_authority_hash
+                or pre_send.signing_authority_hash
+                != signed.signing_authority_hash
+                or pre_send.attempt_id != checked_attempt
+                or pre_send.signed_evidence_hash != checked_signed
+                or pre_key.expires_at_ms <= signed.signed_at_ms
+                or pre_key.second_received_at_ms > signed.signed_at_ms
+                or pre_send.second_received_at_ms
+                < _milliseconds(attempt.prepared_at)
             ):
                 raise StateConflict("qualification attempt is not send-authorizable")
-            if QUALIFICATION_SUBMISSION_ENABLED:  # pragma: no cover - compiled off
+            if not QUALIFICATION_SUBMISSION_ENABLED:
                 raise StateConflict(
-                    "qualification submission flag cannot be enabled in this build"
+                    "qualification submission is disabled until an authenticated "
+                    "sender and complete post-send workflow are promoted"
                 )
-            raise StateConflict(
-                "qualification submission is disabled until an authenticated "
-                "sender and complete post-send workflow are promoted"
+            payload = {
+                "schema_version": "testnet_qualification_submission_authority.v1",
+                "command_id": checked_command,
+                "phase": step.phase.value,
+                "attempt_id": checked_attempt,
+                "signed_evidence_hash": checked_signed,
+                "nonce": attempt.nonce,
+                "action_hash": attempt.action_hash,
+                "wire_hash": attempt.wire_hash,
+                "worker_id": checked_worker,
+                "fencing_token": fencing_token,
+                "issued_at": _time(checked_at),
+                "lease_expires_at": _time(outbox.lease_expires_at),
+                "pre_send_attestation_hash": pre_send.attestation_hash,
+                "pre_send_expires_at_ms": pre_send.expires_at_ms,
+                "environment": "testnet",
+            }
+            authority_hash = domain_hash(
+                "trading-harness/qualification-submission-authority/v1",
+                payload,
             )
+            payload_json, content_hash = _payload(payload)
+            connection.execute(
+                """
+                INSERT INTO execution_qualification_submission_authorities (
+                    authority_hash, command_id, phase, attempt_id,
+                    signed_evidence_hash, worker_id, fencing_token, issued_at,
+                    lease_expires_at, pre_send_attestation_hash,
+                    pre_send_expires_at_ms, payload_json, content_hash,
+                    record_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    authority_hash,
+                    checked_command,
+                    step.phase.value,
+                    checked_attempt,
+                    checked_signed,
+                    checked_worker,
+                    fencing_token,
+                    _time(checked_at),
+                    _time(outbox.lease_expires_at),
+                    pre_send.attestation_hash,
+                    pre_send.expires_at_ms,
+                    payload_json,
+                    content_hash,
+                    _record_hash(
+                        "submission-authority",
+                        {**payload, "content_hash": content_hash},
+                    ),
+                ),
+            )
+            attempt_material = self._attempt_material(
+                attempt_id=attempt.attempt_id,
+                command_id=attempt.command_id,
+                phase=attempt.phase,
+                worker_id=attempt.worker_id,
+                fencing_token=attempt.fencing_token,
+                signed_evidence_hash=attempt.signed_evidence_hash,
+                transport_evidence_hash=None,
+                nonce=attempt.nonce,
+                action_hash=attempt.action_hash,
+                wire_hash=attempt.wire_hash,
+                state="sending",
+                prepared_at=attempt.prepared_at,
+                updated_at=checked_at,
+            )
+            changed = connection.execute(
+                """
+                UPDATE execution_qualification_attempts SET
+                    state = 'sending', updated_at = ?, record_hash = ?
+                WHERE attempt_id = ? AND state = 'prepared'
+                """,
+                (
+                    _time(checked_at),
+                    _record_hash("attempt", attempt_material),
+                    checked_attempt,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise StateConflict(
+                    "qualification attempt changed before submission authority"
+                )
+            self._write_step_locked(
+                connection,
+                step,
+                state="sending",
+                at=checked_at,
+            )
+            result = QualificationSubmissionAuthority(
+                command_id=checked_command,
+                phase=step.phase,
+                attempt_id=checked_attempt,
+                signed_evidence_hash=checked_signed,
+                nonce=attempt.nonce,
+                action_hash=attempt.action_hash,
+                wire_hash=attempt.wire_hash,
+                worker_id=checked_worker,
+                fencing_token=fencing_token,
+                issued_at=checked_at,
+                lease_expires_at=outbox.lease_expires_at,
+                pre_send_attestation_hash=pre_send.attestation_hash,
+                pre_send_expires_at_ms=pre_send.expires_at_ms,
+                authority_hash=authority_hash,
+            )
+            result.verify_integrity()
+            return result
 
     @staticmethod
     def _transport_record_material(
@@ -3070,7 +3954,7 @@ class QualificationStore:
                 raise StateConflict("qualification result lacks durable send authority")
             signed = self._signed_from_row(signed_row)
             submission = self._submission_authority_from_row(
-                submission_row, attempt
+                connection, submission_row, attempt
             )
             if (
                 command.state != "claimed"
@@ -3676,6 +4560,7 @@ class QualificationStore:
                             "sending qualification lacks atomic submission authority"
                         )
                     submission_authority = self._submission_authority_from_row(
+                        connection,
                         submission,
                         attempt_record,
                     )
@@ -4062,6 +4947,157 @@ class QualificationStore:
                 },
             )
             return halted
+
+    def halt_for_reconciliation_deadline(
+        self,
+        command_id: str,
+        *,
+        at: datetime,
+    ) -> QualificationCommandRecord:
+        """Persist a bounded-read timeout without releasing possible exposure."""
+
+        checked = _identifier(command_id, "command_id")
+        checked_at = _utc(at, "at")
+        with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
+            command_row = connection.execute(
+                "SELECT * FROM execution_qualification_commands WHERE command_id = ?",
+                (checked,),
+            ).fetchone()
+            outbox_row = connection.execute(
+                "SELECT * FROM execution_qualification_outbox WHERE command_id = ?",
+                (checked,),
+            ).fetchone()
+            if command_row is None or outbox_row is None:
+                raise RecordNotFound("qualification deadline state is missing")
+            command = self._command_from_row(command_row)
+            outbox = self._outbox_from_row(outbox_row)
+            phase = QualificationAttemptPhase(command.current_phase)
+            step_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_steps
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked, phase.value),
+            ).fetchone()
+            if step_row is None:
+                raise StorageError("qualification deadline step is missing")
+            step = self._step_from_row(step_row)
+            reservation_released = command.reservation_released
+            if command.state == "queued":
+                if outbox.state != "queued" or step.state != "ready":
+                    raise StateConflict("queued qualification deadline state differs")
+                if connection.execute(
+                    """
+                    SELECT 1 FROM execution_qualification_signing_authorities
+                    WHERE command_id = ? AND phase = ?
+                    """,
+                    (checked, phase.value),
+                ).fetchone() is not None:
+                    raise StateConflict("key authority exists at read deadline")
+                if phase is not QualificationAttemptPhase.CANCEL:
+                    self._release_reservation_locked(
+                        connection, command, at=checked_at
+                    )
+                    reservation_released = True
+                self._write_step_locked(
+                    connection, step, state="terminal_unsent", at=checked_at
+                )
+            elif command.state == "reconciling":
+                if outbox.state != "reconciling" or step.state not in {
+                    "response_received",
+                    "unknown",
+                    "reconciled",
+                }:
+                    raise StateConflict("reconciliation deadline state differs")
+            else:
+                raise StateConflict("qualification is not deadline-haltable")
+            halted = self._write_command_locked(
+                connection,
+                command,
+                state="halted",
+                current_phase="halted",
+                at=checked_at,
+                terminal=True,
+                reservation_released=reservation_released,
+            )
+            self._write_outbox_locked(
+                connection,
+                outbox,
+                state="halted",
+                at=checked_at,
+                worker_id=None,
+                fencing_token=outbox.fencing_token,
+                claimed_at=None,
+                lease_expires_at=None,
+                current_attempt_id=outbox.current_attempt_id,
+                attempt_count=outbox.attempt_count,
+            )
+            self.execution_store._append_event_locked(  # type: ignore[attr-defined]
+                connection,
+                command_id=None,
+                event_type="qualification_reconciliation_deadline_exhausted",
+                occurred_at=checked_at,
+                payload={
+                    "qualification_command_id": checked,
+                    "phase": phase.value,
+                    "reservation_retained": not reservation_released,
+                    "retry_performed": False,
+                },
+            )
+            return halted
+
+    def retain_for_reconciliation_deadline(
+        self,
+        command_id: str,
+        *,
+        at: datetime,
+    ) -> QualificationCommandRecord:
+        """Record post-PONR read exhaustion while preserving reconciliation."""
+
+        checked = _identifier(command_id, "command_id")
+        checked_at = _utc(at, "at")
+        with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
+            command_row = connection.execute(
+                "SELECT * FROM execution_qualification_commands WHERE command_id = ?",
+                (checked,),
+            ).fetchone()
+            outbox_row = connection.execute(
+                "SELECT * FROM execution_qualification_outbox WHERE command_id = ?",
+                (checked,),
+            ).fetchone()
+            if command_row is None or outbox_row is None:
+                raise RecordNotFound("qualification reconciliation state is missing")
+            command = self._command_from_row(command_row)
+            outbox = self._outbox_from_row(outbox_row)
+            if (
+                command.state != "reconciling"
+                or outbox.state != "reconciling"
+            ):
+                raise StateConflict(
+                    "qualification place is not deadline-retainable"
+                )
+            retained = self._write_command_locked(
+                connection,
+                command,
+                state="reconciling",
+                current_phase=command.current_phase,
+                at=checked_at,
+                reservation_released=command.reservation_released,
+            )
+            self.execution_store._append_event_locked(  # type: ignore[attr-defined]
+                connection,
+                command_id=None,
+                event_type="qualification_read_deadline_exhausted",
+                occurred_at=checked_at,
+                payload={
+                    "qualification_command_id": checked,
+                    "phase": command.current_phase,
+                    "reservation_retained": not command.reservation_released,
+                    "requires_read_resume": True,
+                    "retry_performed": False,
+                },
+            )
+            return retained
 
     @staticmethod
     def _verify_query_against_durable_action(

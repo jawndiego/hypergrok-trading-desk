@@ -1,11 +1,11 @@
 # TESTNET commissioning and first-write gap register
 
-Status: **offline engine, schema-v11 qualification core/result coordinator,
+Status: **offline engine, schema-v12 qualification core/result coordinator,
 credential-free signer-envelope, pinned SDK 0.24.0 signer and independent
 recovery verifier, dormant one-shot sender, advisory WebSocket decoder and
 local response-drop/crash harness, machine plans and guest/VM renderers
-and role-bound qualification terminal orchestration implemented; submission
-and full-lifecycle promotion, live adapters, machine apply, network and live
+and role-bound full-lifecycle qualification orchestration implemented;
+submission promotion, live qualification, machine apply and network
 qualification incomplete; first harness order write remains blocked**.
 
 This document records the remaining work from a reviewed source commit to the
@@ -36,11 +36,15 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   verifier are golden-tested. Its exact TESTNET one-shot HTTP sender acquires
   authority only from the durable store and atomically records response or
   unknown transitions, but submission authority remains compiled off, so the
-  terminal `run` path cannot reach the sender or a credential.
+  full foreground `run` path cannot reach the sender or a credential. The
+  dormant worker already composes place, paired queries, cancel and terminal
+  reconciliation under one absolute read deadline.
 - `trading-harness-qualification` is a separate non-MCP entry point. Control
   UID 452 may collect/verify an owner-only review artifact and perform fresh
-  same-process `/dev/tty` approval-HMAC authorization. Executor UID 451 may
-  inspect, normalize and reconcile persisted qualification state. Public split
+  same-process `/dev/tty` approval-HMAC authorization as an administrative
+  fallback. Its issued permit is durably registered and atomically consumed.
+  Executor UID 451 may inspect, normalize and reconcile persisted
+  qualification state. Public split
   prepare/sign commands are absent. `run` remains dormant and fails before
   reading config or state while submission is compiled off.
 - Credential-free final-path APFS/ACL/install and storage-guard artifacts exist
@@ -48,8 +52,9 @@ The normative live sequence remains `docs/testnet_qualification.md`.
 - A pinned Lima/VZ VM plan exists under `deploy/ubuntu-router/lima`; its apply
   path is absent. The signed snapshot/cloud-image inputs, offline host
   attestations and 116-package no-recommends closure are locked with a
-  read-only replay verifier; host/guest installation and preflight remain
-  unapplied.
+  read-only replay verifier. A root media/host-tool specification is
+  implemented but its launcher/apply gates remain false; writable Lima state,
+  guest installation and preflight are also disabled.
 
 These facts do not make the machine transaction-ready.
 
@@ -82,8 +87,10 @@ their owning machines because their derived public keys are renderer inputs.
    `deploy/macos/testnet` with the sealed runtime and pack. Prove UID 501 and all
    service identities cannot modify or replace source, runtime or venv paths.
 6. **Ubuntu router lab.** First render and verify the pinned Lima/VZ VM plan,
-   replay the immutable public-input lock, then use a separately reviewed
-   apply artifact to install the host tools and provision the exact two-NIC VM.
+   replay the immutable public-input lock and retain only its informational
+   receipt. Close and promote the sealed-runtime root launcher before any
+   media/host-tool apply; then resolve the non-agent Lima owner, local-image
+   config and first-boot APT blockers before provisioning any VM.
    Pass guest preflight before generating the VM and Mac WireGuard private keys
    on their owning machines, derive and
    attest the public keys, then render and qualify `local_nat_lab` using
@@ -108,15 +115,16 @@ their owning machines because their derived public keys are renderer inputs.
 No `init`, venue/Keychain secret, grant issuance, launchd installation or
 harness venue write belongs in this phase.
 
-## Missing reviewed application capabilities
+## Remaining promotion and live-evidence gaps
 
-Machine commissioning alone cannot execute the published live checklist. The
-following are code gaps, not operator commands waiting to be discovered:
+Machine commissioning alone cannot satisfy the published live checklist. The
+following rows distinguish implemented-but-unpromoted contracts from remaining
+code and attended-evidence gaps:
 
 | Required qualification behavior | Current gap |
 | --- | --- |
-| Far non-marketable GTC canary, exact query and cancel | Typed envelope, pinned SDK signing/independent recovery, dormant one-shot HTTP sender, durable response/crash-unknown, action-bound paired-query/cancel transitions and a role-bound CLI exist offline; submission-authority promotion, one bounded live place/query/cancel/terminal run loop and fresh read-proven-open same-CLOID cancel reauthorization remain absent. An expired unsent cancel retains reservation and halts; it is never blindly retried |
-| Retained pre-write account/metadata/order snapshot | Exact retained evidence/tamper checks, a stable two-read `userRole` collector and control-owned attended artifact export are implemented but not live-qualified. The distinct post-claim, immediately-pre-key/send `userRole` recheck and attempt binding remain absent |
+| Far non-marketable GTC canary, exact query and cancel | Schema-v12 typed envelope, pinned SDK signing/independent recovery, one-shot HTTP sender, response/crash-unknown persistence, paired queries, full foreground loop and terminal-flat release exist offline. A proven-unsent expired cancel retains reservation and permits exactly one fresh attended, read-proven-open same-CLOID successor with a new action/envelope/global nonce. Submission promotion and an attended live exercise remain absent |
+| Retained pre-write account/metadata/order snapshot | Exact retained evidence/tamper checks, owner-only artifact export and distinct two-read `userRole` attestations immediately before key use and send are bound through the attempt and durable submission authority. They are implemented and adversarially tested offline but not live-qualified |
 | Ordinary attended reduce-only close, including an unexpected GTC-canary fill | Full-residual envelope/result/query, pinned SDK signer/recovery, attended CLI authorization/reconciliation and terminal-flat source-reservation release exist offline; submission promotion and live exercise remain absent; general bracket-parent close is intentionally unsupported |
 | WebSocket disconnect/fill/recovery exercise | An injected, credential-free exact TESTNET client/decoder accepts only `orderUpdates` and `userEvents` (`channel: user`) and forces a REST request begun after the causal boundary whose receipt/server watermark covers the event after connect, every advisory event and every disconnect because the official feed has no gap-free sequence; timestamp-less events require strict server-time advance; no live connector, durable event integration or attended exercise exists |
 | Forward request but drop the real response | A bounded loopback HTTP harness proves accept-then-drop, crash normalization, reservation retention and no resend; no live forwarding proxy or attended real-request exercise exists |
@@ -124,11 +132,14 @@ following are code gaps, not operator commands waiting to be discovered:
 | Executor free-space shutdown threshold | External fail-closed guard and launchd templates exist; root-owned config, real APFS `statvfs`, shutdown and restart behavior are not installed/qualified |
 | Signed qualification artifact | No artifact builder/signing workflow exists; the deliverable is still manual |
 
-Implement these as narrow TESTNET-only, attended and durable workflows with
-observable failure tests. They may not become MCP tools, accept chat approval,
-widen signer actions generically, expose mainnet, or weaken the one-shot
-unknown-outcome contract. Until then, the first harness order write remains
-blocked.
+Close the remaining items as narrow TESTNET-only, durable workflows with
+observable failure tests. They may not become generic MCP execution tools,
+widen signer actions, expose mainnet, or weaken the one-shot unknown-outcome
+contract. The current `/dev/tty` HMAC is an administrative fallback. A future
+remote lane is reserved only for exact `execute trade <proposal-id>` approval
+of an immutable, short-lived, account/policy/risk-bound single-use proposal;
+it is not implemented and bare/free-form chat remains invalid. Until the live
+gates pass, the first harness order write remains blocked.
 
 ## Credential provisioning
 
@@ -173,6 +184,11 @@ cloud-init, logs, a shared folder or an agent-readable path.
 The repo contains a rollback-safe post-init ACL artifact, but it is not yet in
 a sealed applied deployment. Its single-use receipt and main-file invariants
 must pass on the real quota paths.
+
+Schema v12 deliberately refuses automatic migration when any schema-v11
+qualification table is nonempty, including snapshot-only evidence. Preserve
+and quarantine that database for review; use a separately reviewed migration
+or a proved-empty new deployment, never an in-place rewrite or silent reset.
 
 ## Foreground no-write qualification
 

@@ -2,18 +2,27 @@
 
 Status: **offline capital core, credential-free signer-envelope, pinned SDK
 0.24.0 signer/independent recovery verifier, dormant one-shot sender,
-advisory WebSocket decoder/local response-drop harness and schema-v11
-result/workflow persistence plus a role-bound direct-terminal orchestration
-surface implemented; submission/lifecycle promotion, commissioning and live
+advisory WebSocket decoder/local response-drop harness and schema-v12
+result/workflow persistence plus a role-bound full-lifecycle direct-terminal
+orchestration surface implemented; submission promotion, commissioning and live
 adapter gaps remain; live venue qualification not run**.
 
-The TESTNET execution functions are real and armed when the isolated worker is
-explicitly constructed. No account, API wallet or worker service is configured
-by the repository, and no Codex/MCP tool can invoke them.
+The ordinary isolated TESTNET executor contains a real write boundary. The
+qualification worker is complete but its submission authority is compiled
+off. No account, API wallet or worker service is configured by the repository,
+and no Codex/MCP tool can invoke either capital path.
 
 This checklist is a release gate, not a setup shortcut. Unit tests, local paper
 fills and valid SDK signatures do not prove that an API wallet is registered to
 the intended account or that venue recovery works.
+
+The current attended approval-HMAC path reads exact confirmation from
+`/dev/tty` and remains the administrative fallback. A separate future TESTNET
+provenance lane is reserved for the exact `execute trade <proposal-id>` command
+over an immutable, short-lived proposal binding entry, size, stop, target,
+maximum loss, account and policy. It is not implemented; a bare command or
+free-form chat is invalid, and no chat-facing surface may receive the signer or
+execution store.
 
 ## User-provided prerequisites
 
@@ -123,6 +132,10 @@ or empty-database recreation.
 On this new machine, run `init` only after proving no harness state exists. If
 any v1-bound or other nonempty state is discovered, preserve its main and
 sidecar files and stop for a separately reviewed migration.
+Execution schema v12 also refuses automatic migration of any nonempty
+schema-v11 qualification lane, including retained snapshots without a command.
+Preserve and quarantine such a database; require a separately reviewed
+migration or a proved-empty new deployment, never an in-place rewrite.
 The single global nonce database now initializes only at schema v2 and binds
 qualification nonces atomically to their action and signing authority. An
 existing nonce schema-v1 database fails closed pending an explicit migration;
@@ -133,27 +146,27 @@ no such migration exists, and no nonce database exists on this machine.
 The target live sequence below is intentionally stronger than the currently
 exposed CLI. Do not skip its first steps by sending the already-armed bracket.
 The GTC/cancel/close semantics, dedicated signer-envelope validator and durable
-schema-v11 result coordinator now exist. The exact pinned SDK 0.24.0 signer and
+schema-v12 result coordinator now exist. The exact pinned SDK 0.24.0 signer and
 independently reconstructed EIP-712 recovery verifier are golden-tested for all
 three action shapes and use the schema-v2 global nonce authority. The separate
 `trading-harness-qualification` CLI exposes fixed control-UID
 collect/verify/fresh attended authorization and executor-UID
 status/recover/reconciliation phases. Its `run` command checks the compiled-off
 submission gate before config, state, Keychain or network access; split
-prepare/sign commands are not public. The following live integrations and
-observable tests remain:
+prepare/sign commands are not public. The dormant worker composes the full
+bounded place, paired-query, cancel and terminal reconciliation lifecycle. The
+following promotion, live integrations and observable tests remain:
 
-- promotion of `run` into one bounded in-process
-  place/query/cancel/terminal lifecycle. Its current dormant one-phase
-  contract is not an operator-ready live canary;
-- a read-proven-open, fresh attended same-CLOID cancel reauthorization and
-  account-safety path. Today an expired proven-unsent cancel correctly retains
-  reservation and halts, but cannot mint replacement cancel authority; a blind
-  retry is forbidden;
-- a final fresh, stable `userRole(api_wallet)` mapping to the configured main
-  account after claim and immediately before key use/send, causally bound into
-  attempt evidence. The signed agent wire does not itself encode the main
-  account, so admission-time role evidence alone cannot promote submission;
+- promotion and attended exercise of the implemented full `run` lifecycle;
+  until then its compiled gate makes it operator-inaccessible;
+- attended live exercise of the implemented one-successor cancel path. An
+  expired proven-unsent cancel retains reservation; only a newly attended,
+  read-proven-open same-CLOID action with a durable issued-to-consumed permit,
+  new envelope and new global nonce may follow it;
+- attended live exercise of the implemented two-read
+  `userRole(api_wallet)` attestations immediately before key use and send. The
+  complete PRE_KEY/attempt/PRE_SEND chain and PRE_SEND expiry are durable; a
+  pause past that fence after authority records UNKNOWN and performs no HTTP;
 - attended live qualification of the implemented `userRole` reader and
   owner-only account/metadata/order artifact export;
 - live attended integration for the ordinary bounded reduce-only canary close;
@@ -172,9 +185,10 @@ observable tests remain:
 - installed and empirically qualified free-space shutdown guards plus a
   deterministic qualification artifact builder/signing workflow.
 
-The currently armed live signer still accepts only the mandatory three-leg
-`normalTpsl` group with IOC entry; the qualification envelope/recovery-verifier
-layer is an offline contract only, and runtime monitoring is REST polling.
+The ordinary always-on signer still accepts only the mandatory three-leg
+`normalTpsl` group with IOC entry. The separate qualification
+envelope/recovery-verifier and full worker remain compiled-off offline
+contracts, and runtime monitoring is REST polling.
 Machine setup and credentials alone therefore do not make the
 first harness order write responsible. API-wallet `approveAgent` registration
 is a separate attended out-of-band account-provisioning write, not harness
@@ -258,8 +272,10 @@ account snapshot, router manifest/health result and reconciliation result.
 3. Only after the canary is terminal, issue a short-lived
    `profitability_qualified: false` infrastructure grant, run one Codex/ChatGPT
    analysis, stage its exact hash, and prove every staging authority flag is
-   false. Review and authorize it only through the direct-terminal CLI;
-   preserve the learning cycle and command IDs.
+   false. Review and authorize it through the current direct-terminal
+   administrative fallback; a future proposal-ID chat lane may replace this
+   step only after its separate durable provenance is implemented and
+   qualified. Preserve the learning cycle and command IDs.
 4. Submit a minimum-size long IOC + reduce-only SL + TP as `normalTpsl`.
    Accept only a full entry plus an independently visible stop covering the
    exact signed position.
