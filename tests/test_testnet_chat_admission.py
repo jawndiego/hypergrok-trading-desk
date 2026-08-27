@@ -307,18 +307,21 @@ class ChatAdmissionTests(unittest.TestCase):
 
         def selected_lstat(item):
             selected = Path(item)
-            metadata = os.lstat(self.delivery_physical_path(selected))
             if selected in {
                 Path("/private"),
                 Path("/private/var"),
                 Path("/private/var/db"),
             }:
+                # Linux CI has no /private hierarchy.  Project the exact
+                # Darwin ancestor identity from one stable test directory.
+                metadata = os.lstat(self.physical_delivery_root)
                 return _StatProxy(
                     metadata,
                     st_uid=0,
                     st_gid=0,
                     st_mode=stat.S_IFDIR | 0o755,
                 )
+            metadata = os.lstat(self.delivery_physical_path(selected))
             return _StatProxy(metadata)
 
         return _read_verified_testnet_chat_delivery(

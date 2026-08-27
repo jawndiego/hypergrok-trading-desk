@@ -101,11 +101,14 @@ class VerifiedDeliveryFixture:
 
     def lstat(self, path, **overrides: int) -> _StatProxy:
         logical = self.logical_path(path)
-        metadata = os.lstat(self.physical_path(logical))
         if logical in {Path("/private"), Path("/private/var"), Path("/private/var/db")}:
+            # Linux CI has no /private hierarchy.  Reuse one stable physical
+            # directory inode, then project the exact reviewed Darwin identity.
+            metadata = os.lstat(self.physical_root)
             defaults = {"st_uid": 0, "st_gid": 0, "st_mode": stat.S_IFDIR | 0o755}
             defaults.update(overrides)
             return _StatProxy(metadata, **defaults)
+        metadata = os.lstat(self.physical_path(logical))
         return self._owned(metadata, **overrides)
 
     def logical_path_for(self, handoff) -> Path:
