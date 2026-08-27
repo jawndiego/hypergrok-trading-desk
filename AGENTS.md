@@ -154,6 +154,10 @@ This repository builds an agent-runtime-neutral trading research and execution h
   single-link files and no UID-501 ACL. Those ACL/listener/install checks and
   installation/enablement of the offline publisher/ready-index/consumer chain
   are still promotion blockers.
+  Keep the fixed socket at
+  `/private/var/db/trading-desk-testnet-chat-socket/testnet-chat-approval.sock`;
+  `/private/var/run` is GID-`daemon`-writable on macOS and is not a trusted
+  ancestor.
 - Execution-store schema v13 makes normal protected entry require fresh,
   stable two-read `userRole(api_wallet)` attestations at PRE_KEY and PRE_SEND.
   PRE_KEY is bound into signed evidence; PRE_SEND is attempt/signed-evidence
@@ -261,6 +265,10 @@ This repository builds an agent-runtime-neutral trading research and execution h
   helper/artifact installation, service scheduling and live leak/reboot tests
   remain absent. Resolver UID 65 confinement is deliberately host-wide while
   the attended TESTNET PF profile is loaded.
+- The continuous remote-VPN collector must hold the preinstalled
+  `/private/var/db/trading-desk-testnet-remote-vpn-health/collector.lock` for
+  its entire process lifetime. Never recreate it in `/private/var/run` or
+  release it between refresh cycles.
 - The Lima state owner is the fixed disabled `trading-router-operator`
   UID/GID 454 with no supplementary groups or credential slots. It owns only
   the dedicated mode-0700 ACL-free LIMA_HOME; root observation code must invoke

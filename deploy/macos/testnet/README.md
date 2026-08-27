@@ -27,7 +27,7 @@ headroom probes pass under the real service UIDs.
 ## TESTNET chat-approval foreground canary layout
 
 The reviewed offline channel uses the fixed socket
-`/private/var/run/trading-desk/testnet-chat-approval.sock` and requires a
+`/private/var/db/trading-desk-testnet-chat-socket/testnet-chat-approval.sock` and requires a
 separate canonical UID-452-owned mode-0700 control-state parent, proposed as
 `/private/var/db/trading-desk/control-private/chat-approval`. Its SQLite main,
 WAL and SHM are mode 0600, regular, single-link and unavailable to UID 501.
@@ -131,6 +131,10 @@ later resize changes the tested resource boundary.
    and its exact archive, schema-v3 wheel, dependency manifest and readers.
    Apply is valid only from the separately sealed replacement pack after its
    binding commit passes exact-head CI. The separate
+   [uncommissioned-release migration](UNCOMMISSIONED_RELEASE_MIGRATION.md)
+   is the only permitted way to supersede the exact already-installed
+   pre-commission release; its checked-in source remains inert until a later
+   binding commit. The separate
    [attended System Keychain provisioning plan](KEYCHAIN_PROVISIONING_PLAN.md)
    describes the fixed-slot, non-exporting native provisioner and its removal
    after qualification. Its harmless probe records must pass the sealed

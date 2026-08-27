@@ -112,6 +112,24 @@ class AtomicFirstInstallContractTests(unittest.TestCase):
         self.assertIn('[ -z "$PROBE_TMP" ] || return 0', prepare)
         self.assertNotIn('[ -z "$PROBE_TMP" ] || return\n', prepare)
 
+    def test_release_symlinks_and_native_optional_runtimes_are_qualified(self) -> None:
+        text = installer_text()
+        harden = shell_function(text, "harden_release")
+        immutable = shell_function(text, "assert_immutable_modes")
+        payload = shell_function(text, "verify_release_payload")
+        promote = shell_function(text, "promote_current_once")
+        self.assertIn("-type l -exec /bin/chmod -h 0755", harden)
+        self.assertIn("release symlink mode is not 0755", immutable)
+        self.assertIn("from Crypto.Hash import keccak", payload)
+        self.assertIn("import mcp, pydantic_core", payload)
+        self.assertIn(
+            '(umask 022; /bin/ln -s "releases/$EXPECTED_COMMIT" "$CURRENT_CANDIDATE")',
+            promote,
+        )
+        self.assertIn('/bin/chmod -h 0755 "$CURRENT_CANDIDATE"', promote)
+        self.assertIn("current symlink mode must be 0755", text)
+        self.assertIn("sealed apply requires effective GID wheel", text)
+
     def test_markers_bind_incomplete_and_ready_states_before_promotion(self) -> None:
         text = installer_text()
         receipt = shell_function(text, "release_receipt")

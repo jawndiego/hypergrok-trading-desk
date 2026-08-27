@@ -4,6 +4,7 @@ umask 077
 
 ROOT=/private/var/db/trading-desk-testnet-remote-vpn-health
 BASE_ROOT=/private/var/db/trading-desk-testnet-route-health
+COLLECTOR_LOCK=$ROOT/collector.lock
 LIBEXEC=/usr/local/libexec
 SAMPLE=$LIBEXEC/trading-desk-testnet-remote-vpn-sample
 PROBE=$LIBEXEC/trading-desk-testnet-remote-vpn-probe
@@ -158,12 +159,18 @@ do
 done
 adopt_cache_root() {
   cache_root=$1
+  optional_root_file=$2
   config_dir=$cache_root/$config_hash
   if [ -e "$cache_root" ] || [ -L "$cache_root" ]; then
     [ -d "$cache_root" ] && [ ! -L "$cache_root" ] || die "cache root is invalid: $cache_root"
     [ "$(/usr/bin/stat -f '%u:%g:%Lp' "$cache_root")" = 0:0:755 ] || die "cache root metadata differs: $cache_root"
     no_acl "$cache_root"
-    unexpected=$(/usr/bin/find "$cache_root" -mindepth 1 -maxdepth 1 ! -name "$config_hash" -print -quit)
+    if [ "$optional_root_file" = NONE ]; then
+      unexpected=$(/usr/bin/find "$cache_root" -mindepth 1 -maxdepth 1 ! -name "$config_hash" -print -quit)
+    else
+      [ "$optional_root_file" = collector.lock ] || die 'unexpected cache-root file allowance'
+      unexpected=$(/usr/bin/find "$cache_root" -mindepth 1 -maxdepth 1 ! -name "$config_hash" ! -name "$optional_root_file" -print -quit)
+    fi
     [ -z "$unexpected" ] || die "cache root contains another entry: $unexpected"
   else
     /bin/mkdir "$cache_root"
@@ -189,8 +196,8 @@ do
   [ "$(/usr/bin/stat -f '%u:%g:%Lp' "$trusted_parent")" = 0:0:755 ] || die "trusted parent metadata differs: $trusted_parent"
   no_acl "$trusted_parent"
 done
-adopt_cache_root "$BASE_ROOT"
-adopt_cache_root "$ROOT"
+adopt_cache_root "$BASE_ROOT" NONE
+adopt_cache_root "$ROOT" collector.lock
 /usr/sbin/chown root:wheel "$BASE_ROOT" "$BASE_ROOT/$config_hash" "$ROOT" "$ROOT/$config_hash"
 /bin/chmod 0755 "$BASE_ROOT" "$BASE_ROOT/$config_hash" "$ROOT" "$ROOT/$config_hash"
 [ -x "$RUNTIME_PYTHON" ] || die 'sealed admin runtime is unavailable'
@@ -198,6 +205,59 @@ RUNTIME_PYTHON=$(/bin/realpath "$RUNTIME_PYTHON")
 case "$RUNTIME_PYTHON" in /opt/trading-desk/runtime/python-3.11.16/*) ;; *) die 'sealed admin runtime escapes its root' ;; esac
 assert_root_sealed_directory_chain "$(/usr/bin/dirname "$RUNTIME_PYTHON")"
 assert_root_sealed_regular_file "$RUNTIME_PYTHON"
+
+/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+  "$RUNTIME_PYTHON" -I -c '
+import fcntl
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+try:
+    descriptor = os.open(path, flags)
+except FileNotFoundError:
+    descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    metadata = os.fstat(descriptor)
+    named = os.lstat(path)
+    identity = (
+        metadata.st_mode, metadata.st_uid, metadata.st_gid,
+        metadata.st_nlink, metadata.st_dev, metadata.st_ino, metadata.st_size,
+    )
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or metadata.st_nlink != 1
+        or metadata.st_size != 0
+        or identity != (
+            named.st_mode, named.st_uid, named.st_gid,
+            named.st_nlink, named.st_dev, named.st_ino, named.st_size,
+        )
+    ):
+        raise RuntimeError("collector lock metadata differs")
+    os.fsync(descriptor)
+    fcntl.fcntl(descriptor, 51)
+finally:
+    os.close(descriptor)
+
+parent = os.path.dirname(path)
+parent_descriptor = os.open(
+    parent,
+    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+)
+try:
+    fcntl.fcntl(parent_descriptor, 51)
+finally:
+    os.close(parent_descriptor)
+' "$COLLECTOR_LOCK" || die 'collector lock installation failed'
+[ -f "$COLLECTOR_LOCK" ] && [ ! -L "$COLLECTOR_LOCK" ] || die 'collector lock is unavailable'
+[ "$(/usr/bin/stat -f '%u:%g:%Lp:%l:%z' "$COLLECTOR_LOCK")" = 0:0:600:1:0 ] || die 'collector lock metadata differs'
+no_acl "$COLLECTOR_LOCK"
 
 install_or_adopt() {
   install_source=$1
@@ -351,7 +411,7 @@ for path in parents:
         fcntl.fcntl(descriptor, 51)
     finally:
         os.close(descriptor)
-' "$SAMPLE" "$PROBE" "$HELPER_CONFIG" "$PUBLIC_WG" "$PF_ANCHOR" "$BASE_ROOT/$config_hash/expectation.json" "$ROOT/$config_hash/expectation.json"
+' "$SAMPLE" "$PROBE" "$HELPER_CONFIG" "$PUBLIC_WG" "$PF_ANCHOR" "$BASE_ROOT/$config_hash/expectation.json" "$ROOT/$config_hash/expectation.json" "$COLLECTOR_LOCK"
 
 /bin/echo "REMOTE_VPN_HEALTH_INSTALL_COMPLETE config_hash=$config_hash"
 /bin/echo 'PF remains unloaded; VM/tunnels remain unchanged; collector not started; no credential or venue operation performed.'

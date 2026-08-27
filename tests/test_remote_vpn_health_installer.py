@@ -39,6 +39,9 @@ class RemoteVpnHealthInstallerTests(unittest.TestCase):
         self.assertIn("id -G trading-router-operator", source)
         self.assertIn("sealed media SHA-256 differs", source)
         self.assertIn("evidence.json", source)
+        self.assertIn("COLLECTOR_LOCK=$ROOT/collector.lock", source)
+        self.assertIn("os.O_CREAT | os.O_EXCL", source)
+        self.assertIn("collector lock metadata differs", source)
         for forbidden in (
             "pfctl -f",
             "wg genkey",

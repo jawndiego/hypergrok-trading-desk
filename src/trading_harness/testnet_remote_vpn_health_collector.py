@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -39,6 +39,8 @@ from .testnet_remote_vpn_health import (
 )
 from .testnet_remote_vpn_health_artifacts import (
     RootOwnedTestnetRemoteVpnHealthArtifacts,
+    TESTNET_REMOTE_VPN_HEALTH_ARTIFACT_ROOT,
+    TESTNET_REMOTE_VPN_HEALTH_DIRECTORY_MODE,
 )
 from .testnet_route_health import (
     MAX_ROUTE_HEALTH_COLLECTION_SECONDS,
@@ -59,9 +61,7 @@ SAMPLE_HELPER_TIMEOUT_SECONDS = 3
 PROBE_HELPER_TIMEOUT_SECONDS = 6
 MINIMUM_PUBLISHED_HEADROOM_SECONDS = 2
 COLLECTOR_INTERVAL_SECONDS = 1.0
-COLLECTOR_LOCK_PATH = Path(
-    "/private/var/run/trading-desk-testnet-remote-vpn-health.lock"
-)
+COLLECTOR_LOCK_PATH = TESTNET_REMOTE_VPN_HEALTH_ARTIFACT_ROOT / "collector.lock"
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
 _ADDRESS_RE = re.compile(r"^[0-9]{1,3}(?:\.[0-9]{1,3}){3}$", re.ASCII)
@@ -631,27 +631,169 @@ def _clock() -> datetime:
 
 
 @contextmanager
-def _single_flight():
-    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(COLLECTOR_LOCK_PATH, flags, 0o600)
+def _single_flight(
+    *,
+    _path: Path = COLLECTOR_LOCK_PATH,
+    _owner_uid: int = 0,
+    _owner_gid: int = 0,
+    _acl_reader: Callable[[Path], tuple[str, ...]] = darwin_named_acl_lines,
+):
+    selected = Path(_path)
+    parent = selected.parent
+    if (
+        not selected.is_absolute()
+        or Path(os.path.normpath(str(selected))) != selected
+        or selected.name != "collector.lock"
+        or type(_owner_uid) is not int
+        or _owner_uid < 0
+        or type(_owner_gid) is not int
+        or _owner_gid < 0
+        or not callable(_acl_reader)
+    ):
+        raise ValidationError("remote VPN collector lock path is invalid")
+
     try:
+        parent_before = parent.lstat()
+        parent_resolved = parent.resolve(strict=True)
+        parent_acl = _acl_reader(parent)
+    except Exception as error:
+        raise ValidationError("remote VPN collector lock parent is unavailable") from error
+    parent_identity = (
+        int(parent_before.st_mode),
+        int(parent_before.st_uid),
+        int(parent_before.st_gid),
+        int(parent_before.st_nlink),
+        int(parent_before.st_dev),
+        int(parent_before.st_ino),
+    )
+    if (
+        parent_resolved != parent
+        or not stat.S_ISDIR(parent_before.st_mode)
+        or stat.S_IMODE(parent_before.st_mode)
+        != TESTNET_REMOTE_VPN_HEALTH_DIRECTORY_MODE
+        or parent_before.st_uid != _owner_uid
+        or parent_before.st_gid != _owner_gid
+        or parent_acl != ()
+    ):
+        raise ValidationError("remote VPN collector lock parent metadata differs")
+
+    parent_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    parent_flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        parent_descriptor = os.open(parent, parent_flags)
+    except OSError as error:
+        raise ValidationError("remote VPN collector lock parent cannot be opened") from error
+    descriptor = -1
+    try:
+        if (
+            (
+                int((opened_parent := os.fstat(parent_descriptor)).st_mode),
+                int(opened_parent.st_uid),
+                int(opened_parent.st_gid),
+                int(opened_parent.st_nlink),
+                int(opened_parent.st_dev),
+                int(opened_parent.st_ino),
+            )
+            != parent_identity
+        ):
+            raise ValidationError("remote VPN collector lock parent changed")
+        flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(selected.name, flags, dir_fd=parent_descriptor)
+        except OSError as error:
+            raise ValidationError("remote VPN collector lock is unavailable") from error
         metadata = os.fstat(descriptor)
+        try:
+            named = selected.lstat()
+            resolved = selected.resolve(strict=True)
+            lock_acl = _acl_reader(selected)
+            parent_after = parent.lstat()
+        except Exception as error:
+            raise ValidationError("remote VPN collector lock cannot be verified") from error
+        lock_identity = (
+            int(metadata.st_mode),
+            int(metadata.st_uid),
+            int(metadata.st_gid),
+            int(metadata.st_nlink),
+            int(metadata.st_dev),
+            int(metadata.st_ino),
+            int(metadata.st_size),
+        )
+        named_identity = (
+            int(named.st_mode),
+            int(named.st_uid),
+            int(named.st_gid),
+            int(named.st_nlink),
+            int(named.st_dev),
+            int(named.st_ino),
+            int(named.st_size),
+        )
         if (
             not stat.S_ISREG(metadata.st_mode)
             or stat.S_IMODE(metadata.st_mode) != 0o600
-            or metadata.st_uid != 0
-            or metadata.st_gid != 0
+            or metadata.st_uid != _owner_uid
+            or metadata.st_gid != _owner_gid
             or metadata.st_nlink != 1
+            or metadata.st_size != 0
+            or named_identity != lock_identity
+            or resolved != selected
+            or lock_acl != ()
+            or (
+                int(parent_after.st_mode),
+                int(parent_after.st_uid),
+                int(parent_after.st_gid),
+                int(parent_after.st_nlink),
+                int(parent_after.st_dev),
+                int(parent_after.st_ino),
+            )
+            != parent_identity
         ):
             raise ValidationError("remote VPN collector lock metadata differs")
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             raise ValidationError("remote VPN collector is already running") from error
-        yield
+        try:
+            yield
+        finally:
+            if (
+                (
+                    int((opened_after := os.fstat(descriptor)).st_mode),
+                    int(opened_after.st_uid),
+                    int(opened_after.st_gid),
+                    int(opened_after.st_nlink),
+                    int(opened_after.st_dev),
+                    int(opened_after.st_ino),
+                    int(opened_after.st_size),
+                )
+                != lock_identity
+                or (
+                    int((named_after := selected.lstat()).st_mode),
+                    int(named_after.st_uid),
+                    int(named_after.st_gid),
+                    int(named_after.st_nlink),
+                    int(named_after.st_dev),
+                    int(named_after.st_ino),
+                    int(named_after.st_size),
+                )
+                != lock_identity
+                or _acl_reader(selected) != ()
+                or (
+                    int((final_parent := os.fstat(parent_descriptor)).st_mode),
+                    int(final_parent.st_uid),
+                    int(final_parent.st_gid),
+                    int(final_parent.st_nlink),
+                    int(final_parent.st_dev),
+                    int(final_parent.st_ino),
+                )
+                != parent_identity
+            ):
+                raise ValidationError("remote VPN collector lock changed while held")
     finally:
-        os.close(descriptor)
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_descriptor)
 
 
 def _collect_locked(*, emit_result: bool) -> int:
@@ -724,11 +866,8 @@ def _collect() -> int:
         return _collect_locked(emit_result=True)
 
 
-def _collect_quiet() -> int:
-    if not hasattr(os, "geteuid") or os.geteuid() != 0:
-        raise ValidationError("remote VPN health collector requires root")
-    with _single_flight():
-        return _collect_locked(emit_result=False)
+def _collect_locked_quiet() -> int:
+    return _collect_locked(emit_result=False)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -745,7 +884,7 @@ def build_parser() -> argparse.ArgumentParser:
 def run_forever(
     *,
     stop_event: threading.Event,
-    collect: Callable[[], int] = _collect_quiet,
+    collect: Callable[[], int],
 ) -> int:
     """Continuously refresh; each failed cycle leaves no new authoritative cache."""
 
@@ -772,6 +911,22 @@ def run_forever(
     return 0
 
 
+def _run_forever_single_flight(
+    *,
+    stop_event: threading.Event,
+    collect: Callable[[], int] = _collect_locked_quiet,
+    lock: Callable[[], AbstractContextManager[None]] = _single_flight,
+) -> int:
+    """Hold the process lock for the complete continuous collector lifetime."""
+
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        raise ValidationError("remote VPN health collector requires root")
+    if not callable(lock):
+        raise TypeError("collector lock factory must be callable")
+    with lock():
+        return run_forever(stop_event=stop_event, collect=collect)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     previous_umask = os.umask(0o077)
@@ -789,7 +944,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 for selected in previous_handlers:
                     signal.signal(selected, stop)
-                return run_forever(stop_event=stop_event)
+                try:
+                    return _run_forever_single_flight(stop_event=stop_event)
+                except Exception as error:
+                    print(
+                        f"remote VPN continuous collector failed: {type(error).__name__}",
+                        file=os.sys.stderr,
+                    )
+                    return 2
             finally:
                 for selected, handler in previous_handlers.items():
                     signal.signal(selected, handler)

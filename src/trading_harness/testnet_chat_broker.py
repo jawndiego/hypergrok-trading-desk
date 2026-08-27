@@ -40,7 +40,7 @@ from .testnet_chat_approval import CHAT_APPROVER_UID, parse_trade_approval_text
 
 TESTNET_CHAT_BROKER_UID = 452
 TESTNET_CHAT_BROKER_SOCKET_PATH = (
-    "/private/var/run/trading-desk/testnet-chat-approval.sock"
+    "/private/var/db/trading-desk-testnet-chat-socket/testnet-chat-approval.sock"
 )
 MAX_APPROVAL_REQUEST_BYTES = 64
 MAX_BROKER_REPLY_BYTES = 64

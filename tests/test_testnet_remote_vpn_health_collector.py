@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import timedelta
 import hashlib
@@ -9,14 +10,18 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from trading_harness.errors import ValidationError
 from trading_harness.testnet_remote_vpn_health_collector import (
+    COLLECTOR_LOCK_PATH,
     TESTNET_REMOTE_VPN_PROBE_HELPER,
     TESTNET_REMOTE_VPN_SAMPLE_HELPER,
     FixedRemoteVpnObservationHelper,
     TestnetRemoteVpnHealthCollector,
     TestnetRemoteVpnProbeReceipt,
+    _run_forever_single_flight,
+    _single_flight,
     build_parser,
     run_forever,
     testnet_remote_vpn_probe_receipt_from_dict,
@@ -159,6 +164,72 @@ class RemoteVpnCollectorTests(unittest.TestCase):
         self.assertEqual(0, run_forever(stop_event=stop, collect=collect))
         self.assertEqual(2, calls)
 
+    def test_continuous_run_holds_one_lock_for_its_complete_lifetime(self) -> None:
+        stop = threading.Event()
+        events: list[str] = []
+
+        @contextmanager
+        def lock():
+            events.append("lock-enter")
+            try:
+                yield
+            finally:
+                events.append("lock-exit")
+
+        def collect() -> int:
+            events.append("collect")
+            stop.set()
+            return 0
+
+        with patch("os.geteuid", return_value=0):
+            self.assertEqual(
+                0,
+                _run_forever_single_flight(
+                    stop_event=stop,
+                    collect=collect,
+                    lock=lock,
+                ),
+            )
+        self.assertEqual(["lock-enter", "collect", "lock-exit"], events)
+
+    def test_single_flight_requires_pinned_root_and_preinstalled_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory).resolve() / "remote-health"
+            parent.mkdir(mode=0o755)
+            parent.chmod(0o755)
+            lock = parent / "collector.lock"
+            lock.touch(mode=0o600)
+            lock.chmod(0o600)
+            options = {
+                "_path": lock,
+                "_owner_uid": os.getuid(),
+                "_owner_gid": os.getgid(),
+                "_acl_reader": lambda _path: (),
+            }
+            with _single_flight(**options):
+                with self.assertRaisesRegex(
+                    ValidationError,
+                    "already running",
+                ):
+                    with _single_flight(**options):
+                        pass
+                with (
+                    patch("os.geteuid", return_value=0),
+                    self.assertRaisesRegex(ValidationError, "already running"),
+                ):
+                    _run_forever_single_flight(
+                        stop_event=threading.Event(),
+                        collect=lambda: 0,
+                        lock=lambda: _single_flight(**options),
+                    )
+            with _single_flight(**options):
+                pass
+
+            lock.unlink()
+            with self.assertRaisesRegex(ValidationError, "unavailable"):
+                with _single_flight(**options):
+                    pass
+
     def test_probe_helper_is_launched_by_sudo_as_exact_uid451(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             parent = Path(directory)
@@ -223,6 +294,10 @@ class RemoteVpnCollectorTests(unittest.TestCase):
         self.assertEqual(
             "/usr/local/libexec/trading-desk-testnet-remote-vpn-probe",
             str(TESTNET_REMOTE_VPN_PROBE_HELPER),
+        )
+        self.assertEqual(
+            "/private/var/db/trading-desk-testnet-remote-vpn-health/collector.lock",
+            str(COLLECTOR_LOCK_PATH),
         )
         rendered = json.dumps(self.probe.as_dict(), sort_keys=True)
         self.assertNotIn("/exchange", rendered)

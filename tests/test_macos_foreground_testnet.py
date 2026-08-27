@@ -235,7 +235,7 @@ class ForegroundCommissionerTests(unittest.TestCase):
         for required in (
             "/private/var/db/trading-desk-testnet-chat-presentations",
             "/private/var/db/trading-desk/control-private/chat-approval",
-            "/private/var/run/trading-desk",
+            "/private/var/db/trading-desk-testnet-chat-socket",
             "/private/var/db/trading-desk-lima",
             "/etc/trading-desk/testnet-executor.toml",
             "HANDOFF_CONFIG=$HANDOFF_ROOT/$CONFIG_HASH",
@@ -245,6 +245,7 @@ class ForegroundCommissionerTests(unittest.TestCase):
             "REMOTE_ROUTE_CONFIG=$REMOTE_ROUTE_ROOT/$CONFIG_HASH",
         ):
             self.assertIn(required, source)
+        self.assertNotIn("/private/var/run", source)
 
     def test_exact_identities_acl_shapes_and_two_phase_model_are_encoded(self) -> None:
         source = COMMISSIONER.read_text(encoding="utf-8")

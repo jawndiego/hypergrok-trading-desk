@@ -21,7 +21,7 @@ existing role's venv is not an allowed workaround.
 
 - broker: `trading-control`, UID/GID 452;
 - connecting Codex bridge: local UID 501;
-- socket: `/private/var/run/trading-desk/testnet-chat-approval.sock`;
+- socket: `/private/var/db/trading-desk-testnet-chat-socket/testnet-chat-approval.sock`;
 - approval database:
   `/private/var/db/trading-desk/control-private/chat-approval/chat-approval.sqlite3`;
 - immutable generation receipts:
@@ -50,6 +50,9 @@ The dedicated socket parent is UID/GID 452 and mode `0700`. Its sole named ACE
 is UID 501 `allow search` (rendered by Darwin `acl_to_text` as
 `allow:execute`). That ACE grants no list, read, write, add-file,
 add-subdirectory, delete, delete-child, rename, ACL-write or ownership right.
+It is directly below root-owned, ACL-free `/private/var/db`; the design
+deliberately avoids `/private/var/run`, which macOS makes writable by GID
+`daemon` and therefore cannot provide the required non-replaceable ancestor.
 
 The socket is UID/GID 452, mode `0622`, single-link and has no named ACL. The
 parent search ACE is therefore the narrow name-resolution capability; UID 501

@@ -88,6 +88,10 @@
 - Added a foreground-only macOS TESTNET commissioner for UIDs 450–454, public
   config rendering, exact two-phase ACLs, chat-store initialization and durable
   receipts, avoiding APFS quotas and launchd for the first attended canary.
+- Moved the TESTNET chat socket and continuous VPN-collector lock out of
+  macOS's GID-`daemon`-writable `/private/var/run`, made the collector lock
+  process-lifetime single-flight, and qualified native SDK/MCP imports under
+  their real service identities after normalizing immutable venv symlinks.
 - Added a deterministic Lima 2.2/VZ VM-plan renderer pinned to socket_vmnet
   1.2.2 and a dated Ubuntu 24.04 ARM64 image. It models one default usernet WAN
   plus one host-only ingress NIC. Offline host attestations, the signed image

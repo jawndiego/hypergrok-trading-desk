@@ -26,7 +26,7 @@ CONTROL_PRIVATE=/private/var/db/trading-desk/control-private
 CHAT_STATE=/private/var/db/trading-desk/control-private/chat-approval
 CHAT_DATABASE=/private/var/db/trading-desk/control-private/chat-approval/chat-approval.sqlite3
 CHAT_GENERATIONS=/private/var/db/trading-desk/control-private/chat-approval/broker-generations
-CHAT_SOCKET_PARENT=/private/var/run/trading-desk
+CHAT_SOCKET_PARENT=/private/var/db/trading-desk-testnet-chat-socket
 
 HANDOFF_ROOT=/private/var/db/trading-desk-testnet-chat-handoffs
 READY_ROOT=/private/var/db/trading-desk-testnet-chat-ready
@@ -659,8 +659,6 @@ assert_system_db_ancestors() {
     assert_directory "$path" 0 0 755
     assert_no_acl "$path"
   done
-  assert_directory /private/var/run 0 0 755
-  assert_no_acl /private/var/run
 }
 
 apply_preinit() {
@@ -730,7 +728,7 @@ apply_preinit() {
   fullsync_paths "$EXECUTION" "$NONCE" "$DAILY_LOSS" "$LEARNING" \
     "$EXECUTOR_SOCKET" "$FOREGROUND_ROOT" "$CHAT_GENERATIONS" \
     "$CHAT_STATE" "$CONTROL_PRIVATE" "$TRADING_DB_ROOT" \
-    "$CHAT_SOCKET_PARENT" /private/var/run "$HANDOFF_CONFIG" "$HANDOFF_ROOT" \
+    "$CHAT_SOCKET_PARENT" "$HANDOFF_CONFIG" "$HANDOFF_ROOT" \
     "$READY_CONFIG" "$READY_ROOT" "$PRESENTATION_CONFIG" \
     "$PRESENTATION_ROOT" "$EVIDENCE_CONFIG" "$EVIDENCE_ROOT" \
     "$QUOTE_CONFIG" "$QUOTE_ROOT" "$REGISTRATION_CONFIG" \

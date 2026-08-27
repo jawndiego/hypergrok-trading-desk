@@ -77,6 +77,7 @@ assert_no_acl() {
 
 assert_sealed_root() {
   [ "$(/usr/bin/id -u)" -eq 0 ] || die "run the sealed copy as root"
+  [ "$(/usr/bin/id -g)" -eq 0 ] || die "sealed apply requires effective GID wheel"
   [ "$(/usr/bin/id -u trading-research)" = 450 ] || die "trading-research UID drift"
   [ "$(/usr/bin/id -u trading-executor)" = 451 ] || die "trading-executor UID drift"
   [ "$(/usr/bin/id -u trading-control)" = 452 ] || die "trading-control UID drift"
@@ -302,6 +303,8 @@ assert_immutable_modes() {
   path=$1
   bad_dir=$(/usr/bin/find "$path" -type d ! -perm 0755 -print -quit)
   [ -z "$bad_dir" ] || die "release directory mode is not 0755: $bad_dir"
+  bad_link=$(/usr/bin/find "$path" -type l ! -perm 0755 -print -quit)
+  [ -z "$bad_link" ] || die "release symlink mode is not 0755: $bad_link"
   bad_exec=$(/usr/bin/find "$path" -type f -perm +111 ! -perm 0555 -print -quit)
   [ -z "$bad_exec" ] || die "release executable mode is not 0555: $bad_exec"
   bad_file=$(/usr/bin/find "$path" -type f ! -perm +111 ! -perm 0444 -print -quit)
@@ -670,6 +673,7 @@ assert_archive_members() {
 harden_release() {
   /usr/sbin/chown -R root:wheel "$RELEASE_FINAL"
   /bin/chmod -RN "$RELEASE_FINAL"
+  /usr/bin/find "$RELEASE_FINAL" -type l -exec /bin/chmod -h 0755 {} +
   /usr/bin/find "$RELEASE_FINAL" -type f -perm +111 -exec /bin/chmod 0555 {} +
   /usr/bin/find "$RELEASE_FINAL" -type f ! -perm +111 -exec /bin/chmod 0444 {} +
   # Keep the release root at 0700 until every descendant is hardened so tar
@@ -728,6 +732,12 @@ verify_release_payload() {
     "$RESEARCH_RELEASE/.venv/bin/trading-harness" doctor
   run_as trading-executor /usr/bin/env -i PATH="$EXECUTOR_RELEASE/.venv/bin:/usr/bin:/bin" LANG=C LC_ALL=C \
     "$EXECUTOR_RELEASE/.venv/bin/trading-harness-executor" --help >/dev/null
+  run_as trading-executor /usr/bin/env -i PATH="$EXECUTOR_RELEASE/.venv/bin:/usr/bin:/bin" LANG=C LC_ALL=C \
+    "$EXECUTOR_RELEASE/.venv/bin/python" -B -I -c \
+    'from Crypto.Hash import keccak; assert keccak.new(digest_bits=256, data=b"x").hexdigest() == "7521d1cadbcfa91eec65aa16715b94ffc1c9654ba57ea2ef1a2127bca1127a83"'
+  run_as trading-research /usr/bin/env -i PATH="$RESEARCH_RELEASE/.venv/bin:/usr/bin:/bin" LANG=C LC_ALL=C \
+    "$RESEARCH_RELEASE/.venv/bin/python" -B -I -c \
+    'import mcp, pydantic_core; assert mcp is not None and pydantic_core is not None'
   assert_secure_tree "$RELEASE_FINAL"
   assert_immutable_modes "$RELEASE_FINAL"
 }
@@ -881,6 +891,7 @@ assert_current_exact() {
   [ -L "$CURRENT_LINK" ] || die "current is not a symlink"
   [ "$(/usr/bin/stat -f %u "$CURRENT_LINK")" = 0 ] || die "current symlink must be root-owned"
   [ "$(/usr/bin/stat -f %g "$CURRENT_LINK")" = 0 ] || die "current symlink group must be wheel"
+  [ "$(/usr/bin/stat -f %Lp "$CURRENT_LINK")" = 755 ] || die "current symlink mode must be 0755"
   [ "$(/usr/bin/stat -f %l "$CURRENT_LINK")" = 1 ] || die "hard-linked current symlink rejected"
   [ "$(/usr/bin/readlink "$CURRENT_LINK")" = "releases/$EXPECTED_COMMIT" ] || die "current target is not the reviewed relative target"
   [ "$(/bin/realpath "$CURRENT_LINK")" = "$RELEASE_FINAL" ] || die "current does not resolve to the exact reviewed release"
@@ -892,6 +903,7 @@ assert_current_candidate_exact() {
   [ "$(/usr/bin/readlink "$CURRENT_CANDIDATE")" = "releases/$EXPECTED_COMMIT" ] || die "current candidate is not relative and exact"
   [ "$(/usr/bin/stat -f %u "$CURRENT_CANDIDATE")" = 0 ] || die "current candidate must be root-owned"
   [ "$(/usr/bin/stat -f %g "$CURRENT_CANDIDATE")" = 0 ] || die "current candidate group must be wheel"
+  [ "$(/usr/bin/stat -f %Lp "$CURRENT_CANDIDATE")" = 755 ] || die "current candidate mode must be 0755"
   [ "$(/bin/realpath "$CURRENT_CANDIDATE")" = "$RELEASE_FINAL" ] || die "current candidate does not resolve to the exact READY release"
   verify_release_receipt "$CURRENT_CANDIDATE/.READY"
 }
@@ -900,8 +912,9 @@ promote_current_once() {
   [ ! -e "$CURRENT_LINK" ] && [ ! -L "$CURRENT_LINK" ] || die "current already exists; v1 never upgrades or replaces it"
   verify_release_receipt "$RELEASE_READY"
   if [ ! -e "$CURRENT_CANDIDATE" ] && [ ! -L "$CURRENT_CANDIDATE" ]; then
-    /bin/ln -s "releases/$EXPECTED_COMMIT" "$CURRENT_CANDIDATE"
+    (umask 022; /bin/ln -s "releases/$EXPECTED_COMMIT" "$CURRENT_CANDIDATE")
     /usr/sbin/chown -h root:wheel "$CURRENT_CANDIDATE"
+    /bin/chmod -h 0755 "$CURRENT_CANDIDATE"
   fi
   assert_current_candidate_exact
   [ ! -e "$CURRENT_LINK" ] && [ ! -L "$CURRENT_LINK" ] || die "current appeared before exclusive promotion"

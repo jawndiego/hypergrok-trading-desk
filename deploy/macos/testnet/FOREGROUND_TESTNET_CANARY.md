@@ -34,6 +34,11 @@ remain root-owned mode 0755 and ACL-free under their existing config-hash
 namespaces. It creates directories only; it does not fabricate either route
 expectation or health evidence.
 
+The broker socket parent is the UID/GID-452 directory
+`/private/var/db/trading-desk-testnet-chat-socket`. It is deliberately below
+root-owned `/private/var/db`, not macOS's GID-`daemon`-writable
+`/private/var/run`.
+
 The Lima control plane uses a separate non-agent identity,
 `trading-router-operator` UID/GID 454. Its only home is the ACL-free,
 UID/GID-454 mode-0700 `/private/var/db/trading-desk-lima`. It has no login,

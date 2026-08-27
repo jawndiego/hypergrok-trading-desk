@@ -14,8 +14,8 @@
     "client_uid": 501
   },
   "paths": {
-    "socket": "/private/var/run/trading-desk/testnet-chat-approval.sock",
-    "socket_parent": "/private/var/run/trading-desk",
+    "socket": "/private/var/db/trading-desk-testnet-chat-socket/testnet-chat-approval.sock",
+    "socket_parent": "/private/var/db/trading-desk-testnet-chat-socket",
     "state_parent": "/private/var/db/trading-desk/control-private/chat-approval",
     "database": "/private/var/db/trading-desk/control-private/chat-approval/chat-approval.sqlite3",
     "generations_parent": "/private/var/db/trading-desk/control-private/chat-approval/broker-generations",

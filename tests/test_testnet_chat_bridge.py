@@ -139,6 +139,10 @@ class BridgeClientTests(unittest.TestCase):
         self.assertTrue(connection.closed)
 
     def test_fragmented_approved_response_and_configuration_owned_path(self) -> None:
+        self.assertEqual(
+            "/private/var/db/trading-desk-testnet-chat-socket/testnet-chat-approval.sock",
+            TESTNET_CHAT_BROKER_SOCKET_PATH,
+        )
         connection = FakeBridgeConnection(
             [b"APPROVAL_RECORDED ", PROPOSAL_ID.encode(), b""]
         )

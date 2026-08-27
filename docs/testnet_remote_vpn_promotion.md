@@ -113,6 +113,11 @@ inside the submission lock.
 `trading-harness-remote-vpn-health-collector --run` is the foreground refresh
 surface; `--collect` performs one cycle. It is single-flight and invokes only:
 
+Its preinstalled zero-length `root:wheel` mode-`0600` lock is
+`/private/var/db/trading-desk-testnet-remote-vpn-health/collector.lock`, under
+the same non-writable root-owned cache tree. `/private/var/run` is not trusted
+for this lock because macOS grants write access there to GID `daemon`.
+
 ```text
 /usr/local/libexec/trading-desk-testnet-remote-vpn-sample   (root)
 /usr/local/libexec/trading-desk-testnet-remote-vpn-probe    (UID/GID 451)
