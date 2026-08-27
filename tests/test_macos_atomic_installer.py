@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "deploy" / "macos" / "testnet" / "04-install-merged-main.sh"
-EXPECTED_COMMIT = "b697d6815ecb0e368098b624161dad5723d5e869"
+EXPECTED_COMMIT = "2b29ab7823132a1e1b58f4a376320368f76d865c"
 
 
 def installer_text() -> str:
@@ -145,7 +145,7 @@ class AtomicFirstInstallContractTests(unittest.TestCase):
             "EXPECTED_EXECUTOR_KEYCHAIN_HELPER_SHA256=42e583ee40d48546a92bf40bf650fa576ec3d86455bf663cc3760b90d050df27",
             "EXPECTED_CONTROL_KEYCHAIN_HELPER_SHA256=da10752940f726258f4e2439b657db0c2f3fefcb3c30ef6a1eaa69df3da8e194",
             "LIBEXEC_PARENT=$TRADING_ROOT/libexec",
-            "ROLE_HELPER_RELEASE_REBIND_REQUIRED=1",
+            "ROLE_HELPER_RELEASE_REBIND_REQUIRED=0",
         ):
             self.assertIn(required, text)
         for required in (

@@ -81,10 +81,11 @@ later resize changes the tested resource boundary.
    code-signature-verifies them, then installs immutable copies at
    `/opt/trading-desk/libexec/trading-keychain-reader-executor-v1` and
    `/opt/trading-desk/libexec/trading-keychain-reader-control-v1` as
-   `root:trading-executor`/`root:trading-control`, mode `0510`. Apply remains
-   compiled off until the new provider commit, wheel and deployment pack are
-   rebound together; the currently pinned b697 wheel still contains the legacy
-   provider. The separate
+   `root:trading-executor`/`root:trading-control`, mode `0510`. The installer is
+   bound to application commit `2b29ab7823132a1e1b58f4a376320368f76d865c`
+   and its exact archive, schema-v3 wheel, dependency manifest and readers.
+   Apply is valid only from the separately sealed replacement pack after its
+   binding commit passes exact-head CI. The separate
    [attended System Keychain provisioning plan](KEYCHAIN_PROVISIONING_PLAN.md)
    describes the fixed-slot, non-exporting native provisioner and its removal
    after qualification. Its harmless probe records must pass the sealed
