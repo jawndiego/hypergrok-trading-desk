@@ -44,6 +44,10 @@ from trading_harness.hyperliquid_wire import (
     ProtectedOrderAction,
     build_protected_order_action,
 )
+from trading_harness.testnet_entry_role_attestation import (
+    EntryRoleAttestationStage,
+    collect_testnet_entry_role_attestation,
+)
 from trading_harness.nonce import PersistentNonceAllocator
 from trading_harness.planning import ProtectedTradePlan
 from tests.test_execution_store import (
@@ -184,12 +188,56 @@ def sign_protected_action(
     preflight: DispatchPreflight | None = None,
     **kwargs,
 ):
+    selected_preflight = dispatch_preflight() if preflight is None else preflight
+    if "pre_key_role_attestation" not in kwargs:
+        kwargs["pre_key_role_attestation"] = entry_pre_key_role(
+            unsigned,
+            plan=plan,
+            preflight=selected_preflight,
+        )
     return _sign_protected_action(
         unsigned,
         plan=plan,
         metadata=metadata,
-        preflight=dispatch_preflight() if preflight is None else preflight,
+        preflight=selected_preflight,
         **kwargs,
+    )
+
+
+def entry_pre_key_role(
+    unsigned: ProtectedOrderAction,
+    *,
+    plan: ProtectedTradePlan = SOURCE_PLAN,
+    preflight: DispatchPreflight | None = None,
+    main_account_address: str = MAIN_ACCOUNT,
+    api_wallet_address: str = SIGNER,
+    completed_at: datetime = NOW,
+):
+    selected_preflight = dispatch_preflight() if preflight is None else preflight
+    times = iter(
+        (
+            completed_at - timedelta(milliseconds=2),
+            completed_at - timedelta(milliseconds=1),
+            completed_at,
+        )
+    )
+    return collect_testnet_entry_role_attestation(
+        stage=EntryRoleAttestationStage.PRE_KEY,
+        account_id=unsigned.account_id,
+        main_account_address=main_account_address,
+        api_wallet_address=api_wallet_address,
+        command_id=selected_preflight.command_id,
+        ticket_hash=selected_preflight.ticket_hash,
+        plan_hash=plan.plan_hash,
+        preflight_hash=selected_preflight.preflight_hash,
+        action_hash=unsigned.action_hash,
+        worker_id="signer-test-worker",
+        fencing_token=1,
+        transport=lambda method, endpoint, request: {
+            "role": "agent",
+            "data": {"user": main_account_address},
+        },
+        clock=lambda: next(times),
     )
 
 
@@ -450,14 +498,23 @@ def prepare_durable_noop_fixture(
     )
     assert dispatch_claim is not None
     preflight = case.register_preflight(ticket)
+    pre_key = case.record_pre_key_role(
+        preflight,
+        command_id="command-1",
+        worker_id="dispatcher",
+        fencing_token=dispatch_claim.fencing_token,
+        action_hash=digest("action"),
+        boundary_at=STORE_NOW + timedelta(seconds=1, milliseconds=550),
+    )
     original_nonce = int(
         (STORE_NOW + timedelta(seconds=2)).timestamp() * 1_000
     )
     signed_parent = case.make_signed_evidence(
         preflight,
         nonce=original_nonce,
+        pre_key_role_attestation_hash=pre_key.attestation_hash,
     )
-    case.store.prepare_attempt(
+    parent_attempt = case.store.prepare_attempt(
         "command-1",
         "dispatcher",
         dispatch_claim.fencing_token,
@@ -468,6 +525,15 @@ def prepare_durable_noop_fixture(
         action_hash=signed_parent.action_hash,
         wire_hash=signed_parent.wire_hash,
         at=STORE_NOW + timedelta(seconds=2),
+    )
+    case.authorize_entry_attempt(
+        preflight,
+        signed_parent,
+        attempt_id=parent_attempt.attempt_id,
+        command_id="command-1",
+        worker_id="dispatcher",
+        fencing_token=dispatch_claim.fencing_token,
+        boundary_at=STORE_NOW + timedelta(seconds=2, milliseconds=200),
     )
     case.store.mark_submitted_unknown(
         "command-1",
@@ -544,6 +610,91 @@ def prepare_durable_noop_fixture(
 
 
 class IsolatedSigningTests(unittest.TestCase):
+    def test_fresh_exact_pre_key_role_is_required_before_wallet_or_nonce(self) -> None:
+        events: list[str] = []
+        wallet = GuardWallet()
+        with self.assertRaisesRegex(TypeError, "pre_key_role_attestation"):
+            _sign_protected_action(
+                protected(),
+                plan=SOURCE_PLAN,
+                metadata=SOURCE_METADATA,
+                preflight=dispatch_preflight(),
+                pre_key_role_attestation=None,  # type: ignore[arg-type]
+                policy=policy(),
+                wallet=wallet,
+                nonce_allocator=FakeNonceAllocator(events),
+                clock=lambda: NOW,
+                sign_l1_action=FakeSigner(events),
+            )
+        self.assertEqual(0, wallet.calls)
+        self.assertEqual([], events)
+
+        valid = entry_pre_key_role(protected())
+        for changed in (
+            replace(valid, main_account_address="0x" + "c" * 40),
+            entry_pre_key_role(
+                protected(),
+                completed_at=NOW - timedelta(seconds=3),
+            ),
+        ):
+            with self.subTest(attestation=changed):
+                events = []
+                guarded_wallet = GuardWallet()
+                with self.assertRaisesRegex(SignerPolicyError, "PRE_KEY"):
+                    sign_protected_action(
+                        protected(),
+                        pre_key_role_attestation=changed,
+                        policy=policy(),
+                        wallet=guarded_wallet,
+                        nonce_allocator=FakeNonceAllocator(events),
+                        clock=lambda: NOW,
+                        sign_l1_action=FakeSigner(events),
+                    )
+                self.assertEqual(0, guarded_wallet.calls)
+                self.assertEqual([], events)
+
+    def test_pre_key_must_span_actual_signing_interval(self) -> None:
+        events: list[str] = []
+        ticks = iter(
+            (
+                NOW,
+                NOW + timedelta(milliseconds=100),
+                NOW + timedelta(seconds=2),
+            )
+        )
+        with self.assertRaisesRegex(SignerOutputError, "expired during key use"):
+            sign_protected_action(
+                protected(),
+                pre_key_role_attestation=entry_pre_key_role(protected()),
+                policy=policy(),
+                wallet=FakeWallet(),
+                nonce_allocator=FakeNonceAllocator(events),
+                clock=lambda: next(ticks),
+                sign_l1_action=FakeSigner(events),
+            )
+
+        self.assertEqual(["nonce_committed", "signed"], events)
+
+        rollback_events: list[str] = []
+        rollback_ticks = iter(
+            (
+                NOW,
+                NOW + timedelta(milliseconds=100),
+                NOW + timedelta(milliseconds=50),
+            )
+        )
+        with self.assertRaisesRegex(SignerOutputError, "clock moved backwards"):
+            sign_protected_action(
+                protected(),
+                pre_key_role_attestation=entry_pre_key_role(protected()),
+                policy=policy(),
+                wallet=FakeWallet(),
+                nonce_allocator=FakeNonceAllocator(rollback_events),
+                clock=lambda: next(rollback_ticks),
+                sign_l1_action=FakeSigner(rollback_events),
+            )
+        self.assertEqual(["nonce_committed", "signed"], rollback_events)
+
     def test_nonce_is_committed_before_exact_single_sign_and_wire_is_frozen(self) -> None:
         events: list[str] = []
         signer = FakeSigner(events)
@@ -569,6 +720,8 @@ class IsolatedSigningTests(unittest.TestCase):
         self.assertEqual(signed.main_account_address, MAIN_ACCOUNT)
         self.assertEqual(signed.preflight_hash, dispatch_preflight().preflight_hash)
         self.assertEqual(signed.preflight_expires_at_ms, NOW_MS + 5_000)
+        self.assertEqual(signed.signing_started_at_ms, NOW_MS)
+        self.assertEqual(signed.signed_at_ms, NOW_MS)
         self.assertEqual(signed.signing_implementation, "injected")
         self.assertRegex(signed.signature_hash, r"^[0-9a-f]{64}$")
         self.assertRegex(signed.envelope_hash, r"^[0-9a-f]{64}$")
@@ -581,8 +734,17 @@ class IsolatedSigningTests(unittest.TestCase):
             ("action", "nonce", "signature", "vaultAddress", "expiresAfter"),
         )
         signed.verify_integrity()
+        with self.assertRaisesRegex(SignerOutputError, "binding"):
+            replace(
+                signed,
+                pre_key_role_attestation_hash="0" * 64,
+            ).verify_integrity()
         persisted = signed.execution_store_evidence("command-1")
         self.assertEqual(persisted.preflight_hash, signed.preflight_hash)
+        self.assertEqual(
+            persisted.pre_key_role_attestation_hash,
+            signed.pre_key_role_attestation_hash,
+        )
         self.assertEqual(persisted.wire_hash, signed.wire_hash)
         self.assertEqual(persisted.signer_binding_hash, signed.signer_binding_hash)
         json.dumps(signed.as_dict(), allow_nan=False, sort_keys=True)
@@ -1493,8 +1655,16 @@ class OfficialSdkContractTests(unittest.TestCase):
             allowed_asset_ids=frozenset({1}),
         )
         events: list[str] = []
+        unsigned = protected()
+        selected_preflight = dispatch_preflight()
         signed = sign_protected_action(
-            protected(),
+            unsigned,
+            preflight=selected_preflight,
+            pre_key_role_attestation=entry_pre_key_role(
+                unsigned,
+                preflight=selected_preflight,
+                api_wallet_address=wallet.address.lower(),
+            ),
             policy=selected_policy,
             wallet=wallet,
             nonce_allocator=FakeNonceAllocator(events),

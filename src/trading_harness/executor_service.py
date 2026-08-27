@@ -24,7 +24,7 @@ from .approval import TestnetRecoveryAuthority
 from .daily_loss import DailyLossBinding, DailyLossLedger
 from .dispatcher import ExecutionDispatcher
 from .domain import Environment
-from .errors import ValidationError
+from .errors import StateConflict, ValidationError
 from .execution_store import ExecutionStore
 from .execution_work_scanner import ExecutionWorkScanner
 from .executor_config import ExecutorConfig
@@ -80,6 +80,12 @@ from .recovery_reconciliation import RecoveryReconciliationCoordinator
 from .staging_inbox import (
     TradeStagingInbox,
     TrustedQuoteDecision,
+)
+from .testnet_chat_delivery import testnet_chat_execution_scope_from_config
+from .testnet_entry_role_attestation import (
+    EntryRoleAttestationStage,
+    TESTNET_ENTRY_ROLE_INFO_ENDPOINT,
+    collect_testnet_entry_role_attestation,
 )
 
 
@@ -312,6 +318,7 @@ def _compose_testnet_executor_state(
             account_id=config.account_id,
             max_reserved_loss=config.max_reserved_loss,
             max_reserved_notional=config.max_reserved_notional,
+            chat_scope=testnet_chat_execution_scope_from_config(config),
             must_exist=must_exist,
         )
         runtime_store = ExecutorRuntimeStore(
@@ -741,12 +748,54 @@ def build_active_testnet_executor_service(
         learning_projector.require_entry_ready(command.command_id)
         return entry_preparer(command, ticket, plan, requested_at)
 
-    def entry_signer(protected, plan, metadata, preflight):
+    def entry_role_attestor(
+        *,
+        stage,
+        command,
+        ticket,
+        plan,
+        package,
+        worker_id,
+        fencing_token,
+        attempt_id,
+        signed_evidence_hash,
+    ):
+        if stage not in {
+            EntryRoleAttestationStage.PRE_KEY,
+            EntryRoleAttestationStage.PRE_SEND,
+        }:
+            raise StateConflict("entry role stage is unsupported")
+
+        def explicit_post(method, endpoint, payload):
+            if method != "POST" or endpoint != TESTNET_ENTRY_ROLE_INFO_ENDPOINT:
+                raise StateConflict("entry role read is not fixed TESTNET POST")
+            return info_transport(endpoint, payload)
+
+        return collect_testnet_entry_role_attestation(
+            stage=stage,
+            account_id=config.account_id,
+            main_account_address=config.main_account_address,
+            api_wallet_address=config.api_wallet_address,
+            command_id=command.command_id,
+            ticket_hash=ticket.ticket_hash,
+            plan_hash=plan.plan_hash,
+            preflight_hash=package.preflight.preflight_hash,
+            action_hash=package.protected_action.action_hash,
+            worker_id=worker_id,
+            fencing_token=fencing_token,
+            attempt_id=attempt_id,
+            signed_evidence_hash=signed_evidence_hash,
+            transport=explicit_post,
+            clock=clock,
+        )
+
+    def entry_signer(protected, plan, metadata, preflight, pre_key_role):
         return sign_protected_action(
             protected,
             plan=plan,
             metadata=metadata,
             preflight=preflight,
+            pre_key_role_attestation=pre_key_role,
             policy=signer_policy,
             wallet=wallet,
             nonce_allocator=state.nonce_allocator,
@@ -758,6 +807,7 @@ def build_active_testnet_executor_service(
         state.execution_store,
         preparer=learning_bound_preparer,
         signer=entry_signer,
+        role_attestor=entry_role_attestor,
         clock=clock,
         lease_seconds=120,
     )

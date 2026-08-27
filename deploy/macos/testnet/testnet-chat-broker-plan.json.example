@@ -1,0 +1,87 @@
+{
+  "schema_version": "testnet_chat_broker_deployment_plan.v1",
+  "artifact_kind": "inert-example",
+  "plan_only": true,
+  "apply_enabled": false,
+  "listener_compiled_enabled": false,
+  "testnet_only": true,
+  "mainnet_authorized": false,
+  "credentials_present": false,
+  "venue_access_present": false,
+  "identities": {
+    "broker_uid": 452,
+    "broker_gid": 452,
+    "client_uid": 501
+  },
+  "paths": {
+    "socket": "/private/var/run/trading-desk/testnet-chat-approval.sock",
+    "socket_parent": "/private/var/run/trading-desk",
+    "state_parent": "/private/var/db/trading-desk/control-private/chat-approval",
+    "database": "/private/var/db/trading-desk/control-private/chat-approval/chat-approval.sqlite3",
+    "generations_parent": "/private/var/db/trading-desk/control-private/chat-approval/broker-generations",
+    "handoff_root": "/private/var/db/trading-desk-testnet-chat-handoffs",
+    "control_runtime_root": "/opt/trading-desk/current/control",
+    "control_runtime_python": "/opt/trading-desk/current/control/.venv/bin/python",
+    "launchd_plan": "/Library/LaunchDaemons/com.jawndiego.trading-desk-testnet-chat-broker.plist"
+  },
+  "required_layout": {
+    "socket_parent": {
+      "owner_uid": 452,
+      "owner_gid": 452,
+      "mode": "0700",
+      "exact_named_acl": "user:uid-501 allow search",
+      "client_may_list": false,
+      "client_may_create": false,
+      "client_may_delete": false,
+      "client_may_rename": false
+    },
+    "socket": {
+      "owner_uid": 452,
+      "owner_gid": 452,
+      "mode": "0622",
+      "named_acl_entries": 0,
+      "type": "AF_UNIX/SOCK_STREAM",
+      "links": 1
+    },
+    "state_parent": {
+      "owner_uid": 452,
+      "owner_gid": 452,
+      "mode": "0700",
+      "named_acl_entries": 0,
+      "client_access": "none"
+    },
+    "private_files": {
+      "owner_uid": 452,
+      "owner_gid": 452,
+      "mode": "0600",
+      "named_acl_entries": 0,
+      "type": "regular-single-link"
+    }
+  },
+  "service": {
+    "module": "trading_harness.testnet_chat_broker_service",
+    "arguments": [],
+    "environment_selectors": [],
+    "backlog": 4,
+    "accept_timeout_milliseconds": 500,
+    "sequential": true,
+    "automatic_approval_retry": false,
+    "run_at_load": false,
+    "keep_alive": false,
+    "launchd_disabled": true
+  },
+  "promotion_blockers": [
+    "dedicated exact-head sealed control runtime is absent and requires separate installation verification",
+    "sacrificial UID-501 ACL positive and negative matrix",
+    "socket connect behavior before and after reboot",
+    "stale-node and replacement probes",
+    "broker-generation crash and restart reconciliation",
+    "fixed authenticated account and market collector composition",
+    "same-process active-generation issuer and listener lifecycle",
+    "installed read-only proposal presentation ACL and configuration",
+    "UID-452 create-only canonical handoff artifact publisher",
+    "installed UID-451 verified handoff reader and consumer loop",
+    "handoff namespace ACL and replacement matrix",
+    "live schema-v14 PRE_KEY and PRE_SEND signer, transport, and UNKNOWN-outcome qualification"
+  ]
+}

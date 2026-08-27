@@ -27,7 +27,7 @@ import re
 from typing import Any, Protocol, TypeAlias
 
 from .canonical import canonical_decimal, canonical_json, domain_hash, validate_decimal_bounds
-from .errors import HarnessError, ValidationError
+from .errors import HarnessError, StateConflict, ValidationError
 from .domain import Environment
 from .execution_store import (
     AttemptRecord,
@@ -58,6 +58,10 @@ from .hyperliquid_wire import (
     build_protected_order_action,
 )
 from .planning import ProtectedTradePlan, protected_trade_plan_from_dict
+from .testnet_entry_role_attestation import (
+    EntryRoleAttestationStage,
+    TestnetEntryRoleAttestation,
+)
 
 
 OFFICIAL_SDK_DISTRIBUTION = "hyperliquid-python-sdk"
@@ -65,6 +69,9 @@ OFFICIAL_SDK_VERSION = "0.24.0"
 SIGNED_ENVELOPE_HASH_DOMAIN = "trading-harness/hyperliquid-signed-envelope/v1"
 SIGNATURE_HASH_DOMAIN = "trading-harness/hyperliquid-signature/v1"
 SIGNER_BINDING_HASH_DOMAIN = "trading-harness/hyperliquid-signer-binding/v1"
+PROTECTED_SIGNER_BINDING_HASH_DOMAIN = (
+    "trading-harness/hyperliquid-protected-signer-binding/v3"
+)
 
 _ACTION_HASH_DOMAIN = "trading-harness/hyperliquid-action/v1"
 _ADDRESS_RE = re.compile(r"^0x[0-9a-f]{40}$")
@@ -385,10 +392,12 @@ class SignedActionEnvelope:
     metadata_hash: str
     action_hash: str
     preflight_hash: str
+    pre_key_role_attestation_hash: str
     preflight_expires_at_ms: int
     nonce: int
     authorization_expires_at_ms: int
     expires_after_ms: int
+    signing_started_at_ms: int
     signed_at_ms: int
     signature: Signature
     signature_hash: str
@@ -422,20 +431,38 @@ class SignedActionEnvelope:
             raise SignerOutputError("signed wire network is invalid")
         if self.network is HyperliquidNetwork.MAINNET:
             raise SignerOutputError("mainnet signed wire is hard-disabled")
+        try:
+            main_account_address = _address(
+                self.main_account_address,
+                "main_account_address",
+            )
+            signer_address = _address(self.signer_address, "signer_address")
+        except SignerPolicyError as error:
+            raise SignerOutputError("signed wire account binding is invalid") from error
+        if main_account_address == signer_address:
+            raise SignerOutputError(
+                "signed wire API wallet must differ from its main account"
+            )
         for field, value in (
             ("plan_hash", self.plan_hash),
             ("metadata_hash", self.metadata_hash),
             ("action_hash", self.action_hash),
             ("preflight_hash", self.preflight_hash),
+            (
+                "pre_key_role_attestation_hash",
+                self.pre_key_role_attestation_hash,
+            ),
         ):
             if not isinstance(value, str) or not _HASH_RE.fullmatch(value):
                 raise SignerOutputError(f"signed wire {field} is invalid")
         if not (
             type(self.signed_at_ms) is int
+            and type(self.signing_started_at_ms) is int
             and type(self.expires_after_ms) is int
             and type(self.authorization_expires_at_ms) is int
             and type(self.preflight_expires_at_ms) is int
-            and self.signed_at_ms
+            and self.signing_started_at_ms
+            <= self.signed_at_ms
             < self.expires_after_ms
             <= self.authorization_expires_at_ms
             and self.expires_after_ms <= self.preflight_expires_at_ms
@@ -495,14 +522,20 @@ class SignedActionEnvelope:
             "vault_address": self.vault_address,
             "action_hash": self.action_hash,
             "preflight_hash": self.preflight_hash,
+            "pre_key_role_attestation_hash": self.pre_key_role_attestation_hash,
             "preflight_expires_at_ms": self.preflight_expires_at_ms,
+            "signing_started_at_ms": self.signing_started_at_ms,
+            "signed_at_ms": self.signed_at_ms,
         }
-        if domain_hash(SIGNER_BINDING_HASH_DOMAIN, binding) != self.signer_binding_hash:
+        if domain_hash(
+            PROTECTED_SIGNER_BINDING_HASH_DOMAIN,
+            binding,
+        ) != self.signer_binding_hash:
             raise SignerOutputError("signed wire signer policy binding mismatch")
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "hyperliquid.signed_action_envelope.v1",
+            "schema_version": "hyperliquid.signed_action_envelope.v3",
             "network": self.network.value,
             "exchange_url": self.exchange_url,
             "account_id": self.account_id,
@@ -513,10 +546,12 @@ class SignedActionEnvelope:
             "metadata_hash": self.metadata_hash,
             "action_hash": self.action_hash,
             "preflight_hash": self.preflight_hash,
+            "pre_key_role_attestation_hash": self.pre_key_role_attestation_hash,
             "preflight_expires_at_ms": self.preflight_expires_at_ms,
             "nonce": self.nonce,
             "authorization_expires_at_ms": self.authorization_expires_at_ms,
             "expires_after_ms": self.expires_after_ms,
+            "signing_started_at_ms": self.signing_started_at_ms,
             "signed_at_ms": self.signed_at_ms,
             "signature": self.signature.as_dict(),
             "signature_hash": self.signature_hash,
@@ -538,8 +573,11 @@ class SignedActionEnvelope:
             environment=self.network.environment,
             endpoint=self.exchange_url,
             account_id=self.account_id,
+            main_account_address=self.main_account_address,
+            api_wallet_address=self.signer_address,
             plan_hash=self.plan_hash,
             action_hash=self.action_hash,
+            pre_key_role_attestation_hash=self.pre_key_role_attestation_hash,
             nonce=self.nonce,
             wire_hash=self.wire_hash,
             signature_hash=self.signature_hash,
@@ -547,6 +585,7 @@ class SignedActionEnvelope:
             signer_binding_hash=self.signer_binding_hash,
             authorization_expires_at_ms=self.authorization_expires_at_ms,
             expires_after_ms=self.expires_after_ms,
+            signing_started_at_ms=self.signing_started_at_ms,
             signed_at_ms=self.signed_at_ms,
         )
 
@@ -1554,6 +1593,7 @@ def sign_protected_action(
     plan: ProtectedTradePlan,
     metadata: PerpInstrumentMetadata,
     preflight: DispatchPreflight,
+    pre_key_role_attestation: TestnetEntryRoleAttestation,
     policy: SignerPolicy,
     wallet: object,
     nonce_allocator: NonceAllocator,
@@ -1568,48 +1608,62 @@ def sign_protected_action(
         raise TypeError("nonce_allocator must provide allocate()")
     if not callable(clock):
         raise TypeError("clock must be callable")
-    now_ms = _utc_ms(clock)
+    if type(pre_key_role_attestation) is not TestnetEntryRoleAttestation:
+        raise TypeError(
+            "pre_key_role_attestation must be exact TestnetEntryRoleAttestation"
+        )
+    validation_now_ms = _utc_ms(clock)
     action, preflight_expiry_ms = _validate_protected_sources(
         protected,
         plan=plan,
         metadata=metadata,
         preflight=preflight,
-        now_ms=now_ms,
+        now_ms=validation_now_ms,
     )
     if protected.network not in policy.allowed_networks:
         raise SignerPolicyError("protected action network is not allowlisted")
     if protected.network is HyperliquidNetwork.MAINNET:
         raise SignerPolicyError("mainnet signing is hard-disabled in this build")
     account = policy.account(protected.account_id)
+    try:
+        pre_key_role_attestation.verify_integrity(
+            at=_EPOCH + timedelta(milliseconds=validation_now_ms)
+        )
+    except (StateConflict, TypeError, ValueError, ValidationError) as error:
+        raise SignerPolicyError("PRE_KEY userRole attestation is invalid") from error
+    if (
+        pre_key_role_attestation.stage is not EntryRoleAttestationStage.PRE_KEY
+        or pre_key_role_attestation.account_id != protected.account_id
+        or pre_key_role_attestation.main_account_address
+        != account.main_account_address
+        or pre_key_role_attestation.api_wallet_address != account.signer_address
+        or pre_key_role_attestation.command_id != preflight.command_id
+        or pre_key_role_attestation.ticket_hash != preflight.ticket_hash
+        or pre_key_role_attestation.plan_hash != plan.plan_hash
+        or pre_key_role_attestation.preflight_hash != preflight.preflight_hash
+        or pre_key_role_attestation.action_hash != protected.action_hash
+        or pre_key_role_attestation.attempt_id is not None
+        or pre_key_role_attestation.signed_evidence_hash is not None
+    ):
+        raise SignerPolicyError(
+            "PRE_KEY userRole attestation differs from the protected command"
+        )
     signer_address = _wallet_address(wallet)
     if signer_address != account.signer_address:
         raise SignerPolicyError("injected wallet does not match the account signer allowlist")
     asset = action["orders"][0]["a"]  # type: ignore[index]
     if asset not in policy.allowed_asset_ids:
         raise SignerPolicyError("protected action asset is not allowlisted")
-
-    remaining = protected.expires_at_ms - now_ms
-    if remaining < policy.minimum_expiry_remaining_ms:
-        raise SignerPolicyError("protected action expiry is stale or too close")
-    # The reviewed intent expiry is an upper authorization bound.  The actual
-    # L1 action receives a new, shorter transaction-delay deadline so a normal
-    # 60-second approval can never become a 60-second delayed venue action.
-    expires_after_ms = min(
+    initial_expiry = min(
         protected.expires_at_ms,
-        now_ms + policy.maximum_expiry_horizon_ms,
+        validation_now_ms + policy.maximum_expiry_horizon_ms,
         preflight_expiry_ms,
     )
-    if expires_after_ms - now_ms < policy.minimum_expiry_remaining_ms:
+    if (
+        initial_expiry - validation_now_ms
+        < policy.minimum_expiry_remaining_ms
+    ):
         raise SignerPolicyError("dispatch preflight expires too soon for signing")
-
-    # PersistentNonceAllocator commits inside allocate().  This must remain
-    # before the signing call: a signing exception burns a nonce safely rather
-    # than risking reuse after a crash.
-    nonce = nonce_allocator.allocate()
-    if type(nonce) is not int or nonce < 0:
-        raise SignerPolicyError("nonce allocator returned an invalid nonce")
-    if not now_ms - _NONCE_PAST_WINDOW_MS < nonce < now_ms + _NONCE_FUTURE_WINDOW_MS:
-        raise SignerPolicyError("allocated nonce is outside Hyperliquid's time window")
 
     implementation = "injected"
     signing_function = sign_l1_action
@@ -1626,6 +1680,44 @@ def sign_protected_action(
         separators=(",", ":"),
         sort_keys=False,
     )
+
+    # PersistentNonceAllocator commits inside allocate().  This must remain
+    # before the signing call: a signing exception or a role-fence expiry at
+    # the final key boundary burns a nonce safely rather than risking reuse.
+    nonce = nonce_allocator.allocate()
+    if type(nonce) is not int or nonce < 0:
+        raise SignerPolicyError("nonce allocator returned an invalid nonce")
+
+    signing_started_at_ms = _utc_ms(clock)
+    if signing_started_at_ms < validation_now_ms:
+        raise SignerPolicyError("signer clock moved backwards before key use")
+    try:
+        pre_key_role_attestation.verify_integrity(
+            at=_EPOCH + timedelta(milliseconds=signing_started_at_ms)
+        )
+    except (StateConflict, TypeError, ValueError, ValidationError) as error:
+        raise SignerPolicyError(
+            "PRE_KEY userRole attestation expired before key use"
+        ) from error
+    if not (
+        signing_started_at_ms - _NONCE_PAST_WINDOW_MS
+        < nonce
+        < signing_started_at_ms + _NONCE_FUTURE_WINDOW_MS
+    ):
+        raise SignerPolicyError("allocated nonce is outside Hyperliquid's time window")
+    # The reviewed intent expiry is an upper authorization bound.  The actual
+    # L1 action receives a new, shorter transaction-delay deadline so a normal
+    # 60-second approval can never become a 60-second delayed venue action.
+    expires_after_ms = min(
+        protected.expires_at_ms,
+        signing_started_at_ms + policy.maximum_expiry_horizon_ms,
+        preflight_expiry_ms,
+    )
+    if (
+        expires_after_ms - signing_started_at_ms
+        < policy.minimum_expiry_remaining_ms
+    ):
+        raise SignerPolicyError("dispatch preflight expires too soon for signing")
     try:
         raw_signature = signing_function(
             wallet,
@@ -1641,6 +1733,19 @@ def sign_protected_action(
         raise SignerOutputError(
             f"sign_l1_action failed: {type(error).__name__}"
         ) from error
+    signed_at_ms = _utc_ms(clock)
+    if signed_at_ms < signing_started_at_ms:
+        raise SignerOutputError("signer clock moved backwards during key use")
+    try:
+        pre_key_role_attestation.verify_integrity(
+            at=_EPOCH + timedelta(milliseconds=signed_at_ms)
+        )
+    except (StateConflict, TypeError, ValueError, ValidationError) as error:
+        raise SignerOutputError(
+            "PRE_KEY userRole attestation expired during key use"
+        ) from error
+    if signed_at_ms >= expires_after_ms or signed_at_ms >= preflight_expiry_ms:
+        raise SignerOutputError("signed action expired during key use")
     signing_action_after = json.dumps(
         signing_action,
         ensure_ascii=False,
@@ -1673,7 +1778,7 @@ def sign_protected_action(
     signature_hash = domain_hash(SIGNATURE_HASH_DOMAIN, signature.as_dict())
     envelope_hash = domain_hash(SIGNED_ENVELOPE_HASH_DOMAIN, envelope)
     signer_binding_hash = domain_hash(
-        SIGNER_BINDING_HASH_DOMAIN,
+        PROTECTED_SIGNER_BINDING_HASH_DOMAIN,
         {
             "artifact_kind": "protected_order",
             "network": protected.network.value,
@@ -1683,7 +1788,12 @@ def sign_protected_action(
             "vault_address": account.vault_address,
             "action_hash": protected.action_hash,
             "preflight_hash": preflight.preflight_hash,
+            "pre_key_role_attestation_hash": (
+                pre_key_role_attestation.attestation_hash
+            ),
             "preflight_expires_at_ms": preflight_expiry_ms,
+            "signing_started_at_ms": signing_started_at_ms,
+            "signed_at_ms": signed_at_ms,
         },
     )
     result = SignedActionEnvelope(
@@ -1696,11 +1806,15 @@ def sign_protected_action(
         metadata_hash=protected.metadata_hash,
         action_hash=protected.action_hash,
         preflight_hash=preflight.preflight_hash,
+        pre_key_role_attestation_hash=(
+            pre_key_role_attestation.attestation_hash
+        ),
         preflight_expires_at_ms=preflight_expiry_ms,
         nonce=nonce,
         authorization_expires_at_ms=protected.expires_at_ms,
         expires_after_ms=expires_after_ms,
-        signed_at_ms=now_ms,
+        signing_started_at_ms=signing_started_at_ms,
+        signed_at_ms=signed_at_ms,
         signature=signature,
         signature_hash=signature_hash,
         envelope_hash=envelope_hash,
@@ -2366,6 +2480,7 @@ def sign_recovery_action(
 __all__ = (
     "OFFICIAL_SDK_DISTRIBUTION",
     "OFFICIAL_SDK_VERSION",
+    "PROTECTED_SIGNER_BINDING_HASH_DOMAIN",
     "MAX_PROTECTED_NOTIONAL",
     "MAX_PROTECTED_QUANTITY",
     "RECOVERY_SAFETY_POLICY_HASH_DOMAIN",

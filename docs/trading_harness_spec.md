@@ -377,6 +377,60 @@ key-use and send boundary requires a fresh, stable two-read
 is worker/action/fence-bound; PRE_SEND additionally binds the exact attempt and
 signed evidence. Admission-time role evidence is insufficient by itself.
 
+Execution-store schema v13 applies the same invariant to the normal protected
+entry path without importing qualification-only types. Immutable PRE_KEY and
+PRE_SEND rows bind account/main/API-wallet, command, ticket, plan, preflight,
+action, worker and fence. PRE_KEY must exist and remain fresh when signed
+evidence is persisted, and the signed timestamp must fall inside that role
+window. PRE_SEND additionally binds the exact attempt and signed evidence; its
+hash and expiry are part of the one-shot submission authority and are checked
+again by transport before HTTP. Any nonempty schema-v12 signed envelope,
+attempt or submission-authority state refuses automatic v13 migration because
+real role observations cannot be fabricated during migration.
+
+Schema v13 also adds explicit `testnet_chat` execution provenance. A canonical
+handoff contains one proposal, its exact approved state and unique receipt,
+never a credential or HMAC. The executor does not read the control database.
+At-least-once delivery is reconciled by unique proposal/state/receipt/handoff,
+ticket, plan, authorization and command identities. The first exact delivery
+reloads the registered ticket, plan and authenticated infrastructure grant;
+revalidates configured account/main/API-wallet, audience, economics, policy,
+snapshots, expiry and current caps; then consumes the chat authority and ticket,
+reserves risk and creates the command, three legs, outbox and event in one
+`BEGIN IMMEDIATE` transaction. Exact replay returns the existing command;
+conflict or failure rolls the transaction back. This path never constructs a
+`TrustedApproval`, and learning records the distinct
+`testnet_chat_approval_unattested` handoff hash.
+
+Execution-store schema v14 strengthens the normal-entry evidence chain without
+changing the schema-v13 authority model. Signed evidence now includes the exact
+configured main/API-wallet addresses and signing-start interval; PRE_KEY is
+checked immediately before and after key use. Every normal transport outcome
+must name the exact durable submission authority and PRE_SEND attestation and
+must satisfy causal time ordering. Nonempty legacy signed, attempted or outcome
+state cannot auto-migrate across this boundary.
+
+Schema v15 makes the portable handoff non-authoritative on its own. One
+immutable chat scope is derived from executor config and durably binds TESTNET
+account, addresses, audience, config hash, UID 451/452 and the fixed
+config-hash artifact directory. Public admission accepts only a handoff ID and
+the store itself invokes the fixed UID-451 reader after canonical path,
+ancestor, owner, mode, exact named-ACL, type, link, inode, metadata, size and
+byte checks on a UID/GID-452 artifact. Admission takes no free handoff,
+delivery object, timestamp or per-call scope fields; it uses a store-owned
+clock, rechecks the result against the persisted scope in the same transaction,
+and stores its path/byte/source hashes. Nonempty schema-v14 chat state cannot auto-migrate because authentic
+source evidence cannot be backfilled.
+
+Schema v16 preserves the v15 migration bytes and persists the full canonical
+delivery-evidence document: root-to-private-root ancestor identities/ACLs,
+config directory and file identities, exact UID-451 execute/read ACEs and byte
+and source hashes. Restart decoding reconstructs the typed evidence and
+recomputes its complete relationship to the handoff and scope. Nonempty
+schema-v15 chat state cannot auto-migrate because that evidence cannot be
+invented later. The control publisher, exact ACL installation and installed
+reader/consumer loop remain deployment work.
+
 Reconciliation is restart-idempotent rather than order-status retrying: an
 existing query row and its hash-bound retained snapshot are hydrated from
 schema-v12 state. Paired CLOID/OID advancement and creation of a required
@@ -630,8 +684,10 @@ Required controls:
   and MFA for mainnet. Free-form agent chat is invalid. The weaker TESTNET-only
   proposal lane recognizes only the exact proposal-ID command and records
   `human_message_attested=false`; its durable CAS and local peer/session
-  anti-replay boundary exist offline, but its listener, trusted presentation
-  and execution integration are uncommissioned.
+  anti-replay boundary, verified handoff reader and atomic execution admission
+  exist offline. Authenticated evidence collectors, same-process issuance,
+  listener/presentation/handoff publication, exact ACLs and installed
+  consumption remain uncommissioned.
 - Approval tokens are signed, audience-bound, expiring, single-use, and protected against replay and cross-environment use.
 - Services use mutually authenticated identities and least-privilege authorization.
 - Signer keys are generated, stored, rotated, and revoked in a managed KMS/HSM or equivalent isolated secret boundary.
@@ -826,18 +882,60 @@ as the `/dev/tty` HMAC permit. Proposal v2 binds staging document and ticket
 identities, the exact protected plan, infrastructure grant, entry, size, stop,
 target, maximum loss, account identity, policy, account/market snapshots,
 broker session and expiry. The control-store approval transition is single-use.
-The still-missing execution import must enforce the proposal ID uniquely inside
-the same `ExecutionStore` transaction that consumes its ticket, reserves risk
-and creates the command/legs/outbox. Cross-database delivery is at-least-once;
-exactly-once authority belongs to that execution transaction. The one-shot
+The schema-v13 execution import enforces the proposal ID uniquely inside the
+same `ExecutionStore` transaction that consumes its ticket, reserves risk and
+creates the command/legs/outbox. Schema v15 accepts that import only when the
+store's fixed UID-451 reader loads a canonical UID/GID-452 mode-0400,
+single-link, exact-ACL artifact under the executor-config-hash namespace. The
+public method takes only its handoff ID; free handoff/delivery objects and
+caller-selected account/address/audience inputs are invalid. The immutable
+scope and artifact/source hashes are persisted with the authorization, and
+schema v16 adds the complete canonical delivery evidence for restart
+validation.
+Cross-database publication and installed consumption remain absent;
+exactly-once authority belongs to the execution transaction. The one-shot
 sender preserves `UNKNOWN` without blind retry.
 
-Before this lane can reach normal bracket signing, that path must gain the
-qualification worker's two fresh `userRole(api_wallet)` reads at both PRE_KEY
-and PRE_SEND, bound through signed attempt evidence. A mapping change,
-staleness or expiry after the point of no return produces no HTTP send or an
-explicit durable unknown outcome as applicable; it never selects another
-account or retries blindly.
+The control-only issuer accepts only a staging-document ID, exact active broker
+session and time. Its exact evidence reader is pinned to the configured staging
+database, reloads that store's verified chain, and resolves fixed typed account
+and canonical TESTNET market evidence; callers cannot substitute a view, ticket,
+plan, economics, address or snapshot per issuance call. It derives all proposal
+economics, addresses, hashes, session binding and expiry before atomically
+storing `PENDING`. Schema
+v2 preserves the original schema-v1 checksum and adds a unique immutable
+staging-document binding; nonempty v1 state cannot auto-migrate. Presentation is
+a separate UID-452-owned mode-0400 artifact published from a fully synchronized,
+revalidated hidden pending inode through atomic no-replace rename. Crash-left
+partial pending files are recoverable; an existing final is never overwritten.
+The UID-450 research
+service may verify and return that sanitized artifact through the existing
+`get_trade_stage` tool, but has no control-database or publication capability.
+Named ACLs and runtime configuration remain uncommissioned.
+The artifact also binds the broker-generation ID. Issuance accepts only the
+exact in-memory broker session, so production must run it in the active
+listener-owning process and stop issuance before listener teardown; a decoded
+historical generation receipt or caller-supplied session hash is insufficient.
+The staging chain is store-backed, but current account/market bindings are
+typed and self-consistent rather than authenticated collector provenance.
+Presentation remains blocked until fixed reviewed collector/store adapters
+supply them. Fresh executor preflight prevents this limitation from bypassing
+capital checks, but cannot prevent misleading issuance-time UX.
+
+Display schema v3 labels account/market hashes as issuance-time evidence and
+requires exact hash binding on idempotent retries. The human-readable proposal
+may outlive the collectors' five-second freshness windows; this does not confer
+send-time freshness. Admission/dispatch must load fresh account,
+market and policy evidence again before signing and may only deny unchanged
+economics.
+
+Normal bracket signing now requires two fresh `userRole(api_wallet)` reads at
+both PRE_KEY and PRE_SEND, introduced as schema-v13 role rows and strengthened
+by schema v14 address, signing-interval, transport-authority and causal-outcome
+bindings. A mapping change, staleness or expiry after the point of no return
+produces no HTTP send or an explicit durable unknown outcome as applicable; it
+never selects another account or retries blindly. Live qualification and
+installation remain pending.
 
 ### 7.2 Account-safety policy
 

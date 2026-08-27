@@ -42,7 +42,7 @@ staged under an explicit `profitability_qualified: false` grant.
 | Isolated credential provider | Schema-v3 native role readers, sealed provisioner and nonprinting UID probe implemented; exact pack install and live pre/post-reboot probe evidence pending; no key present |
 | Always-on serialized executor runtime | Implemented with fenced lease, daily-loss sync, strict recovery priority and graceful drain |
 | Direct attended control CLI | Implemented as an administrative fallback; confirmation is read from `/dev/tty`, never argv/stdin/MCP |
-| Remote TESTNET chat approval | Offline proposal-v2 model, durable single-use approval CAS, mutually authenticated AF_UNIX protocol/client and separate one-field stdio MCP implemented; no listener, trusted presentation, executor admission or installation yet; bare/free-form chat is invalid |
+| Remote TESTNET chat approval | Offline proposal-v2 issuer/presentation, durable single-use CAS, mutually authenticated AF_UNIX client/broker, separate one-field stdio MCP, config-bound verified handoff reader and atomic admission implemented; listener/ACLs, authenticated collectors, same-process issuance, handoff publication/consumption and installation remain absent; bare/free-form chat is invalid |
 | TESTNET qualification canary/close core | Schema-v12 typed GTC/query/cancel/terminal and full-residual close semantics, pinned SDK 0.24.0 signing/independent recovery, pre-key/pre-send role fences, one fresh attended same-CLOID cancel successor, dormant bounded foreground worker, one-shot sender and advisory WS decoder implemented; submission stays compiled off and no live venue qualification has run |
 | macOS storage/ACL/install plan | Credential-free, rollback-safe plan/apply artifacts implemented; not applied; encryption, reboot and exhaustion evidence pending |
 | Local Ubuntu VM egress router | Public-input replay plus an apply-disabled root media/host-tool specification implemented; all root/Lima/VM/guest/network phases and live qualification pending; not VPN-qualified |
@@ -95,11 +95,14 @@ immutable TESTNET proposal + exact `execute trade <proposal-id>`
         |
         v
 separate Codex stdio bridge -> UID-452 AF_UNIX broker -> approval receipt
-        |                                  (offline; not yet installed/admitted)
+        |                                  (offline; listener/ACL not installed)
         +--> administrative `/dev/tty` approval fallback
         |
         v
-atomic execution store
+control-owned handoff artifact -> fixed UID-451 verified reader
+        |                         (publisher/consumer not installed)
+        v
+atomic execution store (schema v13-v16)
         |
         v
 daily-loss sync + independent reconciliation + protection watchdog
@@ -122,7 +125,10 @@ classification, risk arithmetic, hashes, state transitions, signing policy,
 and reconciliation. Free-form chat is never approval. The offline TESTNET
 lane accepts only the exact `execute trade <proposal-id>` command for an
 immutable, expiring proposal and durably records one approval receipt. It is
-not installed and cannot yet create an execution command.
+not installed. A caller may supply only a handoff ID; the store itself invokes
+the fixed UID-451 reader for a config-bound, exactly ACL-scoped, UID-452-owned
+canonical artifact and persists its full evidence. No control publisher or
+executor watcher currently delivers that artifact on the machine.
 
 ## Codex/ChatGPT plugin
 
@@ -136,8 +142,9 @@ A second, deliberately unregistered stdio server exposes only
 research tool catalog or OpenCode profile. It can only forward one bounded
 command to the fixed local TESTNET approval socket, and reports every
 post-send ambiguity as `unknown` without retrying. Until the broker listener,
-ACLs, trusted proposal display and executor admission are commissioned, this
-server remains unavailable in normal Codex sessions.
+ACLs, authenticated proposal-evidence collectors, same-process issuer,
+presentation configuration and handoff publisher/consumer are commissioned,
+this server remains unavailable in normal Codex sessions.
 
 Research tools:
 

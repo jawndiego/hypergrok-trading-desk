@@ -473,9 +473,14 @@ class TradeProposal:
         """Return the exact deterministic object an interface must display."""
 
         return {
-            "schema_version": "testnet_chat_trade_proposal_display.v2",
+            "schema_version": "testnet_chat_trade_proposal_display.v3",
             "proposal": self.as_dict(),
             "required_approval_text": self.required_approval_text,
+            "evidence_semantics": {
+                "account_snapshot_hash": "issuance_time_evidence",
+                "market_snapshot_hash": "issuance_time_evidence",
+                "fresh_account_market_policy_revalidation_required_before_execution": True,
+            },
             "testnet_only": True,
             "human_message_attestation_available": False,
             "approval_is_execution": False,

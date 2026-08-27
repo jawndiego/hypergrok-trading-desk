@@ -11,7 +11,7 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, ContextManager
+from typing import Any, ContextManager, Protocol
 
 from .errors import (
     AdmissionDenied,
@@ -43,6 +43,10 @@ from .planning import (
     protected_trade_plan_from_dict,
     risk_ticket_from_dict,
 )
+from .testnet_entry_role_attestation import (
+    EntryRoleAttestationStage,
+    TestnetEntryRoleAttestation,
+)
 
 
 Clock = Callable[[], datetime]
@@ -56,6 +60,7 @@ Signer = Callable[
         ProtectedTradePlan,
         PerpInstrumentMetadata,
         DispatchPreflight,
+        TestnetEntryRoleAttestation,
     ],
     SignedActionEnvelope,
 ]
@@ -97,12 +102,32 @@ class DispatchPackage:
             raise StateConflict("preflight and protected action bindings differ")
 
 
+class EntryRoleAttestor(Protocol):
+    """Collect one exact normal-entry role fence through an injected reader."""
+
+    def __call__(
+        self,
+        *,
+        stage: EntryRoleAttestationStage,
+        command: CommandRecord,
+        ticket: RiskTicket,
+        plan: ProtectedTradePlan,
+        package: DispatchPackage,
+        worker_id: str,
+        fencing_token: int,
+        attempt_id: str | None,
+        signed_evidence_hash: str | None,
+    ) -> TestnetEntryRoleAttestation: ...
+
+
 @dataclass(frozen=True, slots=True)
 class DispatchResult:
     command_id: str
     outcome: str
     command_state: str
     preflight_hash: str
+    pre_key_role_attestation_hash: str
+    pre_send_role_attestation_hash: str
     attempt_id: str
     nonce: int
     action_hash: str
@@ -123,6 +148,8 @@ class DispatchResult:
             "outcome": self.outcome,
             "command_state": self.command_state,
             "preflight_hash": self.preflight_hash,
+            "pre_key_role_attestation_hash": self.pre_key_role_attestation_hash,
+            "pre_send_role_attestation_hash": self.pre_send_role_attestation_hash,
             "attempt_id": self.attempt_id,
             "nonce": self.nonce,
             "action_hash": self.action_hash,
@@ -172,6 +199,7 @@ class ExecutionDispatcher:
         *,
         preparer: Preparer,
         signer: Signer,
+        role_attestor: EntryRoleAttestor,
         clock: Clock = _clock,
         lease_seconds: int = 15,
         submission_guard: SubmissionGuard | None = None,
@@ -181,6 +209,7 @@ class ExecutionDispatcher:
         for field, value in (
             ("preparer", preparer),
             ("signer", signer),
+            ("role_attestor", role_attestor),
             ("clock", clock),
         ):
             if not callable(value):
@@ -190,6 +219,7 @@ class ExecutionDispatcher:
         self.store = store
         self.preparer = preparer
         self.signer = signer
+        self.role_attestor = role_attestor
         self.clock = clock
         self.lease_seconds = lease_seconds
         if submission_guard is not None and not callable(submission_guard):
@@ -257,21 +287,60 @@ class ExecutionDispatcher:
                 ),
             )
         try:
+            pre_key_role = self.role_attestor(
+                stage=EntryRoleAttestationStage.PRE_KEY,
+                command=command,
+                ticket=ticket,
+                plan=plan,
+                package=package,
+                worker_id=worker_id,
+                fencing_token=outbox.fencing_token,
+                attempt_id=None,
+                signed_evidence_hash=None,
+            )
+            if type(pre_key_role) is not TestnetEntryRoleAttestation:
+                raise TypeError(
+                    "role_attestor must return exact TestnetEntryRoleAttestation"
+                )
+            role_recorded_at = self._now()
+            self.store.record_entry_role_attestation(
+                pre_key_role,
+                at=role_recorded_at,
+            )
+            self.store.require_entry_role_attestation(
+                stage=EntryRoleAttestationStage.PRE_KEY,
+                command_id=command.command_id,
+                ticket_hash=command.ticket_hash,
+                plan_hash=command.plan_hash,
+                preflight_hash=preflight.preflight_hash,
+                action_hash=package.protected_action.action_hash,
+                worker_id=worker_id,
+                fencing_token=outbox.fencing_token,
+                attempt_id=None,
+                signed_evidence_hash=None,
+                at=role_recorded_at,
+            )
             signed = self.signer(
                 package.protected_action,
                 plan,
                 package.metadata,
                 preflight,
+                pre_key_role,
             )
-            if not isinstance(signed, SignedActionEnvelope):
-                raise TypeError("signer must return SignedActionEnvelope")
+            if type(signed) is not SignedActionEnvelope:
+                raise TypeError("signer must return exact SignedActionEnvelope")
             signed.verify_integrity()
             if (
                 signed.plan_hash != plan.plan_hash
                 or signed.action_hash != package.protected_action.action_hash
                 or signed.metadata_hash != preflight.metadata_hash
                 or signed.account_id != plan.entry.account_id
+                or signed.main_account_address
+                != pre_key_role.main_account_address
+                or signed.signer_address != pre_key_role.api_wallet_address
                 or signed.preflight_hash != preflight.preflight_hash
+                or signed.pre_key_role_attestation_hash
+                != pre_key_role.attestation_hash
             ):
                 raise StateConflict("signed envelope differs from prepared command")
             self.store.renew_claim(
@@ -319,6 +388,50 @@ class ExecutionDispatcher:
             wire_hash=signed.wire_hash,
             at=attempt_time,
         )
+        try:
+            pre_send_role = self.role_attestor(
+                stage=EntryRoleAttestationStage.PRE_SEND,
+                command=command,
+                ticket=ticket,
+                plan=plan,
+                package=package,
+                worker_id=worker_id,
+                fencing_token=outbox.fencing_token,
+                attempt_id=attempt_id,
+                signed_evidence_hash=signed_evidence.evidence_hash,
+            )
+            if type(pre_send_role) is not TestnetEntryRoleAttestation:
+                raise TypeError(
+                    "role_attestor must return exact TestnetEntryRoleAttestation"
+                )
+            pre_send_recorded_at = self._now()
+            self.store.record_entry_role_attestation(
+                pre_send_role,
+                at=pre_send_recorded_at,
+            )
+            self.store.require_entry_role_attestation(
+                stage=EntryRoleAttestationStage.PRE_SEND,
+                command_id=command.command_id,
+                ticket_hash=command.ticket_hash,
+                plan_hash=command.plan_hash,
+                preflight_hash=preflight.preflight_hash,
+                action_hash=signed.action_hash,
+                worker_id=worker_id,
+                fencing_token=outbox.fencing_token,
+                attempt_id=attempt_id,
+                signed_evidence_hash=signed_evidence.evidence_hash,
+                at=pre_send_recorded_at,
+            )
+        except Exception as error:
+            self.store.void_unsent_command(
+                command.command_id,
+                reason="pre_send_role_failure:" + type(error).__name__,
+                at=self._now(),
+                worker_id=worker_id,
+                fencing_token=outbox.fencing_token,
+                prepared_attempt_id=attempt_id,
+            )
+            raise
         guard = (
             nullcontext()
             if self.submission_guard is None
@@ -334,6 +447,9 @@ class ExecutionDispatcher:
                     signed_evidence_hash=signed_evidence.evidence_hash,
                     worker_id=worker_id,
                     fencing_token=outbox.fencing_token,
+                    pre_send_role_attestation_hash=(
+                        pre_send_role.attestation_hash
+                    ),
                     clock=self.clock,
                 )
         except EntrySubmissionRevoked:
@@ -361,6 +477,9 @@ class ExecutionDispatcher:
             or transport.network is not signed.network
             or transport.signed_envelope_hash != signed.envelope_hash
             or transport.signer_binding_hash != signed.signer_binding_hash
+            or transport.pre_send_role_attestation_hash
+            != pre_send_role.attestation_hash
+            or transport.submission_authority_hash is None
             or transport.artifact_kind != "protected_order"
             or transport.incident_id is not None
             or transport.send_count != 1
@@ -385,6 +504,8 @@ class ExecutionDispatcher:
                 outcome="unknown",
                 command_state=command.state,
                 preflight_hash=preflight.preflight_hash,
+                pre_key_role_attestation_hash=pre_key_role.attestation_hash,
+                pre_send_role_attestation_hash=pre_send_role.attestation_hash,
                 attempt_id=attempt_id,
                 nonce=signed.nonce,
                 action_hash=signed.action_hash,
@@ -427,6 +548,10 @@ class ExecutionDispatcher:
                 send_count=transport.send_count,
                 retry_performed=transport.retry_performed,
                 venue_write_attempted=True,
+                submission_authority_hash=transport.submission_authority_hash,
+                pre_send_role_attestation_hash=(
+                    transport.pre_send_role_attestation_hash
+                ),
             )
             command = self.store.mark_submitted_unknown(
                 command.command_id,
@@ -440,6 +565,8 @@ class ExecutionDispatcher:
                 outcome="unknown",
                 command_state=command.state,
                 preflight_hash=preflight.preflight_hash,
+                pre_key_role_attestation_hash=pre_key_role.attestation_hash,
+                pre_send_role_attestation_hash=pre_send_role.attestation_hash,
                 attempt_id=attempt_id,
                 nonce=signed.nonce,
                 action_hash=signed.action_hash,
@@ -460,6 +587,8 @@ class ExecutionDispatcher:
             outcome="response_received",
             command_state=command.state,
             preflight_hash=preflight.preflight_hash,
+            pre_key_role_attestation_hash=pre_key_role.attestation_hash,
+            pre_send_role_attestation_hash=pre_send_role.attestation_hash,
             attempt_id=attempt_id,
             nonce=signed.nonce,
             action_hash=signed.action_hash,
@@ -477,5 +606,6 @@ __all__ = (
     "DispatchPackage",
     "DispatchDenialResult",
     "DispatchResult",
+    "EntryRoleAttestor",
     "ExecutionDispatcher",
 )

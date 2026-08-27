@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Inert plan: not part of the guarded service set. -->
+  <key>Label</key>
+  <string>com.jawndiego.trading-desk-testnet-chat-broker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <!-- Intentionally absent future sealed control runtime; never substitute another role's venv. -->
+    <string>/opt/trading-desk/current/control/.venv/bin/python</string>
+    <string>-I</string>
+    <string>-m</string>
+    <string>trading_harness.testnet_chat_broker_service</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/opt/trading-desk/current/control</string>
+  <key>UserName</key>
+  <string>trading-control</string>
+  <key>GroupName</key>
+  <string>trading-control</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>Disabled</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ExitTimeOut</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>Core</key>
+    <integer>0</integer>
+    <key>NumberOfFiles</key>
+    <integer>64</integer>
+    <key>NumberOfProcesses</key>
+    <integer>1</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>Core</key>
+    <integer>0</integer>
+    <key>NumberOfFiles</key>
+    <integer>64</integer>
+    <key>NumberOfProcesses</key>
+    <integer>1</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/dev/null</string>
+  <key>StandardErrorPath</key>
+  <string>/dev/null</string>
+</dict>
+</plist>

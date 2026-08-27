@@ -43,6 +43,10 @@ from trading_harness.recovery_reconciliation import (
     RecoveryReconciliationCoordinator,
     RecoveryVenueRead,
 )
+from trading_harness.testnet_entry_role_attestation import (
+    EntryRoleAttestationStage,
+    collect_testnet_entry_role_attestation,
+)
 from trading_harness.reconciliation_coordinator import (
     MainEntryReconciliationCoordinator,
     _bundle_material,
@@ -399,14 +403,46 @@ class RecoveryCoordinatorTests(unittest.TestCase):
             preflight,
             at=NOW + timedelta(seconds=1, milliseconds=1),
         )
+        role_ticks = iter(
+            (
+                NOW + timedelta(seconds=1, milliseconds=100),
+                NOW + timedelta(seconds=1, milliseconds=110),
+                NOW + timedelta(seconds=1, milliseconds=120),
+            )
+        )
+        pre_key_role = collect_testnet_entry_role_attestation(
+            stage=EntryRoleAttestationStage.PRE_KEY,
+            account_id=ACCOUNT_ID,
+            main_account_address="0x" + "1" * 40,
+            api_wallet_address="0x" + "2" * 40,
+            command_id="command-1",
+            ticket_hash=self.ticket.ticket_hash,
+            plan_hash=self.ticket.plan.plan_hash,
+            preflight_hash=preflight.preflight_hash,
+            action_hash=digest("entry-action"),
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            transport=lambda method, endpoint, payload: {
+                "role": "agent",
+                "data": {"user": "0x" + "1" * 40},
+            },
+            clock=lambda: next(role_ticks),
+        )
+        self.store.record_entry_role_attestation(
+            pre_key_role,
+            at=NOW + timedelta(seconds=1, milliseconds=130),
+        )
         signed = SignedEnvelopeEvidence(
             command_id="command-1",
             preflight_hash=preflight.preflight_hash,
             environment=Environment.TESTNET,
             endpoint="https://api.hyperliquid-testnet.xyz/exchange",
             account_id=ACCOUNT_ID,
+            main_account_address="0x" + "1" * 40,
+            api_wallet_address="0x" + "2" * 40,
             plan_hash=preflight.plan_hash,
             action_hash=digest("entry-action"),
+            pre_key_role_attestation_hash=pre_key_role.attestation_hash,
             nonce=1_777_777_777_777,
             wire_hash=digest("entry-wire"),
             signature_hash=digest("entry-signature"),
@@ -416,8 +452,13 @@ class RecoveryCoordinatorTests(unittest.TestCase):
                 preflight.expires_at.timestamp() * 1_000
             ),
             expires_after_ms=int(preflight.expires_at.timestamp() * 1_000),
+            signing_started_at_ms=int(
+                (NOW + timedelta(seconds=1, milliseconds=500)).timestamp()
+                * 1_000
+            ),
             signed_at_ms=int(
-                (NOW + timedelta(seconds=1)).timestamp() * 1_000
+                (NOW + timedelta(seconds=1, milliseconds=500)).timestamp()
+                * 1_000
             ),
         )
         attempt = self.store.prepare_attempt(
@@ -431,6 +472,46 @@ class RecoveryCoordinatorTests(unittest.TestCase):
             action_hash=signed.action_hash,
             wire_hash=signed.wire_hash,
             at=NOW + timedelta(seconds=2),
+        )
+        pre_send_ticks = iter(
+            (
+                NOW + timedelta(seconds=2, milliseconds=100),
+                NOW + timedelta(seconds=2, milliseconds=110),
+                NOW + timedelta(seconds=2, milliseconds=120),
+            )
+        )
+        pre_send_role = collect_testnet_entry_role_attestation(
+            stage=EntryRoleAttestationStage.PRE_SEND,
+            account_id=ACCOUNT_ID,
+            main_account_address="0x" + "1" * 40,
+            api_wallet_address="0x" + "2" * 40,
+            command_id="command-1",
+            ticket_hash=self.ticket.ticket_hash,
+            plan_hash=self.ticket.plan.plan_hash,
+            preflight_hash=preflight.preflight_hash,
+            action_hash=signed.action_hash,
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            attempt_id=attempt.attempt_id,
+            signed_evidence_hash=signed.evidence_hash,
+            transport=lambda method, endpoint, payload: {
+                "role": "agent",
+                "data": {"user": "0x" + "1" * 40},
+            },
+            clock=lambda: next(pre_send_ticks),
+        )
+        self.store.record_entry_role_attestation(
+            pre_send_role,
+            at=NOW + timedelta(seconds=2, milliseconds=130),
+        )
+        authority = self.store.require_submission_authority(
+            "command-1",
+            attempt.attempt_id,
+            signed.evidence_hash,
+            "dispatcher",
+            claim.fencing_token,
+            pre_send_role_attestation_hash=pre_send_role.attestation_hash,
+            at=NOW + timedelta(seconds=2, milliseconds=200),
         )
         unknown = TransportOutcomeEvidence(
             command_id="command-1",
@@ -449,6 +530,10 @@ class RecoveryCoordinatorTests(unittest.TestCase):
             send_count=1,
             retry_performed=False,
             venue_write_attempted=True,
+            submission_authority_hash=authority.authority_hash,
+            pre_send_role_attestation_hash=(
+                authority.pre_send_role_attestation_hash
+            ),
         )
         self.store.mark_submitted_unknown(
             "command-1",

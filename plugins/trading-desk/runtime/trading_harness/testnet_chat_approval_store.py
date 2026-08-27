@@ -44,12 +44,16 @@ from .testnet_chat_approval import (
 )
 
 
-CHAT_APPROVAL_STORE_SCHEMA_VERSION = 1
+CHAT_APPROVAL_STORE_SCHEMA_VERSION = 2
 MAX_CHAT_APPROVAL_STATE_FILE_BYTES = 64 * 1024 * 1024
 _CHAT_APPROVAL_WRITE_HEADROOM_BYTES = 256 * 1024
 _MAX_PROPOSAL_PAYLOAD_BYTES = 16 * 1024
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _PROPOSAL_ID_RE = re.compile(r"^tp_[A-Za-z0-9_-]{32}$", re.ASCII)
+_STAGING_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$", re.ASCII)
+_STAGING_BINDING_HASH_DOMAIN = (
+    "trading-harness/testnet-chat-proposal-staging-binding/v1"
+)
 
 
 def _utc(value: object, field: str) -> datetime:
@@ -104,6 +108,22 @@ def _hash(value: object, field: str, *, persisted: bool = False) -> str:
             raise StorageError(f"persisted {message}")
         raise ValidationError(message)
     return value
+
+
+def _staging_id(value: object) -> str:
+    if not isinstance(value, str) or _STAGING_ID_RE.fullmatch(value) is None:
+        raise ValidationError("staging_document_id is invalid")
+    return value
+
+
+def _staging_binding_material(proposal: TradeProposal) -> dict[str, object]:
+    return {
+        "schema_version": "testnet_chat_proposal_staging_binding.v1",
+        "proposal_id": proposal.proposal_id,
+        "proposal_hash": proposal.proposal_hash,
+        "staging_document_id": _staging_id(proposal.staging_document_id),
+        "staging_document_hash": proposal.staging_document_hash,
+    }
 
 
 def _integer(value: object, field: str, *, allowed: frozenset[int]) -> int:
@@ -417,7 +437,34 @@ _SCHEMA_V1 = _Migration(
     ),
 )
 
-_MIGRATIONS = (_SCHEMA_V1,)
+_SCHEMA_V2 = _Migration(
+    version=2,
+    name="unique_staging_document_binding",
+    statements=(
+        """
+        CREATE TABLE testnet_chat_proposal_staging_bindings (
+            proposal_id TEXT PRIMARY KEY
+                REFERENCES testnet_chat_proposals(proposal_id),
+            proposal_hash TEXT NOT NULL UNIQUE,
+            staging_document_id TEXT NOT NULL UNIQUE,
+            staging_document_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL UNIQUE
+        )
+        """,
+        """
+        CREATE TRIGGER testnet_chat_staging_bindings_no_update
+        BEFORE UPDATE ON testnet_chat_proposal_staging_bindings
+        BEGIN SELECT RAISE(ABORT, 'testnet chat staging bindings are immutable'); END
+        """,
+        """
+        CREATE TRIGGER testnet_chat_staging_bindings_no_delete
+        BEFORE DELETE ON testnet_chat_proposal_staging_bindings
+        BEGIN SELECT RAISE(ABORT, 'testnet chat staging bindings are immutable'); END
+        """,
+    ),
+)
+
+_MIGRATIONS = (_SCHEMA_V1, _SCHEMA_V2)
 
 _EXPECTED_COLUMNS: Mapping[str, tuple[str, ...]] = {
     "testnet_chat_schema_migrations": (
@@ -462,6 +509,13 @@ _EXPECTED_COLUMNS: Mapping[str, tuple[str, ...]] = {
         "approval_receipt_hash",
         "state_hash",
     ),
+    "testnet_chat_proposal_staging_bindings": (
+        "proposal_id",
+        "proposal_hash",
+        "staging_document_id",
+        "staging_document_hash",
+        "record_hash",
+    ),
 }
 
 _EXPECTED_TRIGGERS = frozenset(
@@ -474,6 +528,8 @@ _EXPECTED_TRIGGERS = frozenset(
         "testnet_chat_approval_receipts_no_delete",
         "testnet_chat_approval_states_one_way",
         "testnet_chat_approval_states_no_delete",
+        "testnet_chat_staging_bindings_no_update",
+        "testnet_chat_staging_bindings_no_delete",
     }
 )
 
@@ -491,6 +547,12 @@ _SCHEMA_V1_OBJECTS = (
     "testnet_chat_approval_states_no_delete",
 )
 
+_SCHEMA_V2_OBJECTS = (
+    "testnet_chat_proposal_staging_bindings",
+    "testnet_chat_staging_bindings_no_update",
+    "testnet_chat_staging_bindings_no_delete",
+)
+
 
 def _normalized_schema_sql(value: object) -> str:
     if not isinstance(value, str):
@@ -506,6 +568,14 @@ _EXPECTED_SCHEMA_SQL = {
         for name, statement in zip(
             _SCHEMA_V1_OBJECTS,
             _SCHEMA_V1.statements,
+            strict=True,
+        )
+    },
+    **{
+        name: _normalized_schema_sql(statement)
+        for name, statement in zip(
+            _SCHEMA_V2_OBJECTS,
+            _SCHEMA_V2.statements,
             strict=True,
         )
     },
@@ -674,6 +744,15 @@ class TestnetChatApprovalStore:
             for migration in _MIGRATIONS:
                 if migration.version in seen:
                     continue
+                if migration.version == 2 and 1 in seen:
+                    populated = connection.execute(
+                        "SELECT 1 FROM testnet_chat_proposals LIMIT 1"
+                    ).fetchone()
+                    if populated is not None:
+                        raise StorageError(
+                            "cannot migrate nonempty chat proposal schema v1 "
+                            "to staging-bound schema v2"
+                        )
                 for statement in migration.statements:
                     connection.execute(statement)
                 connection.execute(
@@ -855,6 +934,27 @@ class TestnetChatApprovalStore:
         if proposal_row is None:
             raise RecordNotFound("trade proposal was not found")
         proposal, _ = self._proposal_from_row(proposal_row)
+        binding_row = connection.execute(
+            """
+            SELECT * FROM testnet_chat_proposal_staging_bindings
+            WHERE proposal_id = ?
+            """,
+            (checked_id,),
+        ).fetchone()
+        if binding_row is None:
+            raise StorageError("persisted proposal has no staging binding")
+        expected_binding = _staging_binding_material(proposal)
+        expected_binding_hash = domain_hash(
+            _STAGING_BINDING_HASH_DOMAIN,
+            expected_binding,
+        )
+        if (
+            binding_row["proposal_hash"] != proposal.proposal_hash
+            or binding_row["staging_document_id"] != proposal.staging_document_id
+            or binding_row["staging_document_hash"] != proposal.staging_document_hash
+            or binding_row["record_hash"] != expected_binding_hash
+        ):
+            raise StorageError("persisted proposal staging binding differs")
         state_row = connection.execute(
             "SELECT * FROM testnet_chat_approval_states WHERE proposal_id = ?",
             (checked_id,),
@@ -924,6 +1024,17 @@ class TestnetChatApprovalStore:
                 if loaded.proposal != proposal:
                     raise StateConflict("proposal ID is bound to different content")
                 return loaded
+            existing_stage = connection.execute(
+                """
+                SELECT proposal_id FROM testnet_chat_proposal_staging_bindings
+                WHERE staging_document_id = ?
+                """,
+                (proposal.staging_document_id,),
+            ).fetchone()
+            if existing_stage is not None:
+                raise StateConflict(
+                    "staging document already has a durable chat proposal"
+                )
             enforce_sqlite_write_limit(
                 connection,
                 self.path,
@@ -948,6 +1059,22 @@ class TestnetChatApprovalStore:
                         _time_text(checked_at, "stored_at"),
                         payload_json,
                         payload_hash,
+                    ),
+                )
+                binding = _staging_binding_material(proposal)
+                connection.execute(
+                    """
+                    INSERT INTO testnet_chat_proposal_staging_bindings (
+                        proposal_id, proposal_hash, staging_document_id,
+                        staging_document_hash, record_hash
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        proposal.proposal_id,
+                        proposal.proposal_hash,
+                        proposal.staging_document_id,
+                        proposal.staging_document_hash,
+                        domain_hash(_STAGING_BINDING_HASH_DOMAIN, binding),
                     ),
                 )
                 connection.execute(
@@ -985,6 +1112,43 @@ class TestnetChatApprovalStore:
             if connection.in_transaction:
                 connection.rollback()
             raise StorageError("chat approval read failed") from error
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def load_trade_proposal_for_staging_document(
+        self,
+        staging_document_id: str,
+    ) -> StoredTradeApproval:
+        """Load the sole immutable proposal bound to one staging document."""
+
+        checked_id = _staging_id(staging_document_id)
+        connection = self._connect(read_only=True)
+        try:
+            connection.execute("BEGIN")
+            row = connection.execute(
+                """
+                SELECT proposal_id FROM testnet_chat_proposals
+                WHERE proposal_id = (
+                    SELECT proposal_id
+                    FROM testnet_chat_proposal_staging_bindings
+                    WHERE staging_document_id = ?
+                )
+                """,
+                (checked_id,),
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("staging document has no chat proposal")
+            loaded = self._load_locked(connection, str(row["proposal_id"]))
+            connection.commit()
+            return loaded
+        except sqlite3.Error as error:
+            if connection.in_transaction:
+                connection.rollback()
+            raise StorageError("chat proposal staging lookup failed") from error
         except Exception:
             if connection.in_transaction:
                 connection.rollback()

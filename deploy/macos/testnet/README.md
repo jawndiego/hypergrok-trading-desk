@@ -34,13 +34,16 @@ WAL and SHM are mode 0600, regular, single-link and unavailable to UID 501.
 The socket parent may grant UID 501 only the exact traversal/connect rights;
 it may not grant state read/list/create/delete/rename/replace rights.
 
-The current storage/ACL scripts do not create or verify either path, and no
-script installs or launches a broker. The application wheel includes the
+The current storage/ACL scripts do not create or verify either path, the
+separate presentation namespace or the config-hash-bound handoff namespace,
+and no script installs or launches a broker. The application wheel includes the
 dormant stdio MCP entry point, but the installer does not register or enable it
 in Codex, the plugin descriptor, OpenCode or launchd. A later exact-head pack
 must add named-ACL inspection, stale socket refusal, broker-generation evidence,
-restart/crash probes and negative UID tests before these paths are applied. The
-router VM receives none of this state.
+restart/crash probes, authenticated evidence collectors, same-process issuance,
+create-only handoff publication, executor-side verified-reader consumption and
+negative UID tests before these paths are applied. The router VM receives none
+of this state.
 
 ## Irreversible operator choice
 
@@ -141,8 +144,10 @@ always-on claim. The first TESTNET harness write also remains blocked. The
 qualification GTC/query/cancel/close lifecycle, signer/verifier, dormant sender,
 terminal reservation release and direct-terminal fallback now exist offline,
 but submission is compiled off and live evidence is absent. The chat approval
-CAS/wire/stdio MCP is likewise offline and still needs trusted proposal
-presentation, its fixed listener/ACL service, atomic executor admission and
-normal-bracket PRE_KEY/PRE_SEND `userRole` fences. WebSocket live recovery,
-real response-loss injection and the signed qualification artifact remain
-incomplete.
+CAS/wire/stdio MCP, typed issuer/presentation, schema-v13 atomic admission,
+schema-v14 signer/outcome fences, schema-v15 verified handoff reader/scope and
+schema-v16 full canonical delivery evidence are likewise offline. They still
+need authenticated collectors, same-process
+issuance, fixed listener and all named ACLs, an installed handoff publisher/
+consumer and live end-to-end qualification. WebSocket live recovery, real
+response-loss injection and the signed qualification artifact remain incomplete.

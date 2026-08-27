@@ -46,6 +46,7 @@ from .learning_bridge import LearningRecorder
 from .learning_ledger import LearningLedger
 from .planning import RiskSizingPolicy, risk_ticket_from_dict
 from .staging_inbox import StagingState, TradeStagingInbox, TrustedQuoteDecision
+from .testnet_chat_delivery import testnet_chat_execution_scope_from_config
 from .testnet_control import AttendedTestnetControlPlane
 
 
@@ -398,6 +399,7 @@ def _authorize_stage(
             account_id=config.account_id,
             max_reserved_loss=config.max_reserved_loss,
             max_reserved_notional=config.max_reserved_notional,
+            chat_scope=testnet_chat_execution_scope_from_config(config),
             must_exist=True,
         )
         control = AttendedTestnetControlPlane(

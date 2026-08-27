@@ -1,6 +1,7 @@
 # TESTNET commissioning and first-write gap register
 
-Status: **offline engine, schema-v12 qualification core/result coordinator,
+Status: **offline engine, schema-v12 qualification core/result coordinator and
+schema-v13-v16 normal-entry/chat-admission/delivery boundary,
 credential-free signer-envelope, pinned SDK 0.24.0 signer and independent
 recovery verifier, dormant one-shot sender, advisory WebSocket decoder and
 local response-drop/crash harness, machine plans and guest/VM renderers
@@ -61,9 +62,21 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   account/market snapshots, broker session and expiry. A separate control
   SQLite adapter durably performs its single-use approval CAS. The bounded
   AF_UNIX handler and client mutually verify UID/GID before request bytes, and
-  a separate stdio MCP exposes only `approve_testnet_trade(command_text)`. No
-  listener, ACL install, trusted display path or executor admission exists, so
-  this is not yet a callable or capital-bearing path.
+  a separate stdio MCP exposes only `approve_testnet_trade(command_text)`.
+  Typed control-only issuance and create-only/read-only presentation exist.
+  Schema v13 validates a deterministic approved-proposal handoff and atomically
+  consumes its explicit non-HMAC provenance with ticket, risk reservation,
+  command, three legs and outbox. Schema v14 binds fresh PRE_KEY/PRE_SEND
+  `userRole` evidence, exact addresses and signing interval through signed
+  evidence, attempt, submission authority, transport outcome and send. Schema
+  v15 persists an executor-config-derived chat scope; public admission accepts
+  only a handoff ID and the store-owned clock while the fixed UID-451 reader
+  internally loads a canonical, exact-ACL UID-452-owned config-hash-path
+  artifact. Schema v16 persists and restart-validates the complete canonical
+  ancestor/identity/ACL/byte evidence. No listener/ACL install,
+  authenticated collector composition, same-process issuance, handoff artifact
+  publisher or installed reader/consumer loop exists, so this is not yet a
+  callable capital-bearing path.
 
 These facts do not make the machine transaction-ready.
 
@@ -146,7 +159,7 @@ code and attended-evidence gaps:
 | Router health as an admission capability | No application router-health field or pre-admission guard exists |
 | Executor free-space shutdown threshold | External fail-closed guard and launchd templates exist; root-owned config, real APFS `statvfs`, shutdown and restart behavior are not installed/qualified |
 | Signed qualification artifact | No artifact builder/signing workflow exists; the deliverable is still manual |
-| Codex chat proposal approval | Proposal v2, durable approval CAS, mutual peer-checked wire/client and exact one-field stdio MCP exist offline. Missing: trusted stored-proposal presentation, fixed listener/ACL service, broker-generation record, at-least-once control-to-executor handoff, atomic `ExecutionStore` chat consume/reservation/outbox admission, and normal-bracket PRE_KEY/PRE_SEND `userRole` fences |
+| Codex chat proposal approval | Proposal v2, store-backed staging plus typed/self-consistent issuance snapshots, create-only presentation, durable approval CAS, mutual peer-checked wire/client, exact one-field stdio MCP, deterministic handoff, schema-v13 atomic admission/learning provenance, schema-v14 signer/outcome role fencing, schema-v15 config-bound verified reader/scope and schema-v16 canonical delivery evidence exist offline. Missing: fixed authenticated account/market collectors, same-process issuer/listener lifecycle, socket/state/presentation/handoff ACL installation, a UID-452 create-only handoff publisher, installed UID-451 reader/consumer and live end-to-end qualification |
 
 Close the remaining items as narrow TESTNET-only, durable workflows with
 observable failure tests. They may not become generic MCP execution tools,
@@ -154,9 +167,10 @@ widen signer actions, expose mainnet, or weaken the one-shot unknown-outcome
 contract. The current `/dev/tty` HMAC is an administrative fallback. The
 offline remote lane recognizes only exact `execute trade <proposal-id>` for an
 immutable, short-lived, fully bound proposal and can durably record approval,
-but is neither installed nor connected to execution. Bare/free-form chat
-remains invalid. Until the live gates pass, the first harness order write
-remains blocked.
+and a separately delivered handoff can be atomically admitted offline only
+after the fixed UID-451 reader authenticates its config-bound UID-452 artifact.
+The publisher, consumer and ACLs are not installed. Bare/free-form chat remains
+invalid. Until the live gates pass, the first harness order write remains blocked.
 
 ## Credential provisioning
 

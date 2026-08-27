@@ -48,6 +48,18 @@ Use this fork's GitHub **Report a vulnerability** flow to open a private securit
   Keychain ACLs. Mainnet would require independent hardware-backed user
   presence/MFA rather than this HMAC/TTY mechanism.
 - Risk admission, authorization consumption, portfolio reservation, and durable outbox creation must be atomic before network I/O.
+- Execution-store schema v13 adds explicit non-HMAC chat provenance, atomic
+  ticket/risk/command/legs/outbox admission and normal PRE_KEY/PRE_SEND role
+  rows. Schema v14 binds the signer account addresses and signing interval into
+  signed evidence, and binds each normal transport outcome to the exact
+  submission authority and PRE_SEND evidence with causal timing checks.
+  Schema v15 accepts chat admission only from the fixed UID-451 verified-file
+  reader and persists the exact executor-config scope plus delivery source
+  hashes. Schema v16 additionally persists and revalidates the complete
+  canonical ancestor, owner/mode/inode, named-ACL and file-byte evidence; the
+  public store API accepts only a handoff ID and invokes the fixed reader
+  itself. None of these offline schema boundaries installs a publisher,
+  listener, credential or venue capability.
 - Unknown venue outcomes remain reserved and must be reconciled; they are never blindly resent.
 - A prepared attempt, fresh dispatch attestation, nonce, action hash and wire hash are durable before the one permitted send. Recovery actions are limited to reduce-only close, owned-CLOID cancel and same-nonce noop fencing.
 - Entry submission additionally holds a revocable runtime guard across final
@@ -161,10 +173,12 @@ The qualification-only GTC/query/cancel, retained snapshot, attended-close and
 fresh same-CLOID cancel-successor semantics have a separate TESTNET-only
 durable core, pinned SDK signer/recovery verifier, dormant sender and bounded
 foreground lifecycle; submission remains compiled off. The chat proposal CAS,
-mutually peer-checked protocol/client and stdio MCP likewise remain offline.
-They still lack a trusted proposal presentation path, installed listener/ACLs,
-atomic executor-side chat admission and normal-bracket PRE_KEY/PRE_SEND
-`userRole` fences. The first harness order write is forbidden until these and
+mutually peer-checked protocol/client, stdio MCP, typed issuer/presentation,
+verified handoff reader and schema-v13-v16 admission/fencing boundaries likewise
+remain offline. They still lack authenticated account/market collector
+composition, same-process issuer/listener lifecycle, installed presentation and
+handoff publishers/consumers, exact named ACLs, Keychain qualification and live
+end-to-end evidence. The first harness order write is forbidden until these and
 the commissioning sequence in
 [`docs/testnet_commissioning.md`](docs/testnet_commissioning.md) are closed.
 
@@ -178,10 +192,10 @@ The normative requirements are in [`docs/trading_harness_spec.md`](docs/trading_
   harness qualification evidence. API-wallet registration is an account
   prerequisite and still must occur outside agents/chat/repository.
 - Treating the local testnet HMAC approval helper as suitable for mainnet; mainnet requires a later independently reviewed hardware-backed/asymmetric authority.
-- Enabling the TESTNET chat MCP/broker before its fixed listener, ACLs, trusted
-  proposal presentation, execution import/admission and send-time identity
-  fences are implemented and commissioned; using it for mainnet is always
-  forbidden.
+- Enabling the TESTNET chat MCP/broker before its fixed listener, socket/state/
+  presentation/handoff ACLs, authenticated collectors, same-process issuance,
+  installed handoff publisher/consumer and live schema-v14 send-time identity
+  and outcome fences are commissioned; using it for mainnet is always forbidden.
 - Loading an API-wallet or main-wallet key.
 - Transfers, withdrawals, bridges, vault/subaccount fund movement, builder fees, or staking actions.
 - Enabling an adapter by environment variable alone.

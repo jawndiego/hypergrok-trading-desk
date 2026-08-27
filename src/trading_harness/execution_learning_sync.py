@@ -127,19 +127,78 @@ class ExecutionLearningProjector:
                 "execution command has no immutable staged learning decision"
             )
         inserted = 0
-        approval = self.store.get_approval(command.approval_id)
-        approval_states = self._event_states(cycle_id, "approval_reference")
-        if ApprovalState.APPROVED.value not in approval_states:
-            self.recorder.record_approval_reference(
-                cycle_id,
-                approval,
-                state=ApprovalState.APPROVED,
-                occurred_at=approval.issued_at,
+        try:
+            chat_authorization = self.store.get_chat_authorization_by_id(
+                command.approval_id
             )
+        except RecordNotFound:
+            chat_authorization = None
+            approval = self.store.get_approval(command.approval_id)
+            approval_reference = (
+                approval.approval_id,
+                ApprovalState.APPROVED.value,
+                "trusted_local_testnet_approval",
+            )
+        else:
+            approval = None
+            if (
+                chat_authorization.authorization_id != command.approval_id
+                or chat_authorization.command_id != command.command_id
+                or chat_authorization.handoff.proposal.ticket_hash
+                != command.ticket_hash
+                or chat_authorization.handoff.proposal.plan_hash
+                != command.plan_hash
+            ):
+                raise LearningProjectionError(
+                    "chat authorization differs from execution command"
+                )
+            approval_reference = (
+                chat_authorization.authorization_id,
+                ApprovalState.APPROVED.value,
+                "testnet_chat_approval_unattested",
+            )
+        expected_approval = (
+            *approval_reference,
+            command.ticket_hash,
+            (
+                approval.token_hash
+                if chat_authorization is None
+                else chat_authorization.handoff.handoff_hash
+            ),
+        )
+        approval_references = {
+            self._approval_reference_identity(event.payload)
+            for event in events
+            if event.event_type == "approval_reference"
+        }
+        if expected_approval not in approval_references:
+            if chat_authorization is None:
+                assert approval is not None
+                self.recorder.record_approval_reference(
+                    cycle_id,
+                    approval,
+                    state=ApprovalState.APPROVED,
+                    occurred_at=approval.issued_at,
+                )
+            else:
+                self.recorder.record_chat_approval_reference(
+                    cycle_id,
+                    chat_authorization,
+                    state=ApprovalState.APPROVED,
+                )
             inserted += 1
-        execution_states = self._event_states(cycle_id, "execution_reference")
         legs = self.store.get_legs(command.command_id)
-        if ExecutionState.AUTHORIZED.value not in execution_states:
+        expected_authorized = self._execution_reference_identity(
+            command,
+            legs,
+            state=ExecutionState.AUTHORIZED,
+        )
+        execution_references = {
+            self._stored_execution_reference_identity(event.payload)
+            for event in events
+            if event.event_type == "execution_reference"
+        }
+        if expected_authorized not in execution_references:
             self.recorder.record_execution_reference(
                 cycle_id,
                 command,
@@ -148,9 +207,13 @@ class ExecutionLearningProjector:
                 occurred_at=command.created_at,
             )
             inserted += 1
-            execution_states.add(ExecutionState.AUTHORIZED.value)
+            execution_references.add(expected_authorized)
         current = _state_for(command, self.store)
-        if current is not None and current.value not in execution_states:
+        if current is not None and self._execution_reference_identity(
+            command,
+            legs,
+            state=current,
+        ) not in execution_references:
             self.recorder.record_execution_reference(
                 cycle_id,
                 command,
@@ -191,6 +254,54 @@ class ExecutionLearningProjector:
             inserted += 1
         return inserted
 
+    @staticmethod
+    def _approval_reference_identity(payload: Any) -> tuple[str, str, str, str, str]:
+        try:
+            return (
+                str(payload["reference_id"]),
+                str(payload["state"]),
+                str(payload["authority_kind"]),
+                str(payload["ticket_hash"]),
+                str(payload["authority_evidence_hash"]),
+            )
+        except (KeyError, TypeError) as error:
+            raise LearningProjectionError(
+                "learning approval reference is malformed"
+            ) from error
+
+    def _execution_reference_identity(
+        self,
+        command: CommandRecord,
+        legs: tuple[Any, ...],
+        *,
+        state: ExecutionState,
+    ) -> tuple[str, str, str, tuple[str, ...]]:
+        return (
+            command.command_id,
+            state.value,
+            self.recorder.execution_reference_hash(command, legs, state=state),
+            tuple(item.cloid for item in legs),
+        )
+
+    @staticmethod
+    def _stored_execution_reference_identity(
+        payload: Any,
+    ) -> tuple[str, str, str, tuple[str, ...]]:
+        try:
+            client_order_ids = payload["client_order_ids"]
+            if not isinstance(client_order_ids, list):
+                raise TypeError("client_order_ids must be a list")
+            return (
+                str(payload["command_id"]),
+                str(payload["state"]),
+                str(payload["execution_record_hash"]),
+                tuple(str(item) for item in client_order_ids),
+            )
+        except (KeyError, TypeError) as error:
+            raise LearningProjectionError(
+                "learning execution reference is malformed"
+            ) from error
+
     def require_entry_ready(self, command_id: str) -> None:
         self.recorder.ledger.require_write_headroom()
         command = self.store.get_command(command_id)
@@ -199,19 +310,56 @@ class ExecutionLearningProjector:
         if not events or events[0].event_type != "decision_cycle":
             raise StateConflict("entry has no staged learning decision")
         approvals = {
-            event.payload["state"]
+            self._approval_reference_identity(event.payload)
             for event in events
             if event.event_type == "approval_reference"
         }
+        legs = self.store.get_legs(command.command_id)
         executions = {
-            (event.payload["command_id"], event.payload["state"])
+            self._stored_execution_reference_identity(event.payload)
             for event in events
             if event.event_type == "execution_reference"
         }
-        if ApprovalState.APPROVED.value not in approvals or (
-            command.command_id,
-            ExecutionState.AUTHORIZED.value,
-        ) not in executions:
+        try:
+            chat_authorization = self.store.get_chat_authorization_by_id(
+                command.approval_id
+            )
+        except RecordNotFound:
+            approval = self.store.get_approval(command.approval_id)
+            if approval.ticket_hash != command.ticket_hash:
+                raise StateConflict("entry approval differs from command")
+            expected_approval = (
+                approval.approval_id,
+                ApprovalState.APPROVED.value,
+                "trusted_local_testnet_approval",
+                approval.ticket_hash,
+                approval.token_hash,
+            )
+        else:
+            if (
+                chat_authorization.authorization_id != command.approval_id
+                or chat_authorization.command_id != command.command_id
+                or chat_authorization.handoff.proposal.ticket_hash
+                != command.ticket_hash
+                or chat_authorization.handoff.proposal.plan_hash
+                != command.plan_hash
+            ):
+                raise StateConflict(
+                    "entry chat authorization differs from command"
+                )
+            expected_approval = (
+                chat_authorization.authorization_id,
+                ApprovalState.APPROVED.value,
+                "testnet_chat_approval_unattested",
+                chat_authorization.handoff.proposal.ticket_hash,
+                chat_authorization.handoff.handoff_hash,
+            )
+        expected_execution = self._execution_reference_identity(
+            command,
+            legs,
+            state=ExecutionState.AUTHORIZED,
+        )
+        if expected_approval not in approvals or expected_execution not in executions:
             raise StateConflict("entry learning authorization evidence is incomplete")
 
     @staticmethod

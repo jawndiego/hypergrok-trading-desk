@@ -53,8 +53,20 @@
   a separate durable single-use approval CAS; a bounded mutually peer-checked
   AF_UNIX protocol/client; and an unregistered one-field stdio MCP for exact
   `execute trade <proposal-id>`. Model-selected tool calls are explicitly not
-  cryptographic human attestation. Listener/ACL installation, trusted proposal
-  presentation, executor admission and signing remain disconnected.
+  cryptographic human attestation. Added a control-only issuer, create-only
+  sanitized presentation, dormant fixed broker service, deterministic approved
+  handoff and explicit learning provenance. Schema v13 atomically consumes one
+  chat authorization and ticket while reserving risk and creating the command,
+  three legs and outbox, and adds normal PRE_KEY/PRE_SEND role rows. Schema v14
+  binds signer addresses/timing and exact submission-authority/PRE_SEND outcome
+  provenance. Schema v15 accepts only a config-bound, UID-452-owned canonical
+  artifact verified by the fixed UID-451 reader and durably binds its scope and
+  source hashes. Schema v16 removes caller-supplied delivery objects, makes the
+  store invoke the fixed exact-ACL reader from a handoff ID, and persists the
+  complete canonical source-evidence document for restart validation.
+  Listener/ACL installation, authenticated collector
+  composition, same-process issuance, handoff publication/consumption and live
+  qualification remain disconnected.
 - Added credential-free, plan-gated macOS APFS quota, final-path pre/post-init
   ACL, exact offline install and storage-headroom guard artifacts. No machine
   mutation or service activation is implied.

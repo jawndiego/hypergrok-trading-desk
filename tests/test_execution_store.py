@@ -58,6 +58,10 @@ from trading_harness.sentiment import (
     build_sentiment_snapshot,
 )
 from trading_harness.store import SQLiteStore
+from trading_harness.testnet_entry_role_attestation import (
+    EntryRoleAttestationStage,
+    collect_testnet_entry_role_attestation,
+)
 
 
 NOW = datetime(2026, 8, 24, 18, 0, tzinfo=timezone.utc)
@@ -65,6 +69,132 @@ NOW = datetime(2026, 8, 24, 18, 0, tzinfo=timezone.utc)
 
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def downgrade_execution_schema_v16(connection: sqlite3.Connection) -> None:
+    """Remove only v16 evidence objects to exercise guarded v15 migration."""
+
+    present = connection.execute(
+        "SELECT 1 FROM execution_schema_migrations WHERE version = 16"
+    ).fetchone()
+    if present is None:
+        return
+    connection.execute(
+        "DROP TRIGGER execution_chat_authorizations_require_verified_delivery"
+    )
+    connection.execute(
+        "ALTER TABLE execution_chat_authorizations "
+        "DROP COLUMN delivery_evidence_json"
+    )
+    connection.execute(
+        "ALTER TABLE execution_chat_authorizations "
+        "DROP COLUMN delivery_evidence_content_hash"
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER execution_chat_authorizations_require_verified_delivery
+        BEFORE INSERT ON execution_chat_authorizations
+        WHEN NEW.chat_scope_hash IS NULL
+          OR NEW.delivery_hash IS NULL
+          OR NEW.delivery_artifact_path IS NULL
+          OR NEW.delivery_artifact_sha256 IS NULL
+          OR NEW.delivery_source_binding_hash IS NULL
+        BEGIN SELECT RAISE(ABORT, 'chat authorization requires verified delivery'); END
+        """
+    )
+    connection.execute("DELETE FROM execution_schema_migrations WHERE version = 16")
+
+
+def downgrade_execution_schema_v15(connection: sqlite3.Connection) -> None:
+    """Remove only v15 objects to exercise guarded v14 migration."""
+
+    downgrade_execution_schema_v16(connection)
+    present = connection.execute(
+        "SELECT 1 FROM execution_schema_migrations WHERE version = 15"
+    ).fetchone()
+    if present is None:
+        return
+    connection.execute("DROP INDEX idx_execution_chat_scope_binding")
+    connection.execute("DROP INDEX idx_execution_chat_delivery_hash")
+    connection.execute("DROP INDEX idx_execution_chat_delivery_path")
+    connection.execute(
+        "DROP TRIGGER execution_chat_authorizations_require_verified_delivery"
+    )
+    for column in (
+        "chat_scope_hash",
+        "delivery_hash",
+        "delivery_artifact_path",
+        "delivery_artifact_sha256",
+        "delivery_source_binding_hash",
+    ):
+        connection.execute(
+            f"ALTER TABLE execution_chat_authorizations DROP COLUMN {column}"
+        )
+    connection.execute("DROP TRIGGER execution_chat_scope_no_update")
+    connection.execute("DROP TRIGGER execution_chat_scope_no_delete")
+    connection.execute("DROP TABLE execution_chat_scope")
+    connection.execute("DELETE FROM execution_schema_migrations WHERE version = 15")
+
+
+def downgrade_execution_schema_v14(connection: sqlite3.Connection) -> None:
+    """Remove only v14 objects to exercise the guarded v13 migration."""
+
+    downgrade_execution_schema_v15(connection)
+    present = connection.execute(
+        "SELECT 1 FROM execution_schema_migrations WHERE version = 14"
+    ).fetchone()
+    if present is None:
+        return
+    connection.execute("DROP INDEX idx_execution_transport_submission_authority")
+    connection.execute("DROP INDEX idx_execution_transport_pre_send_role")
+    connection.execute(
+        "ALTER TABLE execution_transport_outcomes "
+        "DROP COLUMN submission_authority_hash"
+    )
+    connection.execute(
+        "ALTER TABLE execution_transport_outcomes "
+        "DROP COLUMN pre_send_role_attestation_hash"
+    )
+    connection.execute(
+        "ALTER TABLE execution_signed_envelopes "
+        "DROP COLUMN main_account_address"
+    )
+    connection.execute(
+        "ALTER TABLE execution_signed_envelopes "
+        "DROP COLUMN api_wallet_address"
+    )
+    connection.execute(
+        "ALTER TABLE execution_signed_envelopes "
+        "DROP COLUMN signing_started_at_ms"
+    )
+    connection.execute("DELETE FROM execution_schema_migrations WHERE version = 14")
+
+
+def downgrade_execution_schema_v13(connection: sqlite3.Connection) -> None:
+    """Remove only v13 objects to exercise the guarded v12 migration."""
+
+    downgrade_execution_schema_v14(connection)
+    connection.execute("DROP INDEX idx_execution_signed_pre_key_role")
+    connection.execute("DROP INDEX idx_execution_submission_pre_send_role")
+    connection.execute(
+        "ALTER TABLE execution_signed_envelopes "
+        "DROP COLUMN pre_key_role_attestation_hash"
+    )
+    connection.execute(
+        "ALTER TABLE execution_submission_authorities "
+        "DROP COLUMN pre_send_role_attestation_hash"
+    )
+    connection.execute(
+        "ALTER TABLE execution_submission_authorities "
+        "DROP COLUMN pre_send_role_expires_at_ms"
+    )
+    connection.execute("DROP TRIGGER execution_entry_role_attestations_no_update")
+    connection.execute("DROP TRIGGER execution_entry_role_attestations_no_delete")
+    connection.execute("DROP TABLE execution_entry_role_attestations")
+    connection.execute("DROP TRIGGER execution_chat_authorizations_no_update")
+    connection.execute("DROP TRIGGER execution_chat_authorizations_no_delete")
+    connection.execute("DROP TABLE execution_chat_authorizations")
+    connection.execute("DELETE FROM execution_schema_migrations WHERE version = 13")
 
 
 def make_ticket(
@@ -291,10 +421,20 @@ class ExecutionStoreTestCase(unittest.TestCase):
         )
         assert claim is not None
         preflight = self.register_preflight(ticket, command_id)
-        signed = self.make_signed_evidence(
-            preflight, command_id=command_id
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id=command_id,
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
         )
-        self.store.prepare_attempt(
+        signed = self.make_signed_evidence(
+            preflight,
+            command_id=command_id,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
+        attempt = self.store.prepare_attempt(
             command_id,
             "dispatcher",
             claim.fencing_token,
@@ -305,6 +445,15 @@ class ExecutionStoreTestCase(unittest.TestCase):
             action_hash=digest("action"),
             wire_hash=digest("wire"),
             at=NOW + timedelta(seconds=2),
+        )
+        self.authorize_entry_attempt(
+            preflight,
+            signed,
+            attempt_id=attempt.attempt_id,
+            command_id=command_id,
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            boundary_at=NOW + timedelta(seconds=2, milliseconds=200),
         )
         self.store.mark_submitted_unknown(
             command_id,
@@ -377,6 +526,7 @@ class ExecutionStoreTestCase(unittest.TestCase):
         nonce: int = 1_777_777_777_777,
         action_hash: str | None = None,
         wire_hash: str | None = None,
+        pre_key_role_attestation_hash: str | None = None,
     ) -> SignedEnvelopeEvidence:
         return SignedEnvelopeEvidence(
             command_id=command_id,
@@ -384,8 +534,15 @@ class ExecutionStoreTestCase(unittest.TestCase):
             environment=Environment.TESTNET,
             endpoint="https://api.hyperliquid-testnet.xyz/exchange",
             account_id="testnet-account",
+            main_account_address="0x" + "1" * 40,
+            api_wallet_address="0x" + "2" * 40,
             plan_hash=preflight.plan_hash,
             action_hash=digest("action") if action_hash is None else action_hash,
+            pre_key_role_attestation_hash=(
+                digest("unbound-pre-key")
+                if pre_key_role_attestation_hash is None
+                else pre_key_role_attestation_hash
+            ),
             nonce=nonce,
             wire_hash=digest("wire") if wire_hash is None else wire_hash,
             signature_hash=digest("signature"),
@@ -395,7 +552,131 @@ class ExecutionStoreTestCase(unittest.TestCase):
                 preflight.expires_at.timestamp() * 1_000
             ),
             expires_after_ms=int(preflight.expires_at.timestamp() * 1_000),
-            signed_at_ms=int((NOW + timedelta(seconds=1)).timestamp() * 1_000),
+            signing_started_at_ms=int(
+                (NOW + timedelta(seconds=1, milliseconds=500)).timestamp()
+                * 1_000
+            ),
+            signed_at_ms=int(
+                (NOW + timedelta(seconds=1, milliseconds=500)).timestamp()
+                * 1_000
+            ),
+        )
+
+    def record_pre_key_role(
+        self,
+        preflight: DispatchPreflight,
+        *,
+        command_id: str,
+        worker_id: str,
+        fencing_token: int,
+        action_hash: str,
+        boundary_at: datetime,
+    ):
+        started = boundary_at - timedelta(milliseconds=100)
+        ticks = iter(
+            (
+                started,
+                started + timedelta(milliseconds=10),
+                started + timedelta(milliseconds=20),
+            )
+        )
+        attestation = collect_testnet_entry_role_attestation(
+            stage=EntryRoleAttestationStage.PRE_KEY,
+            account_id="testnet-account",
+            main_account_address="0x" + "1" * 40,
+            api_wallet_address="0x" + "2" * 40,
+            command_id=command_id,
+            ticket_hash=preflight.ticket_hash,
+            plan_hash=preflight.plan_hash,
+            preflight_hash=preflight.preflight_hash,
+            action_hash=action_hash,
+            worker_id=worker_id,
+            fencing_token=fencing_token,
+            transport=lambda method, endpoint, payload: {
+                "role": "agent",
+                "data": {"user": "0x" + "1" * 40},
+            },
+            clock=lambda: next(ticks),
+        )
+        return self.store.record_entry_role_attestation(
+            attestation,
+            at=boundary_at - timedelta(milliseconds=70),
+        )
+
+    def record_pre_send_role(
+        self,
+        preflight: DispatchPreflight,
+        signed: SignedEnvelopeEvidence,
+        *,
+        command_id: str,
+        attempt_id: str,
+        worker_id: str,
+        fencing_token: int,
+        action_hash: str,
+        boundary_at: datetime,
+    ):
+        started = boundary_at - timedelta(milliseconds=100)
+        ticks = iter(
+            (
+                started,
+                started + timedelta(milliseconds=10),
+                started + timedelta(milliseconds=20),
+            )
+        )
+        attestation = collect_testnet_entry_role_attestation(
+            stage=EntryRoleAttestationStage.PRE_SEND,
+            account_id="testnet-account",
+            main_account_address="0x" + "1" * 40,
+            api_wallet_address="0x" + "2" * 40,
+            command_id=command_id,
+            ticket_hash=preflight.ticket_hash,
+            plan_hash=preflight.plan_hash,
+            preflight_hash=preflight.preflight_hash,
+            action_hash=action_hash,
+            worker_id=worker_id,
+            fencing_token=fencing_token,
+            attempt_id=attempt_id,
+            signed_evidence_hash=signed.evidence_hash,
+            transport=lambda method, endpoint, payload: {
+                "role": "agent",
+                "data": {"user": "0x" + "1" * 40},
+            },
+            clock=lambda: next(ticks),
+        )
+        return self.store.record_entry_role_attestation(
+            attestation,
+            at=boundary_at - timedelta(milliseconds=70),
+        )
+
+    def authorize_entry_attempt(
+        self,
+        preflight: DispatchPreflight,
+        signed: SignedEnvelopeEvidence,
+        *,
+        attempt_id: str,
+        command_id: str,
+        worker_id: str,
+        fencing_token: int,
+        boundary_at: datetime,
+    ):
+        pre_send = self.record_pre_send_role(
+            preflight,
+            signed,
+            command_id=command_id,
+            attempt_id=attempt_id,
+            worker_id=worker_id,
+            fencing_token=fencing_token,
+            action_hash=signed.action_hash,
+            boundary_at=boundary_at,
+        )
+        return self.store.require_submission_authority(
+            command_id,
+            attempt_id,
+            signed.evidence_hash,
+            worker_id,
+            fencing_token,
+            pre_send_role_attestation_hash=pre_send.attestation_hash,
+            at=boundary_at,
         )
 
     def make_transport_evidence(
@@ -408,6 +689,10 @@ class ExecutionStoreTestCase(unittest.TestCase):
         response_hash: str | None = None,
         detail_code: str = "fixture",
     ) -> TransportOutcomeEvidence:
+        try:
+            authority = self.store.get_entry_submission_authority(command_id)
+        except RecordNotFound:
+            authority = None
         return TransportOutcomeEvidence(
             command_id=command_id,
             attempt_id=attempt_id,
@@ -417,7 +702,11 @@ class ExecutionStoreTestCase(unittest.TestCase):
                 "endpoint",
                 "https://api.hyperliquid-testnet.xyz/exchange",
             ),
-            attempted_at_ms=int((NOW + timedelta(seconds=2)).timestamp() * 1_000),
+            attempted_at_ms=(
+                int((NOW + timedelta(seconds=2)).timestamp() * 1_000)
+                if authority is None
+                else int(authority.issued_at.timestamp() * 1_000)
+            ),
             outcome=outcome,
             http_status=200 if outcome == "response_received" else None,
             detail_code=detail_code,
@@ -426,6 +715,14 @@ class ExecutionStoreTestCase(unittest.TestCase):
             send_count=1,
             retry_performed=False,
             venue_write_attempted=True,
+            submission_authority_hash=(
+                None if authority is None else authority.authority_hash
+            ),
+            pre_send_role_attestation_hash=(
+                None
+                if authority is None
+                else authority.pre_send_role_attestation_hash
+            ),
         )
 
     def recovery_parent(
@@ -774,6 +1071,10 @@ class MigrationAndIdentityTests(ExecutionStoreTestCase):
         )
 
     def test_schema_is_checksummed_wal_and_can_coexist(self) -> None:
+        self.assertEqual(
+            "a039c07e9520ce8c03f674b702410b73141bc02ed846b29127e800621d194a0b",
+            execution_store_module._SCHEMA_V15.checksum,
+        )
         combined = Path(self.temporary.name) / "combined.sqlite"
         SQLiteStore(combined)
         ExecutionStore(
@@ -978,6 +1279,39 @@ class MigrationAndIdentityTests(ExecutionStoreTestCase):
                 "execution_qualification_role_attestations",
             )
             with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("PRAGMA foreign_keys = OFF")
+                downgrade_execution_schema_v14(connection)
+                connection.execute("DROP INDEX idx_execution_signed_pre_key_role")
+                connection.execute("DROP INDEX idx_execution_submission_pre_send_role")
+                connection.execute(
+                    "ALTER TABLE execution_signed_envelopes "
+                    "DROP COLUMN pre_key_role_attestation_hash"
+                )
+                connection.execute(
+                    "ALTER TABLE execution_submission_authorities "
+                    "DROP COLUMN pre_send_role_attestation_hash"
+                )
+                connection.execute(
+                    "ALTER TABLE execution_submission_authorities "
+                    "DROP COLUMN pre_send_role_expires_at_ms"
+                )
+                connection.execute(
+                    "DROP TRIGGER execution_entry_role_attestations_no_update"
+                )
+                connection.execute(
+                    "DROP TRIGGER execution_entry_role_attestations_no_delete"
+                )
+                connection.execute("DROP TABLE execution_entry_role_attestations")
+                connection.execute(
+                    "DROP TRIGGER execution_chat_authorizations_no_update"
+                )
+                connection.execute(
+                    "DROP TRIGGER execution_chat_authorizations_no_delete"
+                )
+                connection.execute("DROP TABLE execution_chat_authorizations")
+                connection.execute(
+                    "DELETE FROM execution_schema_migrations WHERE version = 13"
+                )
                 for name in v12_objects:
                     kind = "INDEX" if name.startswith("idx_") else "TABLE"
                     connection.execute(f"DROP {kind} {name}")
@@ -1031,6 +1365,250 @@ class MigrationAndIdentityTests(ExecutionStoreTestCase):
             self.assertEqual(versions, list(range(1, 12)))
             self.assertEqual(snapshot, ("a" * 64,))
             self.assertIsNone(role_table)
+
+    def test_signed_v12_entry_refuses_implicit_v13_role_fence_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "execution.sqlite3"
+            ExecutionStore(
+                path,
+                environment=Environment.TESTNET,
+                account_id="testnet-account",
+                max_reserved_loss="100",
+                max_reserved_notional="2000",
+            )
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("PRAGMA foreign_keys = OFF")
+                connection.execute(
+                    """
+                    INSERT INTO execution_signed_envelopes (
+                        evidence_hash, command_id, preflight_hash, environment,
+                        endpoint, account_id, plan_hash, action_hash, nonce,
+                        wire_hash, signature_hash, envelope_hash,
+                        signer_binding_hash, authorization_expires_at_ms,
+                        expires_after_ms, signed_at_ms, recorded_at,
+                        payload_json, content_hash, record_hash,
+                        pre_key_role_attestation_hash
+                    ) VALUES (?, 'legacy-command', ?, 'testnet', ?,
+                        'testnet-account', ?, ?, 1, ?, ?, ?, ?, 3, 2, 1,
+                        ?, '{}', ?, ?, NULL)
+                    """,
+                    (
+                        digest("legacy-evidence"),
+                        digest("legacy-preflight"),
+                        "https://api.hyperliquid-testnet.xyz/exchange",
+                        digest("legacy-plan"),
+                        digest("legacy-action"),
+                        digest("legacy-wire"),
+                        digest("legacy-signature"),
+                        digest("legacy-envelope"),
+                        digest("legacy-signer"),
+                        "2026-08-27T00:00:00.000000Z",
+                        digest("legacy-content"),
+                        digest("legacy-record"),
+                    ),
+                )
+                downgrade_execution_schema_v14(connection)
+                connection.execute("DROP INDEX idx_execution_signed_pre_key_role")
+                connection.execute("DROP INDEX idx_execution_submission_pre_send_role")
+                connection.execute(
+                    "ALTER TABLE execution_signed_envelopes "
+                    "DROP COLUMN pre_key_role_attestation_hash"
+                )
+                connection.execute(
+                    "ALTER TABLE execution_submission_authorities "
+                    "DROP COLUMN pre_send_role_attestation_hash"
+                )
+                connection.execute(
+                    "ALTER TABLE execution_submission_authorities "
+                    "DROP COLUMN pre_send_role_expires_at_ms"
+                )
+                connection.execute(
+                    "DROP TRIGGER execution_entry_role_attestations_no_update"
+                )
+                connection.execute(
+                    "DROP TRIGGER execution_entry_role_attestations_no_delete"
+                )
+                connection.execute("DROP TABLE execution_entry_role_attestations")
+                connection.execute(
+                    "DROP TRIGGER execution_chat_authorizations_no_update"
+                )
+                connection.execute(
+                    "DROP TRIGGER execution_chat_authorizations_no_delete"
+                )
+                connection.execute("DROP TABLE execution_chat_authorizations")
+                connection.execute(
+                    "DELETE FROM execution_schema_migrations WHERE version = 13"
+                )
+
+            with self.assertRaisesRegex(StorageError, "signed or attempted entry"):
+                ExecutionStore(
+                    path,
+                    environment=Environment.TESTNET,
+                    account_id="testnet-account",
+                    max_reserved_loss="100",
+                    max_reserved_notional="2000",
+                )
+
+            with closing(sqlite3.connect(path)) as connection:
+                versions = [
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT version FROM execution_schema_migrations ORDER BY version"
+                    )
+                ]
+                role_table = connection.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name = 'execution_entry_role_attestations'
+                    """
+                ).fetchone()
+            self.assertEqual(list(range(1, 13)), versions)
+            self.assertIsNone(role_table)
+
+    def test_attempt_or_submission_v12_refuses_v13_role_fence_migration(self) -> None:
+        for legacy_table in ("attempt", "submission"):
+            with self.subTest(legacy_table=legacy_table), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "execution.sqlite3"
+                ExecutionStore(
+                    path,
+                    environment=Environment.TESTNET,
+                    account_id="testnet-account",
+                    max_reserved_loss="100",
+                    max_reserved_notional="2000",
+                )
+                with closing(sqlite3.connect(path)) as connection, connection:
+                    connection.execute("PRAGMA foreign_keys = OFF")
+                    if legacy_table == "attempt":
+                        connection.execute(
+                            """
+                            INSERT INTO execution_attempts (
+                                attempt_id, command_id, worker_id,
+                                fencing_token, nonce, action_hash, wire_hash,
+                                state, response_hash, prepared_at, updated_at,
+                                record_hash, preflight_hash,
+                                signed_evidence_hash,
+                                transport_evidence_hash
+                            ) VALUES (
+                                'legacy-attempt', 'legacy-command', 'worker',
+                                1, 1, ?, ?, 'prepared', NULL, ?, ?, ?,
+                                NULL, NULL, NULL
+                            )
+                            """,
+                            (
+                                digest("legacy-action"),
+                                digest("legacy-wire"),
+                                "2026-08-27T00:00:00.000000Z",
+                                "2026-08-27T00:00:00.000000Z",
+                                digest("legacy-attempt-record"),
+                            ),
+                        )
+                    else:
+                        connection.execute(
+                            """
+                            INSERT INTO execution_submission_authorities (
+                                authority_hash, command_id, attempt_id,
+                                signed_evidence_hash, worker_id, fencing_token,
+                                issued_at, lease_expires_at, payload_json,
+                                content_hash, record_hash,
+                                pre_send_role_attestation_hash,
+                                pre_send_role_expires_at_ms
+                            ) VALUES (?, 'legacy-command', 'legacy-attempt', ?,
+                                'worker', 1, ?, ?, '{}', ?, ?, NULL, NULL)
+                            """,
+                            (
+                                digest("legacy-authority"),
+                                digest("legacy-signed"),
+                                "2026-08-27T00:00:00.000000Z",
+                                "2026-08-27T00:00:01.000000Z",
+                                digest("legacy-authority-content"),
+                                digest("legacy-authority-record"),
+                            ),
+                        )
+                    downgrade_execution_schema_v13(connection)
+
+                with self.assertRaisesRegex(
+                    StorageError,
+                    "signed or attempted entry",
+                ):
+                    ExecutionStore(
+                        path,
+                        environment=Environment.TESTNET,
+                        account_id="testnet-account",
+                        max_reserved_loss="100",
+                        max_reserved_notional="2000",
+                    )
+
+                with closing(sqlite3.connect(path)) as connection:
+                    versions = [
+                        row[0]
+                        for row in connection.execute(
+                            "SELECT version FROM execution_schema_migrations "
+                            "ORDER BY version"
+                        )
+                    ]
+                self.assertEqual(list(range(1, 13)), versions)
+
+    def test_signed_v13_entry_refuses_v14_provenance_migration(self) -> None:
+        ticket, _ = self.admit_one()
+        claim = self.store.claim_next(
+            "dispatcher",
+            at=NOW + timedelta(seconds=1),
+            lease_seconds=10,
+        )
+        assert claim is not None
+        preflight = self.register_preflight(ticket)
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id="command-1",
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
+        )
+        signed = self.make_signed_evidence(
+            preflight,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
+        self.store.prepare_attempt(
+            "command-1",
+            "dispatcher",
+            claim.fencing_token,
+            attempt_id="attempt-v13",
+            preflight_hash=preflight.preflight_hash,
+            signed_evidence=signed,
+            nonce=signed.nonce,
+            action_hash=signed.action_hash,
+            wire_hash=signed.wire_hash,
+            at=NOW + timedelta(seconds=2),
+        )
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            downgrade_execution_schema_v14(connection)
+
+        with self.assertRaisesRegex(StorageError, "provenance boundary"):
+            ExecutionStore(
+                self.path,
+                environment=Environment.TESTNET,
+                account_id="testnet-account",
+                max_reserved_loss="100",
+                max_reserved_notional="2000",
+            )
+        with closing(sqlite3.connect(self.path)) as connection:
+            versions = [
+                int(row[0])
+                for row in connection.execute(
+                    "SELECT version FROM execution_schema_migrations ORDER BY version"
+                )
+            ]
+            columns = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(execution_signed_envelopes)"
+                )
+            }
+        self.assertEqual(list(range(1, 14)), versions)
+        self.assertNotIn("main_account_address", columns)
 
 
 class TicketApprovalAdmissionTests(ExecutionStoreTestCase):
@@ -1291,8 +1869,19 @@ class TicketApprovalAdmissionTests(ExecutionStoreTestCase):
         )
         assert claim is not None
         preflight = self.register_preflight(ticket)
-        signed = self.make_signed_evidence(preflight)
-        self.store.prepare_attempt(
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id="command-1",
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
+        )
+        signed = self.make_signed_evidence(
+            preflight,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
+        attempt = self.store.prepare_attempt(
             "command-1",
             "dispatcher",
             claim.fencing_token,
@@ -1420,7 +2009,19 @@ class DispatchPreflightTests(ExecutionStoreTestCase):
         )
         assert claim is not None
         preflight = self.register_preflight(ticket)
-        signed = self.make_signed_evidence(preflight, nonce=123)
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id="command-1",
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
+        )
+        signed = self.make_signed_evidence(
+            preflight,
+            nonce=123,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
         self.assertEqual(preflight, self.store.get_preflight("command-1"))
         attempt = self.store.prepare_attempt(
             "command-1",
@@ -1561,7 +2162,19 @@ class DispatchPreflightTests(ExecutionStoreTestCase):
         )
         assert claim is not None
         preflight = self.register_preflight(ticket)
-        ordinary = self.make_signed_evidence(preflight, nonce=123)
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id="command-1",
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
+        )
+        ordinary = self.make_signed_evidence(
+            preflight,
+            nonce=123,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
         later_expiry = int(preflight.expires_at.timestamp() * 1_000) + 1_000
         stale_authority = replace(
             ordinary,
@@ -1723,7 +2336,18 @@ class OutboxCrashAndReplayTests(ExecutionStoreTestCase):
         )
         assert claim is not None
         preflight = self.register_preflight(ticket)
-        signed = self.make_signed_evidence(preflight)
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id="command-1",
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
+        )
+        signed = self.make_signed_evidence(
+            preflight,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
         attempt = self.store.prepare_attempt(
             "command-1",
             "dispatcher",
@@ -1740,13 +2364,24 @@ class OutboxCrashAndReplayTests(ExecutionStoreTestCase):
         self.assertEqual(1_777_777_777_777, attempt.nonce)
         self.assertEqual(digest("wire"), attempt.wire_hash)
         self.assertEqual(preflight.preflight_hash, attempt.preflight_hash)
+        pre_send = self.record_pre_send_role(
+            preflight,
+            signed,
+            command_id="command-1",
+            attempt_id=attempt.attempt_id,
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=2, milliseconds=100),
+        )
         self.store.require_submission_authority(
             "command-1",
             attempt.attempt_id,
             signed.evidence_hash,
             "dispatcher",
             claim.fencing_token,
-            at=NOW + timedelta(seconds=2, milliseconds=1),
+            pre_send_role_attestation_hash=pre_send.attestation_hash,
+            at=NOW + timedelta(seconds=2, milliseconds=100),
         )
         self.assertIsNone(
             self.store.claim_next(
@@ -1792,7 +2427,18 @@ class OutboxCrashAndReplayTests(ExecutionStoreTestCase):
         )
         assert claim is not None
         preflight = self.register_preflight(ticket)
-        signed = self.make_signed_evidence(preflight)
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id="command-1",
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
+        )
+        signed = self.make_signed_evidence(
+            preflight,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
         attempt = self.store.prepare_attempt(
             "command-1",
             "dispatcher",
@@ -1834,15 +2480,27 @@ class OutboxCrashAndReplayTests(ExecutionStoreTestCase):
 
 
 class ResponseAndReconciliationTests(ExecutionStoreTestCase):
-    def _prepared_response_command(self):
+    def _prepared_response_command(self, *, authorize: bool = True):
         ticket, _ = self.admit_one()
         claim = self.store.claim_next(
             "dispatcher", at=NOW + timedelta(seconds=1), lease_seconds=10
         )
         assert claim is not None
         preflight = self.register_preflight(ticket)
-        signed = self.make_signed_evidence(preflight, nonce=123)
-        self.store.prepare_attempt(
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id="command-1",
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
+        )
+        signed = self.make_signed_evidence(
+            preflight,
+            nonce=123,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
+        attempt = self.store.prepare_attempt(
             "command-1",
             "dispatcher",
             claim.fencing_token,
@@ -1854,10 +2512,31 @@ class ResponseAndReconciliationTests(ExecutionStoreTestCase):
             wire_hash=digest("wire"),
             at=NOW + timedelta(seconds=2),
         )
+        if authorize:
+            self.authorize_entry_attempt(
+                preflight,
+                signed,
+                attempt_id=attempt.attempt_id,
+                command_id="command-1",
+                worker_id="dispatcher",
+                fencing_token=claim.fencing_token,
+                boundary_at=NOW + timedelta(seconds=2, milliseconds=200),
+            )
         return ticket, claim, signed
 
     def test_entry_submission_authority_is_exact_and_single_use(self) -> None:
-        _, claim, signed = self._prepared_response_command()
+        _, claim, signed = self._prepared_response_command(authorize=False)
+        preflight = self.store.get_preflight("command-1")
+        pre_send = self.record_pre_send_role(
+            preflight,
+            signed,
+            command_id="command-1",
+            attempt_id="attempt-1",
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=2, milliseconds=100),
+        )
 
         authority = self.store.require_submission_authority(
             "command-1",
@@ -1865,6 +2544,7 @@ class ResponseAndReconciliationTests(ExecutionStoreTestCase):
             signed.evidence_hash,
             "dispatcher",
             claim.fencing_token,
+            pre_send_role_attestation_hash=pre_send.attestation_hash,
             at=NOW + timedelta(seconds=2, milliseconds=100),
         )
 
@@ -1879,8 +2559,98 @@ class ResponseAndReconciliationTests(ExecutionStoreTestCase):
                 signed.evidence_hash,
                 "dispatcher",
                 claim.fencing_token,
+                pre_send_role_attestation_hash=pre_send.attestation_hash,
                 at=NOW + timedelta(seconds=2, milliseconds=200),
             )
+
+    def test_outcome_requires_exact_authority_and_causal_time(self) -> None:
+        ticket, claim, signed = self._prepared_response_command(authorize=False)
+        unbound_unknown = self.make_transport_evidence(
+            "attempt-1",
+            signed,
+            outcome="unknown",
+        )
+        with self.assertRaisesRegex(StateConflict, "consumed submission authority"):
+            self.store.mark_submitted_unknown(
+                "command-1",
+                "dispatcher",
+                claim.fencing_token,
+                transport_evidence=unbound_unknown,
+                at=NOW + timedelta(seconds=3),
+            )
+
+        unbound_response = self.make_transport_evidence(
+            "attempt-1",
+            signed,
+            outcome="response_received",
+            response_hash=digest("unbound-response"),
+        )
+        batch = parse_order_response(
+            {
+                "status": "ok",
+                "response": {
+                    "type": "order",
+                    "data": {
+                        "statuses": [
+                            {"resting": {"oid": 1}},
+                            {"resting": {"oid": 2}},
+                            {"resting": {"oid": 3}},
+                        ]
+                    },
+                },
+            },
+            requested_sizes=(ticket.quantity,) * 3,
+        )
+        with self.assertRaisesRegex(StateConflict, "consumed submission authority"):
+            self.store.record_submission_response(
+                "command-1",
+                "dispatcher",
+                claim.fencing_token,
+                batch,
+                transport_evidence=unbound_response,
+                at=NOW + timedelta(seconds=3),
+            )
+
+        preflight = self.store.get_preflight("command-1")
+        authority = self.authorize_entry_attempt(
+            preflight,
+            signed,
+            attempt_id="attempt-1",
+            command_id="command-1",
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            boundary_at=NOW + timedelta(seconds=2, milliseconds=200),
+        )
+        exact = self.make_transport_evidence(
+            "attempt-1",
+            signed,
+            outcome="unknown",
+        )
+        wrong_authority = replace(
+            exact,
+            submission_authority_hash=digest("wrong-authority"),
+            evidence_hash="",
+        )
+        with self.assertRaisesRegex(StateConflict, "authority chain"):
+            self.store.mark_submitted_unknown(
+                "command-1",
+                "dispatcher",
+                claim.fencing_token,
+                transport_evidence=wrong_authority,
+                at=NOW + timedelta(seconds=3),
+            )
+        self.assertEqual(authority.authority_hash, exact.submission_authority_hash)
+        with self.assertRaisesRegex(StateConflict, "authority chain"):
+            self.store.mark_submitted_unknown(
+                "command-1",
+                "dispatcher",
+                claim.fencing_token,
+                transport_evidence=exact,
+                at=NOW + timedelta(seconds=2, milliseconds=100),
+            )
+        self.assertEqual("claimed", self.store.get_command("command-1").state)
+        with self.assertRaises(RecordNotFound):
+            self.store.get_transport_evidence("command-1")
 
     def test_three_leg_response_persists_oids_and_requires_reconciliation(self) -> None:
         ticket, _ = self.admit_one()
@@ -1889,8 +2659,20 @@ class ResponseAndReconciliationTests(ExecutionStoreTestCase):
         )
         assert claim is not None
         preflight = self.register_preflight(ticket)
-        signed = self.make_signed_evidence(preflight, nonce=123)
-        self.store.prepare_attempt(
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id="command-1",
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
+        )
+        signed = self.make_signed_evidence(
+            preflight,
+            nonce=123,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
+        attempt = self.store.prepare_attempt(
             "command-1",
             "dispatcher",
             claim.fencing_token,
@@ -1901,6 +2683,15 @@ class ResponseAndReconciliationTests(ExecutionStoreTestCase):
             action_hash=digest("action"),
             wire_hash=digest("wire"),
             at=NOW + timedelta(seconds=2),
+        )
+        self.authorize_entry_attempt(
+            preflight,
+            signed,
+            attempt_id=attempt.attempt_id,
+            command_id="command-1",
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            boundary_at=NOW + timedelta(seconds=2, milliseconds=200),
         )
         response = parse_order_response(
             {
@@ -2764,7 +3555,19 @@ class TamperDetectionTests(ExecutionStoreTestCase):
         )
         assert claim is not None
         preflight = self.register_preflight(ticket)
-        signed = self.make_signed_evidence(preflight, nonce=123)
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id="command-1",
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
+        )
+        signed = self.make_signed_evidence(
+            preflight,
+            nonce=123,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
         self.store.prepare_attempt(
             "command-1",
             "dispatcher",

@@ -92,10 +92,19 @@ class TradeProposalTests(unittest.TestCase):
             issued.required_approval_text,
         )
         display = issued.display_payload()
+        self.assertEqual(
+            "testnet_chat_trade_proposal_display.v3",
+            display["schema_version"],
+        )
         self.assertEqual(issued.as_dict(), display["proposal"])
         self.assertEqual(issued.required_approval_text, display["required_approval_text"])
         self.assertFalse(display["human_message_attestation_available"])
         self.assertFalse(display["approval_is_execution"])
+        self.assertTrue(
+            display["evidence_semantics"][
+                "fresh_account_market_policy_revalidation_required_before_execution"
+            ]
+        )
         self.assertTrue(issued.is_active(NOW))
         self.assertFalse(issued.is_active(issued.expires_at))
         with self.assertRaises(FrozenInstanceError):

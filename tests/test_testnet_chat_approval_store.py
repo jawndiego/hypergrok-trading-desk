@@ -166,12 +166,23 @@ class InitializationTests(unittest.TestCase):
             self.assertEqual(0o600, path.stat().st_mode & 0o777)
             connection = sqlite3.connect(path)
             try:
-                row = connection.execute(
-                    "SELECT version, name, checksum FROM testnet_chat_schema_migrations"
-                ).fetchone()
-                self.assertEqual(CHAT_APPROVAL_STORE_SCHEMA_VERSION, row[0])
-                self.assertEqual("durable_testnet_chat_proposals", row[1])
-                self.assertRegex(row[2], r"^[0-9a-f]{64}$")
+                rows = connection.execute(
+                    """
+                    SELECT version, name, checksum
+                    FROM testnet_chat_schema_migrations ORDER BY version
+                    """
+                ).fetchall()
+                self.assertEqual(
+                    [1, CHAT_APPROVAL_STORE_SCHEMA_VERSION],
+                    [row[0] for row in rows],
+                )
+                self.assertEqual("durable_testnet_chat_proposals", rows[0][1])
+                self.assertEqual("unique_staging_document_binding", rows[1][1])
+                self.assertEqual(
+                    "f8d4807a8cda5b642c6fab3f826629885eec3e607e8e30f82feb8ea769f9a8f4",
+                    rows[0][2],
+                )
+                self.assertRegex(rows[1][2], r"^[0-9a-f]{64}$")
                 self.assertEqual("wal", connection.execute("PRAGMA journal_mode").fetchone()[0])
             finally:
                 connection.close()
@@ -286,9 +297,38 @@ class ProposalPersistenceTests(StoreCase):
         self.assertIsNone(first.receipt)
         self.assertEqual(first, second)
         self.assertEqual(first, reopened.load_trade_proposal(self.proposal.proposal_id))
+        self.assertEqual(
+            first,
+            reopened.load_trade_proposal_for_staging_document(
+                self.proposal.staging_document_id
+            ),
+        )
         self.assertEqual((1, 1, 0), self.counts())
         with self.assertRaises(RecordNotFound):
             self.store.load_trade_proposal("tp_" + "x" * 32)
+
+    def test_staging_document_binds_exactly_one_proposal_and_tamper_halts_load(self) -> None:
+        first = self.store_pending()
+        second = proposal()
+        self.assertNotEqual(first.proposal.proposal_id, second.proposal_id)
+        with self.assertRaisesRegex(StateConflict, "already has"):
+            self.store.store_pending_trade_proposal(second, stored_at=NOW)
+
+        connection = self.connect()
+        try:
+            connection.execute("DROP TRIGGER testnet_chat_staging_bindings_no_update")
+            connection.execute(
+                """
+                UPDATE testnet_chat_proposal_staging_bindings
+                SET record_hash = ?
+                """,
+                ("9" * 64,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaisesRegex(StorageError, "staging binding differs"):
+            self.store.load_trade_proposal(first.proposal.proposal_id)
 
     def test_only_active_typed_testnet_proposal_can_be_stored(self) -> None:
         with self.assertRaisesRegex(StateConflict, "active TESTNET"):
@@ -325,6 +365,14 @@ class ProposalPersistenceTests(StoreCase):
                 )
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute("DELETE FROM testnet_chat_proposals")
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    """
+                    UPDATE testnet_chat_proposal_staging_bindings
+                    SET staging_document_hash = ?
+                    """,
+                    ("9" * 64,),
+                )
         finally:
             connection.close()
 

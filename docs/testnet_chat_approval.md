@@ -1,17 +1,27 @@
 # Local chat approval foundation for TESTNET
 
-Status: **immutable proposal v2, exact-text parser, durable approval CAS,
-mutually authenticated AF_UNIX protocol/client and a separate one-tool stdio
-MCP adapter implemented offline; listener installation, trusted proposal
-presentation and executor admission are not implemented; mainnet prohibited**.
+Status: **immutable proposal v2, typed control-only issuer, durable approval
+CAS, create-only presentation artifact/reader, mutually authenticated AF_UNIX
+protocol/client, a separate one-tool stdio MCP adapter, deterministic execution
+handoff, atomic schema-v13 admission/role fences, schema-v14 signer/outcome
+hardening, schema-v15 config-bound verified delivery and schema-v16 canonical
+delivery evidence implemented offline;
+listener/presentation/handoff ACL configuration and handoff publication/
+consumption are not installed; mainnet prohibited**.
 
 This design adds a convenient attended TESTNET approval gesture without making
 chat, Codex, MCP or a model part of the signing or submission boundary. The
 pure model is `src/trading_harness/testnet_chat_approval.py`. The independent
 durable adapter is `testnet_chat_approval_store.py`; the bounded wire and
 client are `testnet_chat_broker.py` and `testnet_chat_bridge.py`; and the
-separate stdio adapter is `testnet_chat_mcp.py`. None imports a credential,
-signer, venue transport or execution-store module.
+separate stdio adapter is `testnet_chat_mcp.py`. Typed issuance lives in
+`testnet_chat_proposal_issuer.py`, while `testnet_chat_presentation.py` owns the
+one-way sanitized file format and read-only verifier. None imports a
+credential, signer, venue transport or execution-store module.
+`testnet_chat_admission.py` defines the portable approved-proposal handoff;
+`testnet_chat_delivery.py` defines the fixed UID-451 artifact reader and
+executor-config scope; `ExecutionStore` accepts only a handoff ID and invokes
+that fixed reader itself before capital-side admission.
 
 ## Security meaning
 
@@ -80,10 +90,25 @@ must satisfy `stop < entry < target`; for a sell it must satisfy
 must not exceed `max_loss`. Binary floating point is rejected.
 
 The hashes provide deterministic binding and tamper evidence; they are not a
-signature. The future proposal issuer must derive the staging, ticket, plan,
-grant, policy and account/market snapshot hashes from already verified
-authoritative records. It must create the proposal and initial `PENDING` state
-in storage that UID 501 cannot modify.
+signature. `TrustedTestnetChatProposalIssuer.issue` accepts only a staging
+document ID, the exact active broker session and the issuance time. Its exact
+evidence reader must point to the configured staging database, reload and
+verify that database's complete staging chain, and resolve a pre-registered
+account snapshot plus a typed, canonical TESTNET market artifact. The latter
+requires a non-crossed book, complete 25-bps depth, mid-consistency evidence,
+and enough crossable depth for the protected entry. The issuer derives every
+proposal economic value, address, hash and expiry; none is a free per-call
+parameter. Those fixed account/market bindings are typed and self-consistent,
+but their in-memory construction does not itself authenticate collector
+provenance. Production presentation requires fixed reviewed collector/store
+adapters. Fresh executor preflight prevents capital bypass if issuance evidence
+was forged, but not a misleading proposal display. The issuer creates the
+proposal and initial `PENDING` state in storage that UID 501 cannot modify.
+The issuer accepts the exact in-memory broker session and the presentation
+artifact binds its broker-generation ID. It does not accept a decoded receipt
+or free hash as proof of the active generation. Production must compose
+issuance in the process that owns the active listener and disable issuance
+before closing it; that same-process orchestration is not wired yet.
 It must not accept a caller's self-asserted account-binding hash: the module
 derives that hash from the typed account identity itself.
 
@@ -93,11 +118,19 @@ extra keys, validates the stored hash, and requires an exact round trip.
 
 ## Deterministic presentation contract
 
-An interface may display only `TradeProposal.display_payload()` as the
+An interface may display only `TradeProposal.display_payload()` v3 as the
 authoritative proposal. That payload contains the full canonical proposal,
-`required_approval_text`, `testnet_only=true`,
+`required_approval_text`, an `evidence_semantics` object,
+`testnet_only=true`,
 `human_message_attestation_available=false` and
 `approval_is_execution=false`.
+
+The account and market hashes are explicitly issuance-time evidence. They are
+bound exactly on retry but are not represented as fresh until the human
+proposal expires. Executor admission/dispatch must independently refresh
+account, market and policy state before signing; it may deny but may not change
+the approved economics. Schema v14 binds the selected addresses and signing
+interval into the signed evidence and transport outcome chain.
 
 Codex/ChatGPT presentation must:
 
@@ -114,9 +147,21 @@ is raw `command_text`; it forwards those bytes unchanged and cannot load
 proposal economics, read a receipt store, sign, submit or call an executor.
 The broker protocol remains the component that checks UID/session provenance,
 parses the exact sentence, loads the protected proposal and performs the
-durable approval transition. A trusted read-only path that publishes the exact
-stored `display_payload()` to Codex is still missing; model-reconstructed
-economics are not an acceptable substitute.
+durable approval transition. UID 452 may publish the exact stored
+`display_payload()` once into a separate control-owned presentation directory.
+The UID-450 research service can verify that immutable file and include it as
+the optional `testnet_chat_proposal` member of the existing `get_trade_stage`
+result. It never opens the control approval database, and model-reconstructed
+economics are not an acceptable substitute. Deployment ACLs and MCP
+configuration for this dormant reader remain absent.
+
+Publication never writes the visible final name directly. Under a per-stage
+lock, the publisher recovers or creates one hidden mode-0400 pending file,
+fully synchronizes and re-reads it, then uses Darwin exclusive no-follow rename
+to publish without replacement and synchronizes the directory. A crash-left
+partial pending inode may be removed only after exact owner/mode/link checks;
+a valid pending artifact is completed, while any existing final is never
+overwritten.
 
 ## macOS AF_UNIX broker protocol and remaining service contract
 
@@ -141,9 +186,17 @@ remaining condition below before it can be promoted.
 
 The durable store already rejects noncanonical/symlinked parents, requires its
 current UID to own an exact mode-0700 parent, and requires regular single-link
-mode-0600 database/WAL/SHM files. Named-ACL inspection and the fixed-path
-listener/service are not implemented, so these checks do not yet qualify a
-live broker.
+mode-0600 database/WAL/SHM/journal files. Named-ACL inspection and the fixed-path
+listener service source exist, but the service has a literal disabled gate and
+no installed runtime, path layout or named ACLs. These checks therefore do not
+qualify a live broker.
+
+The presentation namespace is distinct: UID 452 owns its canonical mode-0700
+directory and create-only, single-link mode-0400 artifacts. Research UID 450
+may later receive read-only traversal/file ACLs for those sanitized documents;
+it receives no write, delete, rename, listing or control-database access. UID
+501 does not read that filesystem path. Named-ACL installation and verification
+remain commissioning gates.
 
 ### Session and request framing
 
@@ -187,8 +240,9 @@ lost acknowledgement is `UNKNOWN`; the client never retries automatically.
   `human_message_attested=false`, and the complete bridge remains TESTNET-only.
 - Its exact schema, peer checks, timeout/output bounds and negative capability
   tests are implemented and reviewed. It must remain unregistered until the
-  fixed-path listener, ACLs, broker lifecycle and trusted proposal presentation
-  path are implemented and separately commissioned.
+  fixed-path listener, ACLs, broker lifecycle and dormant presentation reader
+  configuration plus handoff publication/consumption are separately
+  commissioned.
 
 ### Lookup and transition
 
@@ -209,8 +263,10 @@ lost acknowledgement is `UNKNOWN`; the client never retries automatically.
    second transition.
 
 The pure state function cannot defeat a caller that deliberately reuses a
-stale in-memory `PENDING` object. The schema-v1 SQLite adapter is the durable
-replay defense: it stores the exact canonical proposal, atomically inserts the
+stale in-memory `PENDING` object. The schema-v2 SQLite adapter is the durable
+replay defense: schema v1 remains immutable, while a separate v2 table uniquely
+binds each staging document to one proposal and refuses automatic migration of
+nonempty v1 state. It stores the exact canonical proposal, atomically inserts the
 receipt and performs the state-hash CAS under `BEGIN IMMEDIATE`. An exact
 same-session replay returns the one existing receipt without another
 transition; a conflicting replay fails closed.
@@ -239,6 +295,84 @@ The raw chat text is not retained after hashing. Conflicting persisted bytes,
 receipt/state disagreement or an ambiguous post-commit outcome is a hard halt
 or `UNKNOWN` for that proposal, never a blind retry.
 
+## Executor handoff and atomic admission
+
+`TestnetChatExecutionHandoff` is a deterministic, credential-free document
+built only from the exact proposal, its terminal `APPROVED` state, the unique
+approval receipt, a configuration-owned audience and an active publication
+time. It repeats the explicit false human/mainnet/execution/write claims and
+hash-binds every nested document. It contains no raw approval text, HMAC,
+credential, signature or venue payload. The portable document is not authority
+by itself.
+
+The executor never opens the control approval database. Schema v15 derives one
+immutable chat scope from the exact executor config: TESTNET account, main and
+API-wallet addresses, audience, config hash, UID 451/452 roles and fixed
+`/private/var/db/trading-desk-testnet-chat-handoffs/<config-hash>`
+directory. The fixed reader runs only as UID 451. It rejects symlink traversal,
+untrusted ancestors, wrong owners/modes/types/links/ACLs, oversized or
+noncanonical JSON, path/descriptor inode disagreement and mutation during the
+read. The system ancestors `/private`, `/private/var` and `/private/var/db`
+must be root:wheel 0755 and ACL-free. The dedicated root and config directory
+must be UID/GID 452 mode 0700 with only UID 451 `execute`; the immutable file
+must be UID/GID 452 mode 0400 with only UID 451 `read`.
+
+`ExecutionStore.admit_chat_handoff` accepts only the bounded handoff ID and no
+free handoff, delivery object, timestamp, address, account, audience or config
+parameter. The store owns the admission clock, loads its persisted scope and
+invokes the production reader itself, then verifies the result again inside the
+admission transaction. Schema v15
+persists the scope hash, delivery hash, artifact path and byte/source-binding
+hashes with the chat authorization. Schema v16 preserves those bytes and also
+persists the complete canonical ancestor, directory/file identity, named-ACL
+and byte evidence document; restart decoding recomputes its hash graph.
+Nonempty legacy chat state cannot auto-migrate across either boundary because
+authentic source evidence cannot be backfilled.
+
+Schema v13 gives proposal ID/hash, receipt hash, approval-state hash, handoff
+ID/hash, ticket, plan and command independent unique constraints. An exact
+duplicate of the same verified delivery returns the one existing command
+without another event, reservation or counter change; any identity collision,
+changed document or changed source binding is a hard conflict.
+
+Admission independently reloads the already-registered risk ticket, protected
+plan and authenticated infrastructure grant. It requires the persisted account
+ID, main/API-wallet addresses and audience; exact
+instrument, side, entry bound, size, stop, target and stressed maximum loss;
+matching policy/account-snapshot hashes; active proposal/ticket/grant windows;
+and current immutable grant/store loss, notional and leverage caps. In one
+`BEGIN IMMEDIATE` transaction it records explicit
+`testnet_chat`/`human_message_attested=false` provenance, consumes the ticket,
+reserves loss/notional and creates one command, three legs, outbox and event.
+It never constructs `TrustedApproval`; HMAC approval APIs reject the chat
+provenance. No signer, Keychain, transport, control-database or venue API is
+used by this transaction.
+
+The immutable learning ledger records a distinct
+`testnet_chat_approval_unattested` reference bound to the handoff hash, so the
+same-tick learning gate does not relabel chat provenance as HMAC approval. The
+entry gate matches the complete approval ID/state/kind/ticket/evidence tuple
+and the exact domain-separated command/ticket/plan/approval/three-CLOID
+execution reference; matching only an ID or state is insufficient.
+
+Schema v13 also requires normal bracket dispatch to persist a fresh stable
+two-read `userRole(api_wallet)` mapping at PRE_KEY and PRE_SEND. PRE_KEY is
+bound into signed evidence; PRE_SEND binds the exact attempt and signed evidence
+into the one-shot submission authority. Schema v14 additionally binds the
+configured main/API-wallet addresses and signing-start interval, checks PRE_KEY
+immediately before and after key use, and requires the exact submission-
+authority/PRE_SEND hashes and causal times in every normal transport outcome.
+The PRE_SEND two-second expiry is rechecked at HTTP send, with post-authority
+ambiguity remaining `UNKNOWN` and never retried. Automatic migrations refuse
+nonempty legacy signed/attempt/submission/outcome state where real role and
+timing evidence cannot be backfilled.
+
+The canonical handoff, fixed verified reader and atomic consumer now exist, but
+no control-side create-only handoff publisher or installed executor watcher
+connects the approval store to that reader. Creating a handoff or recording
+approval therefore still cannot queue an order on the machine as currently
+commissioned.
+
 ## Approval is not execution
 
 `APPROVED` means only that this chat-approval receipt was durably recorded.
@@ -246,29 +380,32 @@ It does not mean admitted, reserved, queued, signed, submitted, filled or
 closed. This state machine is separate from the later executor-side one-time
 consumption and submission states.
 
-A future executor integration must independently reload the immutable
-proposal, repeat the current API-wallet-to-main-account mapping check, refresh
-account/market/policy evidence, enforce limits, and atomically consume a
-separate execution authorization while reserving risk and creating the durable
-outbox row. Any mismatch or expiry denies execution. That integration is not
-part of this foundation.
+The offline schema-v16 path can turn a verified, separately delivered active
+handoff artifact into a queued command under the atomic checks above. Dispatch still refreshes
+account/market/policy evidence and repeats API-wallet-to-main-account mapping
+at PRE_KEY and PRE_SEND. Any mismatch or expiry denies execution.
 
 ## Explicit non-goals and stop line
 
 This slice still does not implement or authorize:
 
 - an AF_UNIX listener/daemon or socket/ACL installation;
-- broker-generation persistence or a trusted proposal issuer/presentation path;
+- same-process active-generation issuance orchestration or installed
+  presentation ACL/configuration;
+- fixed authenticated account/market collector composition for issuance;
 - registration or enabling of the existing raw-`command_text` stdio MCP;
-- executor, admission, signer, Keychain, nonce or transport integration;
+- a UID-452 create-only canonical handoff publisher or installed UID-451
+  reader/consumer loop;
+- Keychain, credential or live venue integration for the chat path;
 - HTTP, WebSocket, VPN or venue access;
 - order placement, cancellation, closing or any other venue write;
 - credentials or HMAC provisioning; or
 - mainnet use under any circumstances.
 
-Promotion requires fixed-path socket and named-ACL enforcement, trusted display
-publication, broker-generation persistence, an at-least-once control-to-executor
-handoff, atomic executor-side consume/reservation/outbox admission, fresh
-PRE_KEY/PRE_SEND `userRole` fences on the normal bracket path, and end-to-end
-TESTNET limits. Until then `/dev/tty` plus the control-role HMAC is the only
-installed attended authorization route.
+Promotion requires fixed-path socket and named-ACL enforcement, installed
+read-only presentation publication, authenticated evidence collectors,
+same-process broker-generation issuance, an at-least-once create-only handoff
+publisher and executor consumer, exact-head installation, and end-to-end
+TESTNET limits including live schema-v14 PRE_KEY/PRE_SEND role-fence and
+UNKNOWN-outcome exercises. Until then `/dev/tty` plus the control-role HMAC is
+the only installed attended authorization route.

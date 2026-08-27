@@ -43,7 +43,7 @@ Clock: TypeAlias = Callable[[], datetime]
 ExchangeSender: TypeAlias = Callable[[str, bytes, float], "HttpExchangeResponse"]
 SignedEnvelope: TypeAlias = SignedActionEnvelope | SignedRecoveryEnvelope
 
-SUBMISSION_ATTEMPT_HASH_DOMAIN = "trading-harness/hyperliquid-submission-attempt/v1"
+SUBMISSION_ATTEMPT_HASH_DOMAIN = "trading-harness/hyperliquid-submission-attempt/v2"
 SUBMISSION_RESPONSE_HASH_DOMAIN = "trading-harness/hyperliquid-submission-response/v1"
 RECOVERY_SUBMISSION_ENABLED = True
 NOOP_FENCE_SUBMISSION_ENABLED = True
@@ -122,6 +122,7 @@ class SubmissionAttempt:
     recovery_attempt_id: str | None
     recovery_signed_evidence_hash: str | None
     submission_authority_hash: str | None
+    pre_send_role_attestation_hash: str | None
     attempted_at_ms: int
     outcome: SubmissionOutcome
     http_status: int | None
@@ -160,7 +161,6 @@ class SubmissionAttempt:
             self.recovery_command_id,
             self.recovery_attempt_id,
             self.recovery_signed_evidence_hash,
-            self.submission_authority_hash,
         )
         if self.artifact_kind == "protected_order" and any(
             value is not None for value in recovery_bindings
@@ -194,6 +194,24 @@ class SubmissionAttempt:
                     or any(ord(character) < 32 for character in value)
                 ):
                     raise HyperliquidSubmissionError(f"submission {field} is invalid")
+            if self.pre_send_role_attestation_hash is not None:
+                raise HyperliquidSubmissionError(
+                    "recovery submission cannot bind an entry role attestation"
+                )
+        else:
+            for field, value in (
+                ("submission_authority_hash", self.submission_authority_hash),
+                (
+                    "pre_send_role_attestation_hash",
+                    self.pre_send_role_attestation_hash,
+                ),
+            ):
+                if not isinstance(value, str) or not re.fullmatch(
+                    r"[0-9a-f]{64}", value
+                ):
+                    raise HyperliquidSubmissionError(
+                        f"protected submission {field} is invalid"
+                    )
         if (
             not isinstance(self.account_id, str)
             or not self.account_id
@@ -263,6 +281,9 @@ class SubmissionAttempt:
             recovery_attempt_id=self.recovery_attempt_id,
             recovery_signed_evidence_hash=self.recovery_signed_evidence_hash,
             submission_authority_hash=self.submission_authority_hash,
+            pre_send_role_attestation_hash=(
+                self.pre_send_role_attestation_hash
+            ),
             attempted_at_ms=self.attempted_at_ms,
             outcome=self.outcome,
             http_status=self.http_status,
@@ -274,7 +295,7 @@ class SubmissionAttempt:
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "hyperliquid.submission_attempt.v1",
+            "schema_version": "hyperliquid.submission_attempt.v2",
             "network": self.network.value,
             "endpoint": self.endpoint,
             "artifact_kind": self.artifact_kind,
@@ -289,6 +310,9 @@ class SubmissionAttempt:
             "recovery_attempt_id": self.recovery_attempt_id,
             "recovery_signed_evidence_hash": self.recovery_signed_evidence_hash,
             "submission_authority_hash": self.submission_authority_hash,
+            "pre_send_role_attestation_hash": (
+                self.pre_send_role_attestation_hash
+            ),
             "attempted_at_ms": self.attempted_at_ms,
             "outcome": self.outcome.value,
             "outcome_unknown": self.outcome_unknown,
@@ -334,6 +358,16 @@ class SubmissionAttempt:
             send_count=self.send_count,
             retry_performed=self.retry_performed,
             venue_write_attempted=True,
+            submission_authority_hash=(
+                self.submission_authority_hash
+                if self.artifact_kind == "protected_order"
+                else None
+            ),
+            pre_send_role_attestation_hash=(
+                self.pre_send_role_attestation_hash
+                if self.artifact_kind == "protected_order"
+                else None
+            ),
         )
 
     def noop_fence_response_evidence(
@@ -475,6 +509,7 @@ def _attempt_material(
     recovery_attempt_id: str | None = None,
     recovery_signed_evidence_hash: str | None = None,
     submission_authority_hash: str | None = None,
+    pre_send_role_attestation_hash: str | None = None,
     attempted_at_ms: int,
     outcome: SubmissionOutcome,
     http_status: int | None,
@@ -496,6 +531,7 @@ def _attempt_material(
         "recovery_attempt_id": recovery_attempt_id,
         "recovery_signed_evidence_hash": recovery_signed_evidence_hash,
         "submission_authority_hash": submission_authority_hash,
+        "pre_send_role_attestation_hash": pre_send_role_attestation_hash,
         "attempted_at_ms": attempted_at_ms,
         "outcome": outcome.value,
         "http_status": http_status,
@@ -515,6 +551,7 @@ def _attempt(
     recovery_attempt_id: str | None = None,
     recovery_signed_evidence_hash: str | None = None,
     submission_authority_hash: str | None = None,
+    pre_send_role_attestation_hash: str | None = None,
     attempted_at_ms: int,
     outcome: SubmissionOutcome,
     http_status: int | None,
@@ -537,6 +574,7 @@ def _attempt(
         recovery_attempt_id=recovery_attempt_id,
         recovery_signed_evidence_hash=recovery_signed_evidence_hash,
         submission_authority_hash=submission_authority_hash,
+        pre_send_role_attestation_hash=pre_send_role_attestation_hash,
         attempted_at_ms=attempted_at_ms,
         outcome=outcome,
         http_status=http_status,
@@ -558,6 +596,7 @@ def _attempt(
         recovery_attempt_id=recovery_attempt_id,
         recovery_signed_evidence_hash=recovery_signed_evidence_hash,
         submission_authority_hash=submission_authority_hash,
+        pre_send_role_attestation_hash=pre_send_role_attestation_hash,
         attempted_at_ms=attempted_at_ms,
         outcome=outcome,
         http_status=http_status,
@@ -579,6 +618,7 @@ def submit_signed_action(
     signed_evidence_hash: str | None = None,
     worker_id: str | None = None,
     fencing_token: int | None = None,
+    pre_send_role_attestation_hash: str | None = None,
     clock: Clock = lambda: datetime.now(timezone.utc),
 ) -> SubmissionAttempt:
     """Send exactly once and preserve every uncertain result as ``unknown``."""
@@ -606,12 +646,13 @@ def submit_signed_action(
     ):
         raise HyperliquidSubmissionError("dispatch preflight expired before submission")
 
-    recovery_binding: dict[str, str | None] = {
+    authority_binding: dict[str, str | None] = {
         "recovery_kind": None,
         "recovery_command_id": None,
         "recovery_attempt_id": None,
         "recovery_signed_evidence_hash": None,
         "submission_authority_hash": None,
+        "pre_send_role_attestation_hash": None,
     }
     if isinstance(signed, SignedActionEnvelope):
         if (
@@ -626,6 +667,10 @@ def submit_signed_action(
             or not re.fullmatch(r"[0-9a-f]{64}", signed_evidence_hash)
             or type(fencing_token) is not int
             or fencing_token <= 0
+            or not isinstance(pre_send_role_attestation_hash, str)
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", pre_send_role_attestation_hash
+            )
         ):
             raise HyperliquidSubmissionError(
                 "protected submission requires exact durable authority arguments"
@@ -650,6 +695,9 @@ def submit_signed_action(
             signed_evidence_hash,
             worker_id,
             fencing_token,
+            pre_send_role_attestation_hash=(
+                pre_send_role_attestation_hash
+            ),
             at=_EPOCH + timedelta(milliseconds=attempted_at_ms),
         )
         if not isinstance(authority, EntrySubmissionAuthority):
@@ -657,6 +705,7 @@ def submit_signed_action(
                 "store returned an invalid entry submission authority"
             )
         authority_lease_ms = _utc_ms(lambda: authority.lease_expires_at)
+        authority_issued_ms = _utc_ms(lambda: authority.issued_at)
         if (
             authority.command_id != command_id
             or authority.attempt_id != attempt_id
@@ -666,12 +715,30 @@ def submit_signed_action(
             or authority.wire_hash != signed.wire_hash
             or authority.worker_id != worker_id
             or authority.fencing_token != fencing_token
+            or authority.pre_send_role_attestation_hash
+            != pre_send_role_attestation_hash
+            or attempted_at_ms < authority_issued_ms
+            or attempted_at_ms >= authority.pre_send_role_expires_at_ms
             or attempted_at_ms >= authority_lease_ms
         ):
             raise HyperliquidSubmissionError(
                 "entry submission authority differs from signed attempt"
             )
+        authority_binding = {
+            "recovery_kind": None,
+            "recovery_command_id": None,
+            "recovery_attempt_id": None,
+            "recovery_signed_evidence_hash": None,
+            "submission_authority_hash": authority.authority_hash,
+            "pre_send_role_attestation_hash": (
+                authority.pre_send_role_attestation_hash
+            ),
+        }
     else:
+        if pre_send_role_attestation_hash is not None:
+            raise HyperliquidSubmissionError(
+                "recovery submission cannot accept an entry role attestation"
+            )
         if command_id is not None:
             raise HyperliquidSubmissionError(
                 "recovery submission cannot bind an entry command_id"
@@ -752,13 +819,47 @@ def submit_signed_action(
             raise HyperliquidSubmissionError(
                 "recovery submission authority differs from signed attempt"
             )
-        recovery_binding = {
+        authority_binding = {
             "recovery_kind": signed.recovery_kind.value,
             "recovery_command_id": authority.recovery_command_id,
             "recovery_attempt_id": authority.attempt_id,
             "recovery_signed_evidence_hash": authority.signed_evidence_hash,
             "submission_authority_hash": authority.authority_hash,
+            "pre_send_role_attestation_hash": None,
         }
+
+    if isinstance(signed, SignedActionEnvelope):
+        skip_detail: str | None = None
+        try:
+            send_at_ms = _utc_ms(clock)
+        except Exception:
+            send_at_ms = attempted_at_ms
+            skip_detail = "clock_invalid_after_authority"
+        if skip_detail is None and (
+            send_at_ms < attempted_at_ms or send_at_ms < authority_issued_ms
+        ):
+            skip_detail = "clock_invalid_after_authority"
+        elif skip_detail is None and (
+            send_at_ms >= signed.expires_after_ms
+            or send_at_ms >= authority_lease_ms
+        ):
+            skip_detail = "entry_expired_after_authority"
+        elif (
+            skip_detail is None
+            and send_at_ms >= authority.pre_send_role_expires_at_ms
+        ):
+            skip_detail = "entry_role_expired_after_authority"
+        if skip_detail is not None:
+            return _attempt(
+                signed,
+                **authority_binding,
+                attempted_at_ms=attempted_at_ms,
+                outcome=SubmissionOutcome.UNKNOWN,
+                http_status=None,
+                response_json=None,
+                response_hash=None,
+                detail_code=skip_detail,
+            )
 
     # One call, deliberately no loop and no retry adapter.
     try:
@@ -779,7 +880,7 @@ def submit_signed_action(
             code = "response_too_large"
         return _attempt(
             signed,
-            **recovery_binding,
+            **authority_binding,
             attempted_at_ms=attempted_at_ms,
             outcome=SubmissionOutcome.UNKNOWN,
             http_status=None,
@@ -791,7 +892,7 @@ def submit_signed_action(
     if not isinstance(result, HttpExchangeResponse):
         return _attempt(
             signed,
-            **recovery_binding,
+            **authority_binding,
             attempted_at_ms=attempted_at_ms,
             outcome=SubmissionOutcome.UNKNOWN,
             http_status=None,
@@ -806,7 +907,7 @@ def submit_signed_action(
     ):
         return _attempt(
             signed,
-            **recovery_binding,
+            **authority_binding,
             attempted_at_ms=attempted_at_ms,
             outcome=SubmissionOutcome.UNKNOWN,
             http_status=None,
@@ -817,7 +918,7 @@ def submit_signed_action(
     if result.final_url != signed.exchange_url:
         return _attempt(
             signed,
-            **recovery_binding,
+            **authority_binding,
             attempted_at_ms=attempted_at_ms,
             outcome=SubmissionOutcome.UNKNOWN,
             http_status=result.status,
@@ -828,7 +929,7 @@ def submit_signed_action(
     if len(result.body) > _MAX_RESPONSE_BYTES:
         return _attempt(
             signed,
-            **recovery_binding,
+            **authority_binding,
             attempted_at_ms=attempted_at_ms,
             outcome=SubmissionOutcome.UNKNOWN,
             http_status=result.status,
@@ -839,7 +940,7 @@ def submit_signed_action(
     if result.status != 200:
         return _attempt(
             signed,
-            **recovery_binding,
+            **authority_binding,
             attempted_at_ms=attempted_at_ms,
             outcome=SubmissionOutcome.UNKNOWN,
             http_status=result.status,
@@ -856,7 +957,7 @@ def submit_signed_action(
     except (UnicodeDecodeError, ValueError, TypeError, RecursionError):
         return _attempt(
             signed,
-            **recovery_binding,
+            **authority_binding,
             attempted_at_ms=attempted_at_ms,
             outcome=SubmissionOutcome.UNKNOWN,
             http_status=200,
@@ -871,7 +972,7 @@ def submit_signed_action(
     ):
         return _attempt(
             signed,
-            **recovery_binding,
+            **authority_binding,
             attempted_at_ms=attempted_at_ms,
             outcome=SubmissionOutcome.UNKNOWN,
             http_status=200,
@@ -882,7 +983,7 @@ def submit_signed_action(
     response_hash = domain_hash(SUBMISSION_RESPONSE_HASH_DOMAIN, decoded)
     return _attempt(
         signed,
-        **recovery_binding,
+        **authority_binding,
         attempted_at_ms=attempted_at_ms,
         outcome=SubmissionOutcome.RESPONSE_RECEIVED,
         http_status=200,

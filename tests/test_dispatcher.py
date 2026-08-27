@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 import json
@@ -9,6 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from trading_harness.canonical import domain_hash
 from trading_harness.dispatcher import DispatchPackage, ExecutionDispatcher
 from trading_harness.domain import Environment
 from trading_harness.errors import (
@@ -19,6 +21,7 @@ from trading_harness.errors import (
 )
 from trading_harness.execution_store import DispatchPreflight, ExecutionStore
 from trading_harness.hyperliquid_signer import (
+    PROTECTED_SIGNER_BINDING_HASH_DOMAIN,
     SignerPolicy,
     SigningAccount,
     sign_protected_action,
@@ -29,6 +32,10 @@ from trading_harness.hyperliquid_transport import (
 from trading_harness.hyperliquid_wire import (
     HyperliquidNetwork,
     build_protected_order_action,
+)
+from trading_harness.testnet_entry_role_attestation import (
+    EntryRoleAttestationStage,
+    collect_testnet_entry_role_attestation,
 )
 from tests.test_execution_store import (
     NOW,
@@ -84,6 +91,7 @@ class DispatcherTests(unittest.TestCase):
         )
         self.clock = StepClock(NOW + timedelta(seconds=1))
         self.signing_events: list[str] = []
+        self.role_calls: list[EntryRoleAttestationStage] = []
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -118,8 +126,43 @@ class DispatcherTests(unittest.TestCase):
             protected_action=unsigned,
         )
 
-    def sign(self, unsigned, plan, selected_metadata, preflight):
-        now = NOW + timedelta(seconds=1, milliseconds=30)
+    def attest(
+        self,
+        *,
+        stage,
+        command,
+        ticket,
+        plan,
+        package,
+        worker_id,
+        fencing_token,
+        attempt_id,
+        signed_evidence_hash,
+    ):
+        self.role_calls.append(stage)
+        return collect_testnet_entry_role_attestation(
+            stage=stage,
+            account_id=plan.entry.account_id,
+            main_account_address=MAIN_ACCOUNT,
+            api_wallet_address=SIGNER,
+            command_id=command.command_id,
+            ticket_hash=ticket.ticket_hash,
+            plan_hash=plan.plan_hash,
+            preflight_hash=package.preflight.preflight_hash,
+            action_hash=package.protected_action.action_hash,
+            worker_id=worker_id,
+            fencing_token=fencing_token,
+            attempt_id=attempt_id,
+            signed_evidence_hash=signed_evidence_hash,
+            transport=lambda method, endpoint, request: {
+                "role": "agent",
+                "data": {"user": MAIN_ACCOUNT},
+            },
+            clock=self.clock,
+        )
+
+    def sign(self, unsigned, plan, selected_metadata, preflight, pre_key_role):
+        now = self.clock.value
         policy = SignerPolicy(
             accounts=(
                 SigningAccount(
@@ -135,6 +178,7 @@ class DispatcherTests(unittest.TestCase):
             plan=plan,
             metadata=selected_metadata,
             preflight=preflight,
+            pre_key_role_attestation=pre_key_role,
             policy=policy,
             wallet=FakeWallet(SIGNER),
             nonce_allocator=FakeNonceAllocator(
@@ -200,6 +244,7 @@ class DispatcherTests(unittest.TestCase):
             self.store,
             preparer=self.prepare,
             signer=self.sign,
+            role_attestor=self.attest,
             clock=self.clock,
             lease_seconds=15,
         )
@@ -227,6 +272,15 @@ class DispatcherTests(unittest.TestCase):
         self.assertTrue(result.venue_write_attempted)
         self.assertFalse(result.retry_performed)
         self.assertEqual(len(sends), 1)
+        self.assertEqual(
+            [
+                EntryRoleAttestationStage.PRE_KEY,
+                EntryRoleAttestationStage.PRE_SEND,
+            ],
+            self.role_calls,
+        )
+        self.assertRegex(result.pre_key_role_attestation_hash, r"^[0-9a-f]{64}$")
+        self.assertRegex(result.pre_send_role_attestation_hash, r"^[0-9a-f]{64}$")
         attempt = self.store.get_attempt("command-1")
         self.assertEqual(attempt.preflight_hash, result.preflight_hash)
         self.assertEqual(attempt.nonce, result.nonce)
@@ -245,6 +299,7 @@ class DispatcherTests(unittest.TestCase):
             self.store,
             preparer=deny,
             signer=self.sign,
+            role_attestor=self.attest,
             clock=self.clock,
             lease_seconds=15,
         )
@@ -298,6 +353,7 @@ class DispatcherTests(unittest.TestCase):
             self.store,
             preparer=prepare_and_revoke,
             signer=self.sign,
+            role_attestor=self.attest,
             clock=self.clock,
             lease_seconds=15,
             submission_guard=guard,
@@ -369,7 +425,7 @@ class DispatcherTests(unittest.TestCase):
     def test_signing_failure_voids_unsent_command_and_requires_new_authority(self) -> None:
         calls = 0
 
-        def bad_signer(_unsigned, _plan, _metadata, _preflight):
+        def bad_signer(_unsigned, _plan, _metadata, _preflight, _pre_key_role):
             raise RuntimeError("signing failed")
 
         def sender(_endpoint, _body, _timeout):
@@ -381,6 +437,7 @@ class DispatcherTests(unittest.TestCase):
             self.store,
             preparer=self.prepare,
             signer=bad_signer,
+            role_attestor=self.attest,
             clock=self.clock,
             lease_seconds=5,
         )
@@ -405,6 +462,120 @@ class DispatcherTests(unittest.TestCase):
                 lease_seconds=5,
             )
         )
+
+    def test_pre_key_role_failure_precedes_nonce_signer_and_sender(self) -> None:
+        def failed_role(**kwargs):  # type: ignore[no-untyped-def]
+            self.role_calls.append(kwargs["stage"])
+            raise StateConflict("API-wallet mapping differs")
+
+        dispatcher = ExecutionDispatcher(
+            self.store,
+            preparer=self.prepare,
+            signer=self.sign,
+            role_attestor=failed_role,
+            clock=self.clock,
+            lease_seconds=15,
+        )
+        with (
+            patch(
+                "trading_harness.hyperliquid_transport._default_sender",
+                side_effect=AssertionError("role failure must not send"),
+            ),
+            self.assertRaisesRegex(StateConflict, "mapping differs"),
+        ):
+            dispatcher.dispatch_next("dispatcher")
+
+        self.assertEqual([EntryRoleAttestationStage.PRE_KEY], self.role_calls)
+        self.assertEqual([], self.signing_events)
+        self.assertEqual("terminal", self.store.get_command("command-1").state)
+        with self.assertRaises(RecordNotFound):
+            self.store.get_attempt("command-1")
+
+    def test_coherent_signer_address_rebind_fails_before_attempt_or_sender(self) -> None:
+        def rebound_signer(*arguments):  # type: ignore[no-untyped-def]
+            signed = self.sign(*arguments)
+            rebound_address = "0x" + "9" * 40
+            binding = {
+                "artifact_kind": signed.artifact_kind,
+                "network": signed.network.value,
+                "account_id": signed.account_id,
+                "main_account_address": signed.main_account_address,
+                "signer_address": rebound_address,
+                "vault_address": signed.vault_address,
+                "action_hash": signed.action_hash,
+                "preflight_hash": signed.preflight_hash,
+                "pre_key_role_attestation_hash": (
+                    signed.pre_key_role_attestation_hash
+                ),
+                "preflight_expires_at_ms": signed.preflight_expires_at_ms,
+                "signing_started_at_ms": signed.signing_started_at_ms,
+                "signed_at_ms": signed.signed_at_ms,
+            }
+            rebound = replace(
+                signed,
+                signer_address=rebound_address,
+                signer_binding_hash=domain_hash(
+                    PROTECTED_SIGNER_BINDING_HASH_DOMAIN,
+                    binding,
+                ),
+            )
+            rebound.verify_integrity()
+            return rebound
+
+        dispatcher = ExecutionDispatcher(
+            self.store,
+            preparer=self.prepare,
+            signer=rebound_signer,
+            role_attestor=self.attest,
+            clock=self.clock,
+            lease_seconds=15,
+        )
+        with (
+            patch(
+                "trading_harness.hyperliquid_transport._default_sender",
+                side_effect=AssertionError("rebound signer must not send"),
+            ),
+            self.assertRaisesRegex(StateConflict, "signed envelope differs"),
+        ):
+            dispatcher.dispatch_next("dispatcher")
+        with self.assertRaises(RecordNotFound):
+            self.store.get_attempt("command-1")
+        self.assertEqual("terminal", self.store.get_command("command-1").state)
+
+    def test_pre_send_role_failure_voids_signed_attempt_without_sender(self) -> None:
+        def fail_second_stage(**kwargs):  # type: ignore[no-untyped-def]
+            if kwargs["stage"] is EntryRoleAttestationStage.PRE_SEND:
+                self.role_calls.append(kwargs["stage"])
+                raise StateConflict("API-wallet remapped before send")
+            return self.attest(**kwargs)
+
+        dispatcher = ExecutionDispatcher(
+            self.store,
+            preparer=self.prepare,
+            signer=self.sign,
+            role_attestor=fail_second_stage,
+            clock=self.clock,
+            lease_seconds=15,
+        )
+        with (
+            patch(
+                "trading_harness.hyperliquid_transport._default_sender",
+                side_effect=AssertionError("PRE_SEND failure must not send"),
+            ),
+            self.assertRaisesRegex(StateConflict, "remapped"),
+        ):
+            dispatcher.dispatch_next("dispatcher")
+
+        self.assertEqual(
+            [
+                EntryRoleAttestationStage.PRE_KEY,
+                EntryRoleAttestationStage.PRE_SEND,
+            ],
+            self.role_calls,
+        )
+        self.assertEqual(["nonce_committed", "signed"], self.signing_events)
+        self.assertEqual("terminal", self.store.get_command("command-1").state)
+        self.assertEqual("prepared", self.store.get_attempt("command-1").state)
 
 
 if __name__ == "__main__":

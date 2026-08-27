@@ -36,6 +36,10 @@ from .staging_inbox import (
     TrustedQuoteDecision,
     TrustedQuoteRequest,
 )
+from .testnet_chat_presentation import (
+    TestnetChatProposalPresentationReader,
+    testnet_chat_presentation_output_schema,
+)
 
 
 JsonObject = dict[str, Any]
@@ -1013,6 +1017,12 @@ _TRADE_STAGE_OUTPUT_SCHEMA: JsonObject = {
         "latest_event_sequence": {"type": "integer", "minimum": 1},
         "chain_hash": deepcopy(_HASH_SCHEMA),
         "authoritative": {"type": "boolean", "const": False},
+        "testnet_chat_proposal": {
+            "anyOf": [
+                testnet_chat_presentation_output_schema(),
+                {"type": "null"},
+            ]
+        },
     },
 }
 
@@ -1245,7 +1255,8 @@ TOOL_CATALOG: tuple[ToolDefinition, ...] = (
         name="get_trade_stage",
         title="Get an immutable trade stage",
         description=(
-            "Read and integrity-check one local non-authoritative staging document."
+            "Read and integrity-check one local non-authoritative staging document, "
+            "plus its optional control-published TESTNET proposal presentation."
         ),
         input_schema={
             "type": "object",
@@ -1507,6 +1518,9 @@ class ToolService:
         learning_ledger_path: str | Path | None = None,
         learning_ledger: LearningLedger | None = None,
         learning_quote_configured: bool = False,
+        testnet_chat_presentation_reader: (
+            TestnetChatProposalPresentationReader | None
+        ) = None,
     ) -> None:
         if research_service is not None and not isinstance(
             research_service, ResearchService
@@ -1522,6 +1536,14 @@ class ToolService:
             raise TypeError("learning_ledger must be LearningLedger or None")
         if type(learning_quote_configured) is not bool:
             raise TypeError("learning_quote_configured must be bool")
+        if (
+            testnet_chat_presentation_reader is not None
+            and type(testnet_chat_presentation_reader)
+            is not TestnetChatProposalPresentationReader
+        ):
+            raise TypeError(
+                "testnet_chat_presentation_reader must be an exact read-only reader"
+            )
         self._market_brief_reader = market_brief_reader or _default_market_brief_reader
         self._market_transport = market_transport
         self._research_service = research_service
@@ -1540,6 +1562,7 @@ class ToolService:
         )
         self._learning_ledger = learning_ledger
         self._learning_quote_configured = learning_quote_configured
+        self._testnet_chat_presentation_reader = testnet_chat_presentation_reader
 
     def _learning(self) -> LearningLedger:
         if self._learning_ledger is None:
@@ -1818,7 +1841,17 @@ class ToolService:
     def get_trade_stage(self, document_id: object) -> JsonObject:
         if not isinstance(document_id, str):
             raise ToolInputError("document_id must be a string")
-        return self._stage_view(self._staging().get(document_id))
+        view = self._staging().get(document_id)
+        result = self._stage_view(view)
+        if self._testnet_chat_presentation_reader is not None:
+            presentation = self._testnet_chat_presentation_reader.load(
+                view.document.document_id,
+                view.document.document_hash,
+            )
+            result["testnet_chat_proposal"] = (
+                None if presentation is None else presentation.as_dict()
+            )
+        return result
 
     def get_learning_review(self, cycle_id: object) -> JsonObject:
         try:

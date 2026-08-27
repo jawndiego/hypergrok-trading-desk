@@ -21,8 +21,19 @@ This repository builds an agent-runtime-neutral trading research and execution h
   `execute trade <proposal-id>` command over an immutable, short-lived,
   staging/ticket/plan/grant/account/policy-bound proposal; a bare command is
   invalid. Its durable approval CAS, mutually authenticated AF_UNIX protocol
-  and separate one-field stdio MCP exist, but no listener, trusted presentation
-  path, executor admission or installation exists.
+  and separate one-field stdio MCP exist. A control-only typed issuer and
+  create-only presentation artifact can feed the existing `get_trade_stage`
+  read without exposing control state. Schema v13 implements a deterministic
+  handoff and atomic executor consume/reservation/outbox admission. Schema v15
+  removes free handoff/address/audience inputs: a caller supplies only a
+  handoff ID and the store itself invokes the fixed UID-451 reader for a
+  config-bound, UID-452-owned canonical artifact. No installed listener/ACL,
+  control-side handoff publisher or executor consumer loop exists.
+- The issuer's staging chain is store-backed, but its account and market
+  evidence bindings are currently typed/self-consistent in-memory values. Do
+  not describe their collectors as authoritative or enable presentation until
+  fixed reviewed collector/store adapters prove provenance. Fresh executor
+  preflight prevents capital bypass, not misleading issuance-time UX.
 - The isolated TESTNET worker has a deployable write path, but it is a separate process and CLI. It is never an MCP tool or skill capability. Mainnet remains hard-disabled.
 - The foundation admits only local `infrastructure_testnet` `simulate_order`
   commands; deny strategy, shadow, mainnet, and systematic grants.
@@ -62,6 +73,15 @@ This repository builds an agent-runtime-neutral trading research and execution h
   OpenCode. Its sole tool input is raw `command_text`; it uses stdio only,
   calls the fixed local AF_UNIX client once and reports post-send ambiguity as
   `UNKNOWN` with no automatic retry.
+- Chat approval provenance must never be coerced into `TrustedApproval` or the
+  `/dev/tty` HMAC lane. Delivery may be at least once, but the exact proposal,
+  approval receipt, handoff and ticket are consumed only in the same
+  execution-store transaction that reserves risk and creates the command,
+  three legs and outbox.
+- The same-tick learning gate must match the complete approval identity,
+  ticket and authority-evidence hash plus the domain-separated execution
+  record hash and all three CLOIDs. Matching only an ID or lifecycle state is
+  not sufficient.
 - Add tests for observable invariants and failure transitions, not wording.
 - Preserve upstream provenance in `UPSTREAM.md`; do not copy legacy capital-path prompts or snippets back into runtime locations.
 
@@ -108,7 +128,43 @@ This repository builds an agent-runtime-neutral trading research and execution h
   reading, and be mutually verified by the UID-501 bridge before it sends. The
   control database needs a canonical UID-452 mode-0700 parent, mode-0600
   single-link files and no UID-501 ACL. Those ACL/listener/install checks and
-  executor-side atomic consumption are still promotion blockers.
+  the control-side handoff publisher plus installed executor consumer are still
+  promotion blockers.
+- Execution-store schema v13 makes normal protected entry require fresh,
+  stable two-read `userRole(api_wallet)` attestations at PRE_KEY and PRE_SEND.
+  PRE_KEY is bound into signed evidence; PRE_SEND is attempt/signed-evidence
+  bound into the one-shot submission authority and must remain live at HTTP
+  send. Nonempty schema-v12 signed/attempted entry state may not auto-migrate.
+- Schema v14 additionally binds the configured main/API-wallet addresses and
+  signing interval into signed evidence, rechecks the PRE_KEY window around key
+  use, and requires every normal transport outcome to carry the exact durable
+  submission-authority and PRE_SEND hashes with causal timing. Nonempty legacy
+  signed/attempt/outcome state may not auto-migrate across that boundary.
+- Schema v15 durably binds the TESTNET chat account, addresses, audience,
+  config hash, role UIDs and fixed artifact directory. Chat admission accepts
+  only a handoff ID and invokes the fixed UID-451 reader internally. The reader
+  verifies the canonical config-hash namespace, exact trusted ancestor
+  ownership/modes/ACLs, UID/GID-452 mode-0400 single-link file, sole UID-451
+  read ACE, stable inode/metadata and exact canonical bytes. Free handoff bytes,
+  delivery objects, timestamps and per-call scope fields are forbidden; the
+  store owns the admission clock. Nonempty legacy chat admission state may not
+  auto-migrate.
+- Schema v16 preserves v15 bytes and persists the complete canonical delivery
+  evidence document, including ancestor chain, directory/file identities,
+  exact named ACLs and byte/source hashes. Restart decoding recomputes every
+  relationship. Nonempty schema-v15 chat state may not auto-migrate because
+  that evidence cannot be backfilled.
+- Control-published proposal presentations use a separate UID-452-owned
+  mode-0700 directory and immutable mode-0400 files. Only research UID 450 may
+  receive a read-only ACL for those sanitized files; it receives no control-DB
+  access, and UID 501 receives neither presentation nor control-state access.
+- Approved execution handoffs use the distinct fixed
+  `/private/var/db/trading-desk-testnet-chat-handoffs/<config-hash>` namespace.
+  `/private`, `/private/var` and `/private/var/db` must remain root:wheel 0755
+  and ACL-free. UID 452 owns the dedicated root/config directory at 0700 with
+  the sole UID-451 execute ACE and must publish immutable 0400 files create-only
+  with the sole UID-451 read ACE. The publisher, consumer loop and exact ACLs
+  are not installed.
 - Never provision a real secret through `security add-generic-password` or
   trust the shared `/usr/bin/security` executable in an item ACL. The macOS
   execution design requires the sealed role-specific native readers, fixed

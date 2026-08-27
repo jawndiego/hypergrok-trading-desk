@@ -32,7 +32,7 @@ import re
 import sqlite3
 import stat
 import tempfile
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from .canonical import canonical_json, domain_hash, semantic_intent_hash
 from .domain import Environment, SemanticIntent, Side
@@ -46,18 +46,45 @@ from .errors import (
 )
 from .execution_grant import TrustedInfrastructureGrant
 from .hyperliquid_response import BatchSubmissionResult, LegSubmissionState
-from .planning import ProtectedTradePlan, RiskTicket, RiskTicketStatus
+from .planning import (
+    ProtectedTradePlan,
+    RiskTicket,
+    RiskTicketStatus,
+    protected_trade_plan_from_dict,
+    risk_ticket_from_dict,
+)
 from .policy import (
     decimal_add,
     decimal_multiply,
     decimal_subtract,
     exact_decimal,
 )
+from .testnet_chat_admission import (
+    TestnetChatExecutionHandoff,
+    chat_execution_authorization_id,
+    chat_execution_command_id,
+    chat_execution_token_hash,
+    testnet_chat_execution_handoff_from_dict,
+)
+from .testnet_chat_delivery import (
+    TestnetChatExecutionScope,
+    VerifiedTestnetChatDelivery,
+    VerifiedTestnetChatDeliveryEvidence,
+    _testnet_chat_execution_scope_from_persisted,
+    read_verified_testnet_chat_delivery,
+    verified_testnet_chat_delivery_evidence_from_dict,
+)
+from .testnet_entry_role_attestation import (
+    EntryRoleAttestationStage,
+    TestnetEntryRoleAttestation,
+    testnet_entry_role_attestation_from_dict,
+)
 
 
 ZERO = Decimal("0")
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _HASH_CHARS = frozenset("0123456789abcdef")
+_ADDRESS_RE = re.compile(r"^0x[0-9a-f]{40}$")
 _MAX_JSON_BYTES = 4 * 1024 * 1024
 _MAX_DETAILS_BYTES = 64 * 1024
 _ROLES = ("entry", "protective_stop", "take_profit")
@@ -283,6 +310,33 @@ def _stored_hash(value: object, *, field: str) -> str:
         return _hash(value, field=field)
     except ValidationError as error:
         raise StorageError(f"persisted {field} is invalid") from error
+
+
+def _address(value: object, *, field: str) -> str:
+    parsed = _text(value, field=field, maximum=42)
+    if _ADDRESS_RE.fullmatch(parsed) is None:
+        raise ValidationError(f"{field} must be a lowercase 20-byte address")
+    return parsed
+
+
+def _stored_address(value: object, *, field: str) -> str:
+    try:
+        return _address(value, field=field)
+    except ValidationError as error:
+        raise StorageError(f"persisted {field} is invalid") from error
+
+
+def _milliseconds(value: datetime, *, field: str) -> int:
+    checked = _utc(value, field=field)
+    delta = checked - _EPOCH
+    result = (
+        delta.days * 86_400_000
+        + delta.seconds * 1_000
+        + delta.microseconds // 1_000
+    )
+    if result < 0:
+        raise ValidationError(f"{field} predates the Unix epoch")
+    return result
 
 
 def _positive_int(value: object, *, field: str, maximum: int | None = None) -> int:
@@ -1614,6 +1668,298 @@ _SCHEMA_V12 = _Migration(
     ),
 )
 
+_SCHEMA_V13 = _Migration(
+    13,
+    "chat_admission_and_normal_entry_role_fences",
+    (
+        """
+        CREATE TABLE execution_chat_authorizations (
+            authorization_id TEXT PRIMARY KEY
+                REFERENCES execution_approvals(approval_id),
+            proposal_id TEXT NOT NULL UNIQUE,
+            proposal_hash TEXT NOT NULL UNIQUE,
+            approval_receipt_hash TEXT NOT NULL UNIQUE,
+            approval_state_hash TEXT NOT NULL UNIQUE,
+            handoff_id TEXT NOT NULL UNIQUE,
+            handoff_hash TEXT NOT NULL UNIQUE,
+            staging_document_id TEXT NOT NULL,
+            staging_document_hash TEXT NOT NULL,
+            ticket_hash TEXT NOT NULL UNIQUE
+                REFERENCES execution_tickets(ticket_hash),
+            plan_hash TEXT NOT NULL UNIQUE
+                REFERENCES execution_plans(plan_hash),
+            infrastructure_grant_hash TEXT NOT NULL
+                REFERENCES execution_infrastructure_grants(grant_hash),
+            account_id TEXT NOT NULL,
+            main_account_address TEXT NOT NULL,
+            api_wallet_address TEXT NOT NULL,
+            account_binding_hash TEXT NOT NULL,
+            policy_hash TEXT NOT NULL,
+            account_snapshot_hash TEXT NOT NULL,
+            market_snapshot_hash TEXT NOT NULL,
+            source_peer_uid INTEGER NOT NULL CHECK (source_peer_uid = 501),
+            audience TEXT NOT NULL,
+            approval_received_at TEXT NOT NULL,
+            proposal_expires_at TEXT NOT NULL,
+            handoff_published_at TEXT NOT NULL,
+            state TEXT NOT NULL CHECK (state = 'consumed'),
+            revision INTEGER NOT NULL CHECK (revision = 1),
+            command_id TEXT NOT NULL UNIQUE
+                REFERENCES execution_commands(command_id),
+            admitted_at TEXT NOT NULL,
+            human_message_attested INTEGER NOT NULL
+                CHECK (human_message_attested = 0),
+            testnet_only INTEGER NOT NULL CHECK (testnet_only = 1),
+            mainnet_authorized INTEGER NOT NULL CHECK (mainnet_authorized = 0),
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TRIGGER execution_chat_authorizations_no_update
+        BEFORE UPDATE ON execution_chat_authorizations
+        BEGIN SELECT RAISE(ABORT, 'chat authorizations are immutable'); END
+        """,
+        """
+        CREATE TRIGGER execution_chat_authorizations_no_delete
+        BEFORE DELETE ON execution_chat_authorizations
+        BEGIN SELECT RAISE(ABORT, 'chat authorizations are durable'); END
+        """,
+        """
+        CREATE TABLE execution_entry_role_attestations (
+            attestation_hash TEXT PRIMARY KEY,
+            stage TEXT NOT NULL CHECK (stage IN ('pre_key', 'pre_send')),
+            account_id TEXT NOT NULL,
+            main_account_address TEXT NOT NULL,
+            api_wallet_address TEXT NOT NULL,
+            command_id TEXT NOT NULL
+                REFERENCES execution_commands(command_id),
+            ticket_hash TEXT NOT NULL
+                REFERENCES execution_tickets(ticket_hash),
+            plan_hash TEXT NOT NULL
+                REFERENCES execution_plans(plan_hash),
+            preflight_hash TEXT NOT NULL
+                REFERENCES execution_dispatch_preflights(preflight_hash),
+            action_hash TEXT NOT NULL,
+            worker_id TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+            attempt_id TEXT REFERENCES execution_attempts(attempt_id),
+            signed_evidence_hash TEXT
+                REFERENCES execution_signed_envelopes(evidence_hash),
+            collection_started_at_ms INTEGER NOT NULL
+                CHECK (collection_started_at_ms >= 0),
+            first_received_at_ms INTEGER NOT NULL
+                CHECK (first_received_at_ms >= 0),
+            second_received_at_ms INTEGER NOT NULL
+                CHECK (second_received_at_ms >= 0),
+            expires_at_ms INTEGER NOT NULL CHECK (expires_at_ms >= 0),
+            first_response_hash TEXT NOT NULL,
+            second_response_hash TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            record_hash TEXT NOT NULL,
+            UNIQUE (command_id, stage),
+            CHECK (
+                (stage = 'pre_key' AND attempt_id IS NULL
+                    AND signed_evidence_hash IS NULL)
+                OR
+                (stage = 'pre_send' AND attempt_id IS NOT NULL
+                    AND signed_evidence_hash IS NOT NULL)
+            )
+        ) STRICT
+        """,
+        """
+        CREATE TRIGGER execution_entry_role_attestations_no_update
+        BEFORE UPDATE ON execution_entry_role_attestations
+        BEGIN SELECT RAISE(ABORT, 'entry role attestations are immutable'); END
+        """,
+        """
+        CREATE TRIGGER execution_entry_role_attestations_no_delete
+        BEFORE DELETE ON execution_entry_role_attestations
+        BEGIN SELECT RAISE(ABORT, 'entry role attestations are durable'); END
+        """,
+        """
+        ALTER TABLE execution_signed_envelopes
+        ADD COLUMN pre_key_role_attestation_hash TEXT
+            REFERENCES execution_entry_role_attestations(attestation_hash)
+        """,
+        """
+        CREATE UNIQUE INDEX idx_execution_signed_pre_key_role
+        ON execution_signed_envelopes (pre_key_role_attestation_hash)
+        WHERE pre_key_role_attestation_hash IS NOT NULL
+        """,
+        """
+        ALTER TABLE execution_submission_authorities
+        ADD COLUMN pre_send_role_attestation_hash TEXT
+            REFERENCES execution_entry_role_attestations(attestation_hash)
+        """,
+        """
+        ALTER TABLE execution_submission_authorities
+        ADD COLUMN pre_send_role_expires_at_ms INTEGER
+            CHECK (pre_send_role_expires_at_ms >= 0)
+        """,
+        """
+        CREATE UNIQUE INDEX idx_execution_submission_pre_send_role
+        ON execution_submission_authorities (pre_send_role_attestation_hash)
+        WHERE pre_send_role_attestation_hash IS NOT NULL
+        """,
+    ),
+)
+
+_SCHEMA_V14 = _Migration(
+    14,
+    "normal_entry_signer_and_outcome_provenance",
+    (
+        """
+        ALTER TABLE execution_signed_envelopes
+        ADD COLUMN main_account_address TEXT
+        """,
+        """
+        ALTER TABLE execution_signed_envelopes
+        ADD COLUMN api_wallet_address TEXT
+        """,
+        """
+        ALTER TABLE execution_signed_envelopes
+        ADD COLUMN signing_started_at_ms INTEGER
+            CHECK (signing_started_at_ms >= 0)
+        """,
+        """
+        ALTER TABLE execution_transport_outcomes
+        ADD COLUMN submission_authority_hash TEXT
+            REFERENCES execution_submission_authorities(authority_hash)
+        """,
+        """
+        ALTER TABLE execution_transport_outcomes
+        ADD COLUMN pre_send_role_attestation_hash TEXT
+            REFERENCES execution_entry_role_attestations(attestation_hash)
+        """,
+        """
+        CREATE UNIQUE INDEX idx_execution_transport_submission_authority
+        ON execution_transport_outcomes (submission_authority_hash)
+        WHERE submission_authority_hash IS NOT NULL
+        """,
+        """
+        CREATE UNIQUE INDEX idx_execution_transport_pre_send_role
+        ON execution_transport_outcomes (pre_send_role_attestation_hash)
+        WHERE pre_send_role_attestation_hash IS NOT NULL
+        """,
+    ),
+)
+
+_SCHEMA_V15 = _Migration(
+    15,
+    "verified_chat_delivery_and_persisted_scope",
+    (
+        """
+        CREATE TABLE execution_chat_scope (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            environment TEXT NOT NULL CHECK (environment = 'testnet'),
+            account_id TEXT NOT NULL,
+            main_account_address TEXT NOT NULL,
+            api_wallet_address TEXT NOT NULL,
+            account_binding_hash TEXT NOT NULL,
+            audience TEXT NOT NULL,
+            config_hash TEXT NOT NULL,
+            config_source TEXT NOT NULL,
+            executor_uid INTEGER NOT NULL CHECK (executor_uid = 451),
+            control_uid INTEGER NOT NULL CHECK (control_uid = 452),
+            artifact_directory TEXT NOT NULL,
+            scope_hash TEXT NOT NULL UNIQUE,
+            bound_at TEXT NOT NULL,
+            record_hash TEXT NOT NULL
+        ) STRICT
+        """,
+        """
+        CREATE TRIGGER execution_chat_scope_no_update
+        BEFORE UPDATE ON execution_chat_scope
+        BEGIN SELECT RAISE(ABORT, 'executor chat scope is immutable'); END
+        """,
+        """
+        CREATE TRIGGER execution_chat_scope_no_delete
+        BEFORE DELETE ON execution_chat_scope
+        BEGIN SELECT RAISE(ABORT, 'executor chat scope is durable'); END
+        """,
+        """
+        ALTER TABLE execution_chat_authorizations
+        ADD COLUMN chat_scope_hash TEXT
+            REFERENCES execution_chat_scope(scope_hash)
+        """,
+        """
+        ALTER TABLE execution_chat_authorizations
+        ADD COLUMN delivery_hash TEXT
+        """,
+        """
+        ALTER TABLE execution_chat_authorizations
+        ADD COLUMN delivery_artifact_path TEXT
+        """,
+        """
+        ALTER TABLE execution_chat_authorizations
+        ADD COLUMN delivery_artifact_sha256 TEXT
+        """,
+        """
+        ALTER TABLE execution_chat_authorizations
+        ADD COLUMN delivery_source_binding_hash TEXT
+        """,
+        """
+        CREATE INDEX idx_execution_chat_scope_binding
+        ON execution_chat_authorizations (chat_scope_hash)
+        WHERE chat_scope_hash IS NOT NULL
+        """,
+        """
+        CREATE UNIQUE INDEX idx_execution_chat_delivery_hash
+        ON execution_chat_authorizations (delivery_hash)
+        WHERE delivery_hash IS NOT NULL
+        """,
+        """
+        CREATE UNIQUE INDEX idx_execution_chat_delivery_path
+        ON execution_chat_authorizations (delivery_artifact_path)
+        WHERE delivery_artifact_path IS NOT NULL
+        """,
+        """
+        CREATE TRIGGER execution_chat_authorizations_require_verified_delivery
+        BEFORE INSERT ON execution_chat_authorizations
+        WHEN NEW.chat_scope_hash IS NULL
+          OR NEW.delivery_hash IS NULL
+          OR NEW.delivery_artifact_path IS NULL
+          OR NEW.delivery_artifact_sha256 IS NULL
+          OR NEW.delivery_source_binding_hash IS NULL
+        BEGIN SELECT RAISE(ABORT, 'chat authorization requires verified delivery'); END
+        """,
+    ),
+)
+
+_SCHEMA_V16 = _Migration(
+    16,
+    "canonical_verified_chat_delivery_evidence",
+    (
+        """
+        ALTER TABLE execution_chat_authorizations
+        ADD COLUMN delivery_evidence_json TEXT
+        """,
+        """
+        ALTER TABLE execution_chat_authorizations
+        ADD COLUMN delivery_evidence_content_hash TEXT
+        """,
+        """
+        DROP TRIGGER execution_chat_authorizations_require_verified_delivery
+        """,
+        """
+        CREATE TRIGGER execution_chat_authorizations_require_verified_delivery
+        BEFORE INSERT ON execution_chat_authorizations
+        WHEN NEW.chat_scope_hash IS NULL
+          OR NEW.delivery_hash IS NULL
+          OR NEW.delivery_artifact_path IS NULL
+          OR NEW.delivery_artifact_sha256 IS NULL
+          OR NEW.delivery_source_binding_hash IS NULL
+          OR NEW.delivery_evidence_json IS NULL
+          OR NEW.delivery_evidence_content_hash IS NULL
+        BEGIN SELECT RAISE(ABORT, 'chat authorization requires verified delivery evidence'); END
+        """,
+    ),
+)
+
 _MIGRATIONS = (
     _SCHEMA_V1,
     _SCHEMA_V2,
@@ -1627,8 +1973,12 @@ _MIGRATIONS = (
     _SCHEMA_V10,
     _SCHEMA_V11,
     _SCHEMA_V12,
+    _SCHEMA_V13,
+    _SCHEMA_V14,
+    _SCHEMA_V15,
+    _SCHEMA_V16,
 )
-EXECUTION_SCHEMA_VERSION = 12
+EXECUTION_SCHEMA_VERSION = 16
 
 
 def _execution_schema_objects(
@@ -1788,8 +2138,11 @@ class SignedEnvelopeEvidence:
     environment: Environment
     endpoint: str
     account_id: str
+    main_account_address: str
+    api_wallet_address: str
     plan_hash: str
     action_hash: str
+    pre_key_role_attestation_hash: str
     nonce: int
     wire_hash: str
     signature_hash: str
@@ -1797,6 +2150,7 @@ class SignedEnvelopeEvidence:
     signer_binding_hash: str
     authorization_expires_at_ms: int
     expires_after_ms: int
+    signing_started_at_ms: int
     signed_at_ms: int
     evidence_hash: str = ""
 
@@ -1809,10 +2163,25 @@ class SignedEnvelopeEvidence:
             object.__setattr__(
                 self, field, _text(getattr(self, field), field=field, maximum=maximum)
             )
+        object.__setattr__(
+            self,
+            "main_account_address",
+            _address(self.main_account_address, field="main_account_address"),
+        )
+        object.__setattr__(
+            self,
+            "api_wallet_address",
+            _address(self.api_wallet_address, field="api_wallet_address"),
+        )
+        if self.main_account_address == self.api_wallet_address:
+            raise ValidationError(
+                "signed evidence API wallet must differ from its main account"
+            )
         for field in (
             "preflight_hash",
             "plan_hash",
             "action_hash",
+            "pre_key_role_attestation_hash",
             "wire_hash",
             "signature_hash",
             "envelope_hash",
@@ -1832,12 +2201,18 @@ class SignedEnvelopeEvidence:
             "nonce",
             "authorization_expires_at_ms",
             "expires_after_ms",
+            "signing_started_at_ms",
             "signed_at_ms",
         ):
             value = getattr(self, field)
             if type(value) is not int or value < 0:
                 raise ValidationError(f"{field} must be a non-negative integer")
-        if not self.signed_at_ms < self.expires_after_ms <= self.authorization_expires_at_ms:
+        if not (
+            self.signing_started_at_ms
+            <= self.signed_at_ms
+            < self.expires_after_ms
+            <= self.authorization_expires_at_ms
+        ):
             raise ValidationError("signed evidence expiry ordering is invalid")
         expected = _record_hash("signed-envelope-evidence", self.payload())
         if self.evidence_hash:
@@ -1848,14 +2223,17 @@ class SignedEnvelopeEvidence:
 
     def payload(self) -> dict[str, object]:
         return {
-            "schema_version": "signed_envelope_evidence.v1",
+            "schema_version": "signed_envelope_evidence.v3",
             "command_id": self.command_id,
             "preflight_hash": self.preflight_hash,
             "environment": self.environment.value,
             "endpoint": self.endpoint,
             "account_id": self.account_id,
+            "main_account_address": self.main_account_address,
+            "api_wallet_address": self.api_wallet_address,
             "plan_hash": self.plan_hash,
             "action_hash": self.action_hash,
+            "pre_key_role_attestation_hash": self.pre_key_role_attestation_hash,
             "nonce": self.nonce,
             "wire_hash": self.wire_hash,
             "signature_hash": self.signature_hash,
@@ -1863,6 +2241,7 @@ class SignedEnvelopeEvidence:
             "signer_binding_hash": self.signer_binding_hash,
             "authorization_expires_at_ms": self.authorization_expires_at_ms,
             "expires_after_ms": self.expires_after_ms,
+            "signing_started_at_ms": self.signing_started_at_ms,
             "signed_at_ms": self.signed_at_ms,
         }
 
@@ -1888,6 +2267,8 @@ class TransportOutcomeEvidence:
     retry_performed: bool
     venue_write_attempted: bool | None
     evidence_basis: str = "transport_result"
+    submission_authority_hash: str | None = None
+    pre_send_role_attestation_hash: str | None = None
     evidence_hash: str = ""
 
     def __post_init__(self) -> None:
@@ -1905,10 +2286,21 @@ class TransportOutcomeEvidence:
             "signed_evidence_hash",
             _hash(self.signed_evidence_hash, field="signed_evidence_hash"),
         )
-        for field in ("response_hash", "transport_attempt_hash"):
+        for field in (
+            "response_hash",
+            "transport_attempt_hash",
+            "submission_authority_hash",
+            "pre_send_role_attestation_hash",
+        ):
             value = getattr(self, field)
             if value is not None:
                 object.__setattr__(self, field, _hash(value, field=field))
+        if (self.submission_authority_hash is None) != (
+            self.pre_send_role_attestation_hash is None
+        ):
+            raise ValidationError(
+                "entry transport authority provenance must be complete or absent"
+            )
         if self.endpoint != "https://api.hyperliquid-testnet.xyz/exchange":
             raise ValidationError("transport evidence endpoint is not testnet exchange")
         if type(self.attempted_at_ms) is not int or self.attempted_at_ms < 0:
@@ -1949,8 +2341,12 @@ class TransportOutcomeEvidence:
         object.__setattr__(self, "evidence_hash", expected)
 
     def payload(self) -> dict[str, object]:
-        return {
-            "schema_version": "transport_outcome_evidence.v1",
+        payload: dict[str, object] = {
+            "schema_version": (
+                "transport_outcome_evidence.v1"
+                if self.submission_authority_hash is None
+                else "transport_outcome_evidence.v2"
+            ),
             "command_id": self.command_id,
             "attempt_id": self.attempt_id,
             "signed_evidence_hash": self.signed_evidence_hash,
@@ -1966,6 +2362,16 @@ class TransportOutcomeEvidence:
             "venue_write_attempted": self.venue_write_attempted,
             "evidence_basis": self.evidence_basis,
         }
+        if self.submission_authority_hash is not None:
+            payload.update(
+                {
+                    "submission_authority_hash": self.submission_authority_hash,
+                    "pre_send_role_attestation_hash": (
+                        self.pre_send_role_attestation_hash
+                    ),
+                }
+            )
+        return payload
 
     def as_dict(self) -> dict[str, object]:
         return {**self.payload(), "evidence_hash": self.evidence_hash}
@@ -2266,8 +2672,69 @@ class EntrySubmissionAuthority:
     wire_hash: str
     worker_id: str
     fencing_token: int
+    pre_send_role_attestation_hash: str
+    pre_send_role_expires_at_ms: int
+    issued_at: datetime
     lease_expires_at: datetime
     authority_hash: str
+
+    def __post_init__(self) -> None:
+        for field in ("command_id", "attempt_id", "worker_id"):
+            object.__setattr__(
+                self,
+                field,
+                _text(getattr(self, field), field=field, maximum=128),
+            )
+        for field in (
+            "signed_evidence_hash",
+            "action_hash",
+            "wire_hash",
+            "pre_send_role_attestation_hash",
+            "authority_hash",
+        ):
+            object.__setattr__(
+                self,
+                field,
+                _hash(getattr(self, field), field=field),
+            )
+        _nonnegative_int(self.nonce, field="nonce")
+        _positive_int(self.fencing_token, field="fencing_token")
+        _nonnegative_int(
+            self.pre_send_role_expires_at_ms,
+            field="pre_send_role_expires_at_ms",
+        )
+        issued = _utc(self.issued_at, field="issued_at")
+        lease = _utc(self.lease_expires_at, field="lease_expires_at")
+        if not issued < lease:
+            raise ValidationError("entry submission authority lease is inactive")
+        if int(issued.timestamp() * 1_000) >= self.pre_send_role_expires_at_ms:
+            raise ValidationError(
+                "entry submission authority outlives its PRE_SEND role fence"
+            )
+        object.__setattr__(self, "issued_at", issued)
+        object.__setattr__(self, "lease_expires_at", lease)
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "command_id": self.command_id,
+            "attempt_id": self.attempt_id,
+            "signed_evidence_hash": self.signed_evidence_hash,
+            "nonce": self.nonce,
+            "action_hash": self.action_hash,
+            "wire_hash": self.wire_hash,
+            "worker_id": self.worker_id,
+            "fencing_token": self.fencing_token,
+            "pre_send_role_attestation_hash": (
+                self.pre_send_role_attestation_hash
+            ),
+            "pre_send_role_expires_at_ms": self.pre_send_role_expires_at_ms,
+            "issued_at": _time_text(self.issued_at, field="issued_at"),
+            "lease_expires_at": _time_text(
+                self.lease_expires_at,
+                field="lease_expires_at",
+            ),
+            "authority_hash": self.authority_hash,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -2502,6 +2969,86 @@ class TrustedApproval:
             raise ValidationError("approval must expire after issuance")
         object.__setattr__(self, "issued_at", issued)
         object.__setattr__(self, "expires_at", expires)
+
+
+@dataclass(frozen=True, slots=True)
+class ChatExecutionAuthorization:
+    """Explicit non-HMAC provenance for one atomically admitted chat handoff."""
+
+    authorization_id: str
+    command_id: str
+    handoff: TestnetChatExecutionHandoff
+    chat_scope_hash: str
+    delivery_hash: str
+    delivery_artifact_path: str
+    delivery_artifact_sha256: str
+    delivery_source_binding_hash: str
+    delivery_evidence: VerifiedTestnetChatDeliveryEvidence
+    admitted_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.handoff, TestnetChatExecutionHandoff):
+            raise TypeError("handoff must be TestnetChatExecutionHandoff")
+        checked_authorization = _text(
+            self.authorization_id,
+            field="authorization_id",
+            maximum=128,
+        )
+        checked_command = _text(
+            self.command_id,
+            field="command_id",
+            maximum=128,
+        )
+        for field in (
+            "chat_scope_hash",
+            "delivery_hash",
+            "delivery_artifact_sha256",
+            "delivery_source_binding_hash",
+        ):
+            object.__setattr__(
+                self,
+                field,
+                _hash(getattr(self, field), field=field),
+            )
+        artifact_path = Path(
+            _text(
+                self.delivery_artifact_path,
+                field="delivery_artifact_path",
+                maximum=1024,
+            )
+        )
+        if (
+            not artifact_path.is_absolute()
+            or os.path.normpath(str(artifact_path)) != str(artifact_path)
+            or artifact_path.name != f"{self.handoff.handoff_id}.json"
+        ):
+            raise ValidationError("chat delivery artifact path is invalid")
+        if type(self.delivery_evidence) is not VerifiedTestnetChatDeliveryEvidence:
+            raise TypeError(
+                "delivery_evidence must be exact VerifiedTestnetChatDeliveryEvidence"
+            )
+        self.delivery_evidence.verify_for_handoff(self.handoff)
+        if (
+            self.chat_scope_hash != self.delivery_evidence.scope_hash
+            or self.delivery_hash != self.delivery_evidence.delivery_hash
+            or str(artifact_path) != self.delivery_evidence.artifact_path
+            or self.delivery_artifact_sha256
+            != self.delivery_evidence.artifact_sha256
+            or self.delivery_source_binding_hash
+            != self.delivery_evidence.source_binding_hash
+        ):
+            raise ValidationError("chat delivery summary differs from evidence")
+        admitted = _utc(self.admitted_at, field="admitted_at")
+        if checked_authorization != chat_execution_authorization_id(self.handoff):
+            raise ValidationError("chat authorization ID differs from its handoff")
+        if checked_command != chat_execution_command_id(self.handoff):
+            raise ValidationError("chat command ID differs from its handoff")
+        if not self.handoff.published_at <= admitted < self.handoff.proposal.expires_at:
+            raise ValidationError("chat authorization was not admitted while active")
+        object.__setattr__(self, "authorization_id", checked_authorization)
+        object.__setattr__(self, "command_id", checked_command)
+        object.__setattr__(self, "delivery_artifact_path", str(artifact_path))
+        object.__setattr__(self, "admitted_at", admitted)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2908,12 +3455,15 @@ _REQUIRED_TABLES = frozenset(
         "execution_plan_legs",
         "execution_tickets",
         "execution_approvals",
+        "execution_chat_scope",
+        "execution_chat_authorizations",
         "execution_exposure",
         "execution_commands",
         "execution_command_legs",
         "execution_outbox",
         "execution_attempts",
         "execution_dispatch_preflights",
+        "execution_entry_role_attestations",
         "execution_signed_envelopes",
         "execution_transport_outcomes",
         "execution_submission_authorities",
@@ -2949,6 +3499,8 @@ class ExecutionStore:
         account_id: str,
         max_reserved_loss: Decimal | str | int,
         max_reserved_notional: Decimal | str | int,
+        chat_scope: TestnetChatExecutionScope | None = None,
+        chat_clock: Callable[[], datetime] | None = None,
         busy_timeout_ms: int = 5_000,
         must_exist: bool = False,
     ) -> None:
@@ -2974,6 +3526,18 @@ class ExecutionStore:
         )
         if self.max_reserved_loss <= ZERO or self.max_reserved_notional <= ZERO:
             raise ValidationError("execution-store reservation caps must be positive")
+        if chat_scope is not None and type(chat_scope) is not TestnetChatExecutionScope:
+            raise TypeError("chat_scope must be exact TestnetChatExecutionScope or None")
+        if chat_scope is not None and chat_scope.account_id != self.account_id:
+            raise ValidationError("chat scope account does not match execution store")
+        self._configured_chat_scope = chat_scope
+        if chat_clock is not None and not callable(chat_clock):
+            raise TypeError("chat_clock must be callable or None")
+        self._chat_clock = (
+            (lambda: datetime.now(timezone.utc))
+            if chat_clock is None
+            else chat_clock
+        )
         if type(busy_timeout_ms) is not int or busy_timeout_ms <= 0:
             raise ValidationError("busy_timeout_ms must be a positive integer")
         if type(must_exist) is not bool:
@@ -3132,6 +3696,78 @@ class ExecutionStore:
                             "cannot migrate nonempty schema-v11 qualification "
                             "state to role-bound schema v12"
                         )
+                if migration.version == 13 and seen:
+                    legacy_entry_send = any(
+                        connection.execute(
+                            f"SELECT 1 FROM {table} LIMIT 1"
+                        ).fetchone()
+                        is not None
+                        for table in (
+                            "execution_signed_envelopes",
+                            "execution_attempts",
+                            "execution_submission_authorities",
+                        )
+                    )
+                    if legacy_entry_send:
+                        raise StorageError(
+                            "cannot migrate signed or attempted entry state "
+                            "across the normal-entry role-fence boundary"
+                        )
+                if migration.version == 14 and seen:
+                    legacy_entry_evidence = any(
+                        connection.execute(
+                            f"SELECT 1 FROM {table} LIMIT 1"
+                        ).fetchone()
+                        is not None
+                        for table in (
+                            "execution_signed_envelopes",
+                            "execution_attempts",
+                            "execution_submission_authorities",
+                            "execution_transport_outcomes",
+                        )
+                    )
+                    if legacy_entry_evidence:
+                        raise StorageError(
+                            "cannot migrate signed, attempted, or outcome entry "
+                            "state across the signer/outcome provenance boundary"
+                        )
+                if migration.version == 15 and seen:
+                    legacy_chat_state = connection.execute(
+                        "SELECT 1 FROM execution_chat_authorizations LIMIT 1"
+                    ).fetchone()
+                    legacy_chat_base = connection.execute(
+                        """
+                        SELECT 1 FROM execution_approvals
+                        WHERE approver_id = 'uid501:unattested-chat'
+                           OR approval_id LIKE 'approval-chat-%'
+                        LIMIT 1
+                        """
+                    ).fetchone()
+                    if legacy_chat_state is not None or legacy_chat_base is not None:
+                        raise StorageError(
+                            "cannot migrate legacy chat admission state across the "
+                            "verified-delivery and persisted-scope boundary"
+                        )
+                if migration.version == 16 and seen:
+                    incomplete_delivery_state = connection.execute(
+                        "SELECT 1 FROM execution_chat_authorizations LIMIT 1"
+                    ).fetchone()
+                    incomplete_delivery_base = connection.execute(
+                        """
+                        SELECT 1 FROM execution_approvals
+                        WHERE approver_id = 'uid501:unattested-chat'
+                           OR approval_id LIKE 'approval-chat-%'
+                        LIMIT 1
+                        """
+                    ).fetchone()
+                    if (
+                        incomplete_delivery_state is not None
+                        or incomplete_delivery_base is not None
+                    ):
+                        raise StorageError(
+                            "cannot migrate nonempty schema-v15 chat state across "
+                            "the canonical delivery-evidence boundary"
+                        )
                 for statement in migration.statements:
                     connection.execute(statement)
                 connection.execute(
@@ -3194,6 +3830,10 @@ class ExecutionStore:
             else:
                 self._verify_identity_row(identity)
                 self._read_exposure_locked(connection)
+            self._bind_or_verify_chat_scope_locked(
+                connection,
+                at=datetime.now(timezone.utc),
+            )
             connection.commit()
         except sqlite3.Error as error:
             if connection.in_transaction:
@@ -3305,6 +3945,23 @@ class ExecutionStore:
                 raise StorageError("execution database identity is missing")
             self._verify_identity_row(identity)
             self._read_exposure_locked(connection)
+            scope_row = connection.execute(
+                "SELECT * FROM execution_chat_scope WHERE singleton = 1"
+            ).fetchone()
+            if scope_row is None:
+                if self._configured_chat_scope is not None:
+                    raise StorageError(
+                        "execution database is missing its configured chat scope"
+                    )
+            else:
+                persisted_scope = self._chat_scope_from_row(scope_row)
+                if (
+                    self._configured_chat_scope is None
+                    or persisted_scope != self._configured_chat_scope
+                ):
+                    raise StorageError(
+                        "persisted executor chat scope differs from process configuration"
+                    )
             current_wal_snapshot = (
                 _snapshot_regular_file(wal_path, label="execution WAL")
                 if os.path.lexists(wal_path)
@@ -3390,6 +4047,155 @@ class ExecutionStore:
             raise StorageError(
                 "execution database identity does not match environment/account/caps"
             )
+
+    @staticmethod
+    def _chat_scope_material(
+        scope: TestnetChatExecutionScope,
+        *,
+        bound_at: datetime,
+    ) -> dict[str, object]:
+        return {
+            "environment": Environment.TESTNET.value,
+            "account_id": scope.account_id,
+            "main_account_address": scope.main_account_address,
+            "api_wallet_address": scope.api_wallet_address,
+            "account_binding_hash": scope.account_binding_hash,
+            "audience": scope.audience,
+            "config_hash": scope.config_hash,
+            "config_source": scope.config_source,
+            "executor_uid": scope.executor_uid,
+            "control_uid": scope.control_uid,
+            "artifact_directory": scope.artifact_directory,
+            "scope_hash": scope.scope_hash,
+            "bound_at": _time_text(bound_at, field="chat scope bound_at"),
+        }
+
+    @classmethod
+    def _chat_scope_from_row(
+        cls,
+        row: Mapping[str, Any],
+    ) -> TestnetChatExecutionScope:
+        try:
+            if str(row["environment"]) != Environment.TESTNET.value:
+                raise ValueError("chat scope environment differs")
+            scope = _testnet_chat_execution_scope_from_persisted(
+                account_id=str(row["account_id"]),
+                main_account_address=str(row["main_account_address"]),
+                api_wallet_address=str(row["api_wallet_address"]),
+                account_binding_hash=str(row["account_binding_hash"]),
+                audience=str(row["audience"]),
+                config_hash=str(row["config_hash"]),
+                config_source=str(row["config_source"]),
+                executor_uid=int(row["executor_uid"]),
+                control_uid=int(row["control_uid"]),
+                artifact_directory=str(row["artifact_directory"]),
+                scope_hash=str(row["scope_hash"]),
+            )
+            bound_at = _parse_time(row["bound_at"], field="chat scope bound_at")
+        except (TypeError, ValueError, ValidationError) as error:
+            raise StorageError("persisted executor chat scope is invalid") from error
+        material = cls._chat_scope_material(scope, bound_at=bound_at)
+        if _stored_hash(
+            row["record_hash"],
+            field="chat scope record_hash",
+        ) != _record_hash("chat-scope", material):
+            raise StorageError("persisted executor chat scope hash differs")
+        return scope
+
+    def _require_configured_chat_scope_locked(
+        self,
+        connection: sqlite3.Connection,
+    ) -> TestnetChatExecutionScope:
+        row = connection.execute(
+            "SELECT * FROM execution_chat_scope WHERE singleton = 1"
+        ).fetchone()
+        if row is None:
+            raise AdmissionDenied(
+                "CHAT_SCOPE_NOT_BOUND",
+                "executor chat scope is not durably bound",
+            )
+        scope = self._chat_scope_from_row(row)
+        if self._configured_chat_scope is None or scope != self._configured_chat_scope:
+            raise StorageError(
+                "persisted executor chat scope differs from process configuration"
+            )
+        return scope
+
+    def _bind_or_verify_chat_scope_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        at: datetime,
+    ) -> None:
+        row = connection.execute(
+            "SELECT * FROM execution_chat_scope WHERE singleton = 1"
+        ).fetchone()
+        configured = self._configured_chat_scope
+        if row is not None:
+            persisted = self._chat_scope_from_row(row)
+            if configured is None or persisted != configured:
+                raise StorageError(
+                    "persisted executor chat scope differs from process configuration"
+                )
+            return
+        if configured is None:
+            return
+        unsafe = connection.execute(
+            "SELECT 1 FROM execution_chat_authorizations LIMIT 1"
+        ).fetchone()
+        unsafe_base = connection.execute(
+            """
+            SELECT 1 FROM execution_approvals
+            WHERE approver_id = 'uid501:unattested-chat'
+               OR approval_id LIKE 'approval-chat-%'
+            LIMIT 1
+            """
+        ).fetchone()
+        if unsafe is not None or unsafe_base is not None:
+            raise StorageError(
+                "cannot bind executor chat scope over legacy chat admission state"
+            )
+        checked_at = _utc(at, field="chat scope bound_at")
+        material = self._chat_scope_material(configured, bound_at=checked_at)
+        connection.execute(
+            """
+            INSERT INTO execution_chat_scope (
+                singleton, environment, account_id, main_account_address,
+                api_wallet_address, account_binding_hash, audience,
+                config_hash, config_source, executor_uid, control_uid,
+                artifact_directory, scope_hash, bound_at, record_hash
+            ) VALUES (1, 'testnet', ?, ?, ?, ?, ?, ?, ?, 451, 452, ?, ?, ?, ?)
+            """,
+            (
+                configured.account_id,
+                configured.main_account_address,
+                configured.api_wallet_address,
+                configured.account_binding_hash,
+                configured.audience,
+                configured.config_hash,
+                configured.config_source,
+                configured.artifact_directory,
+                configured.scope_hash,
+                _time_text(checked_at, field="chat scope bound_at"),
+                _record_hash("chat-scope", material),
+            ),
+        )
+
+    def get_chat_scope(self) -> TestnetChatExecutionScope:
+        """Return the exact persisted config-derived scope for the artifact reader."""
+
+        connection = self._connect()
+        try:
+            return self._require_configured_chat_scope_locked(connection)
+        finally:
+            connection.close()
+
+    def _chat_now(self, *, field: str) -> datetime:
+        try:
+            value = self._chat_clock()
+        except Exception as error:
+            raise StateConflict("executor chat clock is unavailable") from error
+        return _utc(value, field=field)
 
     @staticmethod
     def _exposure_payload(
@@ -4166,6 +4972,1039 @@ class ExecutionStore:
             raise StorageError("persisted plan payload is not an object")
         return payload
 
+    @staticmethod
+    def _chat_authorization_material(
+        *,
+        authorization_id: str,
+        command_id: str,
+        handoff: TestnetChatExecutionHandoff,
+        chat_scope_hash: str,
+        delivery_hash: str,
+        delivery_artifact_path: str,
+        delivery_artifact_sha256: str,
+        delivery_source_binding_hash: str,
+        delivery_evidence_json: str,
+        delivery_evidence_content_hash: str,
+        admitted_at: datetime,
+        payload_json: str,
+        content_hash: str,
+    ) -> dict[str, object]:
+        proposal = handoff.proposal
+        receipt = handoff.approval_receipt
+        return {
+            "authorization_id": authorization_id,
+            "proposal_id": proposal.proposal_id,
+            "proposal_hash": proposal.proposal_hash,
+            "approval_receipt_hash": receipt.receipt_hash,
+            "approval_state_hash": handoff.approval_state.state_hash,
+            "handoff_id": handoff.handoff_id,
+            "handoff_hash": handoff.handoff_hash,
+            "staging_document_id": proposal.staging_document_id,
+            "staging_document_hash": proposal.staging_document_hash,
+            "ticket_hash": proposal.ticket_hash,
+            "plan_hash": proposal.plan_hash,
+            "infrastructure_grant_hash": proposal.infrastructure_grant_hash,
+            "account_id": proposal.account_id,
+            "main_account_address": proposal.main_account_address,
+            "api_wallet_address": proposal.api_wallet_address,
+            "account_binding_hash": proposal.account_binding_hash,
+            "policy_hash": proposal.policy_hash,
+            "account_snapshot_hash": proposal.account_snapshot_hash,
+            "market_snapshot_hash": proposal.market_snapshot_hash,
+            "source_peer_uid": receipt.peer_uid,
+            "audience": handoff.audience,
+            "approval_received_at": _time_text(
+                receipt.received_at,
+                field="approval_received_at",
+            ),
+            "proposal_expires_at": _time_text(
+                proposal.expires_at,
+                field="proposal_expires_at",
+            ),
+            "handoff_published_at": _time_text(
+                handoff.published_at,
+                field="handoff_published_at",
+            ),
+            "state": "consumed",
+            "revision": 1,
+            "command_id": command_id,
+            "chat_scope_hash": chat_scope_hash,
+            "delivery_hash": delivery_hash,
+            "delivery_artifact_path": delivery_artifact_path,
+            "delivery_artifact_sha256": delivery_artifact_sha256,
+            "delivery_source_binding_hash": delivery_source_binding_hash,
+            "delivery_evidence_json": delivery_evidence_json,
+            "delivery_evidence_content_hash": delivery_evidence_content_hash,
+            "admitted_at": _time_text(admitted_at, field="admitted_at"),
+            "human_message_attested": False,
+            "testnet_only": True,
+            "mainnet_authorized": False,
+            "payload_json": payload_json,
+            "content_hash": content_hash,
+        }
+
+    @classmethod
+    def _chat_authorization_from_row(
+        cls,
+        row: Mapping[str, Any],
+        *,
+        scope: TestnetChatExecutionScope,
+    ) -> ChatExecutionAuthorization:
+        payload_json = str(row["payload_json"])
+        content_hash = _stored_hash(
+            row["content_hash"],
+            field="chat authorization content_hash",
+        )
+        payload = _decode_payload(
+            payload_json,
+            content_hash,
+            field="chat authorization",
+        )
+        if not isinstance(payload, dict):
+            raise StorageError("persisted chat handoff is not an object")
+        evidence_json = str(row["delivery_evidence_json"])
+        evidence_content_hash = _stored_hash(
+            row["delivery_evidence_content_hash"],
+            field="chat delivery evidence content_hash",
+        )
+        evidence_payload = _decode_payload(
+            evidence_json,
+            evidence_content_hash,
+            field="chat delivery evidence",
+        )
+        if not isinstance(evidence_payload, dict):
+            raise StorageError("persisted chat delivery evidence is not an object")
+        try:
+            handoff = testnet_chat_execution_handoff_from_dict(payload)
+            delivery_evidence = verified_testnet_chat_delivery_evidence_from_dict(
+                evidence_payload
+            )
+            delivery_evidence.verify_for_scope(scope, handoff)
+            authorization_id = _stored_text(
+                row["authorization_id"],
+                field="chat authorization_id",
+                maximum=128,
+            )
+            command_id = _stored_text(
+                row["command_id"],
+                field="chat command_id",
+                maximum=128,
+            )
+            admitted_at = _parse_time(
+                row["admitted_at"],
+                field="chat admitted_at",
+            )
+            record = ChatExecutionAuthorization(
+                authorization_id=authorization_id,
+                command_id=command_id,
+                handoff=handoff,
+                chat_scope_hash=_stored_hash(
+                    row["chat_scope_hash"],
+                    field="chat scope_hash",
+                ),
+                delivery_hash=_stored_hash(
+                    row["delivery_hash"],
+                    field="chat delivery_hash",
+                ),
+                delivery_artifact_path=_stored_text(
+                    row["delivery_artifact_path"],
+                    field="chat delivery_artifact_path",
+                    maximum=1024,
+                ),
+                delivery_artifact_sha256=_stored_hash(
+                    row["delivery_artifact_sha256"],
+                    field="chat delivery_artifact_sha256",
+                ),
+                delivery_source_binding_hash=_stored_hash(
+                    row["delivery_source_binding_hash"],
+                    field="chat delivery_source_binding_hash",
+                ),
+                delivery_evidence=delivery_evidence,
+                admitted_at=admitted_at,
+            )
+        except (TypeError, ValueError, StateConflict, ValidationError) as error:
+            raise StorageError("persisted chat authorization is invalid") from error
+        material = cls._chat_authorization_material(
+            authorization_id=record.authorization_id,
+            command_id=record.command_id,
+            handoff=record.handoff,
+            chat_scope_hash=record.chat_scope_hash,
+            delivery_hash=record.delivery_hash,
+            delivery_artifact_path=record.delivery_artifact_path,
+            delivery_artifact_sha256=record.delivery_artifact_sha256,
+            delivery_source_binding_hash=record.delivery_source_binding_hash,
+            delivery_evidence_json=evidence_json,
+            delivery_evidence_content_hash=evidence_content_hash,
+            admitted_at=record.admitted_at,
+            payload_json=payload_json,
+            content_hash=content_hash,
+        )
+        comparisons = {
+            **material,
+            "human_message_attested": 0,
+            "testnet_only": 1,
+            "mainnet_authorized": 0,
+        }
+        for field, expected in comparisons.items():
+            if row[field] != expected:
+                raise StorageError(
+                    f"persisted chat authorization {field} differs"
+                )
+        if _stored_hash(
+            row["record_hash"],
+            field="chat authorization record_hash",
+        ) != _record_hash("chat-authorization", material):
+            raise StorageError("persisted chat authorization hash differs")
+        return record
+
+    @staticmethod
+    def _row_has_chat_provenance_locked(
+        connection: sqlite3.Connection,
+        approval_id: str,
+    ) -> bool:
+        return connection.execute(
+            """
+            SELECT 1 FROM execution_chat_authorizations
+            WHERE authorization_id = ?
+            """,
+            (approval_id,),
+        ).fetchone() is not None
+
+    def _require_chat_role_scope_locked(
+        self,
+        connection: sqlite3.Connection,
+        attestation: TestnetEntryRoleAttestation,
+    ) -> None:
+        row = connection.execute(
+            """
+            SELECT * FROM execution_chat_authorizations
+            WHERE command_id = ?
+            """,
+            (attestation.command_id,),
+        ).fetchone()
+        if row is None:
+            return
+        scope = self._require_configured_chat_scope_locked(connection)
+        authorization = self._chat_authorization_from_row(row, scope=scope)
+        proposal = authorization.handoff.proposal
+        if (
+            authorization.chat_scope_hash != scope.scope_hash
+            or proposal.account_id != scope.account_id
+            or proposal.main_account_address != scope.main_account_address
+            or proposal.api_wallet_address != scope.api_wallet_address
+            or proposal.account_binding_hash != scope.account_binding_hash
+            or attestation.account_id != scope.account_id
+            or attestation.main_account_address != scope.main_account_address
+            or attestation.api_wallet_address != scope.api_wallet_address
+        ):
+            raise StateConflict(
+                "entry role attestation differs from admitted chat account scope"
+            )
+
+    def get_chat_authorization(
+        self,
+        proposal_id: str,
+    ) -> ChatExecutionAuthorization:
+        checked = _text(proposal_id, field="proposal_id", maximum=64)
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT * FROM execution_chat_authorizations
+                WHERE proposal_id = ?
+                """,
+                (checked,),
+            ).fetchone()
+            scope = (
+                None
+                if row is None
+                else self._require_configured_chat_scope_locked(connection)
+            )
+        finally:
+            connection.close()
+        if row is None:
+            raise RecordNotFound("chat execution authorization is not registered")
+        assert scope is not None
+        return self._chat_authorization_from_row(row, scope=scope)
+
+    def get_chat_authorization_by_id(
+        self,
+        authorization_id: str,
+    ) -> ChatExecutionAuthorization:
+        checked = _text(
+            authorization_id,
+            field="authorization_id",
+            maximum=128,
+        )
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT * FROM execution_chat_authorizations
+                WHERE authorization_id = ?
+                """,
+                (checked,),
+            ).fetchone()
+            scope = (
+                None
+                if row is None
+                else self._require_configured_chat_scope_locked(connection)
+            )
+        finally:
+            connection.close()
+        if row is None:
+            raise RecordNotFound("chat execution authorization is not registered")
+        assert scope is not None
+        return self._chat_authorization_from_row(row, scope=scope)
+
+    def admit_chat_handoff(
+        self,
+        handoff_id: str,
+    ) -> CommandRecord:
+        """Atomically import one artifact-authenticated TESTNET chat approval.
+
+        This method is credential-free and performs no account read, signing,
+        transport, or venue operation.  Fresh account/market and user-role
+        evidence remains a later dispatch boundary.  It accepts no free handoff
+        bytes, delivery object, address, audience, account or configuration
+        input. The store loads its persisted scope and invokes the fixed
+        production OS reader itself.
+        """
+
+        checked_handoff_id = _text(
+            handoff_id,
+            field="handoff_id",
+            maximum=64,
+        )
+        before_read = self._chat_now(field="chat read started_at")
+        configured_scope = self.get_chat_scope()
+        delivery = read_verified_testnet_chat_delivery(
+            configured_scope,
+            checked_handoff_id,
+        )
+        after_read = self._chat_now(field="chat read completed_at")
+        if after_read < before_read:
+            raise StateConflict("executor chat clock rolled back during artifact read")
+        if type(delivery) is not VerifiedTestnetChatDelivery:
+            raise StorageError("fixed chat handoff reader returned an invalid value")
+        handoff = delivery.handoff
+        if type(handoff) is not TestnetChatExecutionHandoff:
+            raise TypeError("verified delivery contains an invalid handoff")
+        try:
+            checked_handoff = testnet_chat_execution_handoff_from_dict(
+                handoff.as_dict()
+            )
+        except (TypeError, ValueError, ValidationError) as error:
+            raise AdmissionDenied(
+                "CHAT_HANDOFF_INVALID",
+                "chat handoff failed exact revalidation",
+            ) from error
+        if checked_handoff != handoff:
+            raise AdmissionDenied(
+                "CHAT_HANDOFF_INVALID",
+                "chat handoff differs after canonical revalidation",
+            )
+        handoff = checked_handoff
+        proposal = handoff.proposal
+        receipt = handoff.approval_receipt
+        authorization_id = chat_execution_authorization_id(handoff)
+        command_id = chat_execution_command_id(handoff)
+        token_hash = chat_execution_token_hash(handoff)
+        payload_json, content_hash = _canonical_payload(handoff.as_dict())
+        delivery_evidence_json, delivery_evidence_content_hash = _canonical_payload(
+            delivery.evidence.as_dict()
+        )
+
+        try:
+            with self._transaction() as connection:
+                checked_at = self._chat_now(field="chat admitted_at")
+                if checked_at < after_read:
+                    raise StateConflict(
+                        "executor chat clock rolled back before admission"
+                    )
+                scope = self._require_configured_chat_scope_locked(connection)
+                delivery.verify_for_scope(scope)
+                checked_audience = scope.audience
+                if (
+                    handoff.audience != scope.audience
+                    or proposal.account_id != scope.account_id
+                    or proposal.main_account_address != scope.main_account_address
+                    or proposal.api_wallet_address != scope.api_wallet_address
+                    or proposal.account_binding_hash != scope.account_binding_hash
+                ):
+                    raise AdmissionDenied(
+                        "CHAT_HANDOFF_SCOPE_MISMATCH",
+                        "chat handoff differs from persisted executor configuration",
+                    )
+                duplicate_rows = connection.execute(
+                    """
+                    SELECT * FROM execution_chat_authorizations
+                    WHERE authorization_id = ? OR proposal_id = ?
+                       OR proposal_hash = ? OR approval_receipt_hash = ?
+                       OR approval_state_hash = ? OR handoff_id = ?
+                       OR handoff_hash = ? OR ticket_hash = ?
+                       OR plan_hash = ? OR command_id = ?
+                       OR delivery_hash = ? OR delivery_artifact_path = ?
+                    """,
+                    (
+                        authorization_id,
+                        proposal.proposal_id,
+                        proposal.proposal_hash,
+                        receipt.receipt_hash,
+                        handoff.approval_state.state_hash,
+                        handoff.handoff_id,
+                        handoff.handoff_hash,
+                        proposal.ticket_hash,
+                        proposal.plan_hash,
+                        command_id,
+                        delivery.delivery_hash,
+                        delivery.artifact_path,
+                    ),
+                ).fetchall()
+                if duplicate_rows:
+                    if len(duplicate_rows) != 1:
+                        raise StorageError(
+                            "chat handoff identities span multiple authorizations"
+                        )
+                    existing = self._chat_authorization_from_row(
+                        duplicate_rows[0],
+                        scope=scope,
+                    )
+                    if (
+                        existing.handoff != handoff
+                        or existing.authorization_id != authorization_id
+                        or existing.command_id != command_id
+                        or existing.chat_scope_hash != scope.scope_hash
+                        or existing.delivery_hash != delivery.delivery_hash
+                        or existing.delivery_artifact_path != delivery.artifact_path
+                        or existing.delivery_artifact_sha256
+                        != delivery.artifact_sha256
+                        or existing.delivery_source_binding_hash
+                        != delivery.source_binding_hash
+                        or existing.delivery_evidence != delivery.evidence
+                    ):
+                        raise StateConflict(
+                            "chat handoff identity is bound differently"
+                        )
+                    if checked_at < existing.admitted_at:
+                        raise StateConflict(
+                            "chat handoff replay predates its admission"
+                        )
+                    approval_row = connection.execute(
+                        """
+                        SELECT * FROM execution_approvals
+                        WHERE approval_id = ?
+                        """,
+                        (authorization_id,),
+                    ).fetchone()
+                    if approval_row is None:
+                        raise StorageError(
+                            "chat authorization lacks its base state slot"
+                        )
+                    self._verify_approval_row(approval_row)
+                    if (
+                        approval_row["state"] != "consumed"
+                        or approval_row["command_id"] != command_id
+                        or approval_row["token_hash"] != token_hash
+                    ):
+                        raise StorageError(
+                            "chat authorization base state differs"
+                        )
+                    command_row = connection.execute(
+                        """
+                        SELECT * FROM execution_commands WHERE command_id = ?
+                        """,
+                        (command_id,),
+                    ).fetchone()
+                    command = self._command_from_row(command_row)
+                    if (
+                        command.ticket_hash != proposal.ticket_hash
+                        or command.plan_hash != proposal.plan_hash
+                        or command.approval_id != authorization_id
+                    ):
+                        raise StorageError(
+                            "chat authorization command binding differs"
+                        )
+                    return command
+
+                if not (
+                    proposal.issued_at
+                    <= receipt.received_at
+                    <= handoff.published_at
+                    <= checked_at
+                    < proposal.expires_at
+                ):
+                    raise AdmissionDenied(
+                        "CHAT_HANDOFF_INACTIVE",
+                        "chat handoff is expired or not yet active",
+                    )
+
+                ticket_row = connection.execute(
+                    """
+                    SELECT * FROM execution_tickets WHERE ticket_hash = ?
+                    """,
+                    (proposal.ticket_hash,),
+                ).fetchone()
+                if ticket_row is None:
+                    raise AdmissionDenied(
+                        "CHAT_TICKET_NOT_FOUND",
+                        "chat handoff ticket is not registered",
+                    )
+                self._verify_ticket_row(ticket_row)
+                if ticket_row["state"] != "awaiting_approval":
+                    raise AdmissionDenied(
+                        "CHAT_TICKET_ALREADY_USED",
+                        "chat handoff ticket is not available",
+                    )
+                try:
+                    ticket_payload = _decode_payload(
+                        str(ticket_row["payload_json"]),
+                        str(ticket_row["content_hash"]),
+                        field="chat ticket",
+                    )
+                    if not isinstance(ticket_payload, Mapping):
+                        raise TypeError("ticket payload is not an object")
+                    ticket = risk_ticket_from_dict(ticket_payload)
+                    if canonical_json(ticket.as_dict()) != str(
+                        ticket_row["payload_json"]
+                    ):
+                        raise ValueError("ticket payload is not canonical")
+                except (TypeError, ValueError, ValidationError) as error:
+                    raise StorageError(
+                        "chat handoff ticket payload is invalid"
+                    ) from error
+
+                plan_row = connection.execute(
+                    """
+                    SELECT * FROM execution_plans WHERE plan_hash = ?
+                    """,
+                    (proposal.plan_hash,),
+                ).fetchone()
+                if plan_row is None:
+                    raise AdmissionDenied(
+                        "CHAT_PLAN_NOT_FOUND",
+                        "chat handoff protected plan is not registered",
+                    )
+                self._verify_plan_row(plan_row)
+                try:
+                    plan_payload = _decode_payload(
+                        str(plan_row["payload_json"]),
+                        str(plan_row["content_hash"]),
+                        field="chat protected plan",
+                    )
+                    if not isinstance(plan_payload, Mapping):
+                        raise TypeError("plan payload is not an object")
+                    plan = protected_trade_plan_from_dict(plan_payload)
+                    if canonical_json(plan.as_dict()) != str(
+                        plan_row["payload_json"]
+                    ):
+                        raise ValueError("plan payload is not canonical")
+                except (TypeError, ValueError, ValidationError) as error:
+                    raise StorageError(
+                        "chat handoff protected plan payload is invalid"
+                    ) from error
+                if ticket.plan != plan:
+                    raise StorageError(
+                        "chat ticket and protected plan payloads disagree"
+                    )
+
+                grant_row = connection.execute(
+                    """
+                    SELECT * FROM execution_infrastructure_grants
+                    WHERE grant_hash = ?
+                    """,
+                    (proposal.infrastructure_grant_hash,),
+                ).fetchone()
+                if grant_row is None:
+                    raise AdmissionDenied(
+                        "CHAT_GRANT_NOT_FOUND",
+                        "chat handoff grant is not registered",
+                    )
+                grant = self._infrastructure_grant_from_row(grant_row)
+
+                entry = plan.entry
+                stop = plan.protective_stop
+                target = plan.take_profit
+                if (
+                    ticket.ticket_id != proposal.ticket_id
+                    or ticket.ticket_hash != proposal.ticket_hash
+                    or ticket.plan is None
+                    or ticket.plan.plan_hash != proposal.plan_hash
+                    or ticket_row["plan_hash"] != proposal.plan_hash
+                    or ticket_row["infrastructure_grant_hash"]
+                    != proposal.infrastructure_grant_hash
+                    or ticket.policy_hash != proposal.policy_hash
+                    or ticket.account_snapshot_hash
+                    != proposal.account_snapshot_hash
+                    or entry.environment is not self.environment
+                    or entry.venue != "hyperliquid"
+                    or entry.account_id != self.account_id
+                    or entry.instrument != proposal.instrument
+                    or entry.side is not proposal.side
+                    or entry.price_bound != proposal.entry
+                    or entry.quantity != proposal.size
+                    or ticket.quantity != proposal.size
+                    or stop.stop_price != proposal.stop
+                    or target.stop_price != proposal.target
+                    or ticket.stressed_loss != proposal.max_loss
+                ):
+                    raise AdmissionDenied(
+                        "CHAT_PROPOSAL_BINDING_MISMATCH",
+                        "chat proposal differs from its exact ticket or plan",
+                    )
+                reserved_loss = _decimal(
+                    ticket_row["stressed_loss"],
+                    field="stressed_loss",
+                    nonnegative=True,
+                )
+                reserved_notional = _decimal(
+                    ticket_row["reserved_notional"],
+                    field="reserved_notional",
+                    nonnegative=True,
+                )
+                derived_notional = decimal_multiply(
+                    entry.quantity,
+                    entry.price_bound,
+                    field="chat reserved notional",
+                )
+                if (
+                    reserved_loss != ticket.stressed_loss
+                    or reserved_notional != derived_notional
+                    or not (
+                        ticket.created_at
+                        <= proposal.issued_at
+                        <= receipt.received_at
+                        <= handoff.published_at
+                        <= checked_at
+                        < proposal.expires_at
+                        <= ticket.expires_at
+                        <= grant.expires_at
+                    )
+                    or not grant.is_active(checked_at)
+                    or not grant.is_active(proposal.issued_at)
+                    or grant.environment is not self.environment
+                    or grant.account_id != self.account_id
+                    or entry.instrument not in grant.allowed_instruments
+                    or grant.risk_policy_hash != proposal.policy_hash
+                    or ticket.stressed_loss > grant.max_loss
+                    or reserved_notional > grant.max_notional
+                    or entry.leverage is None
+                    or entry.leverage > grant.max_leverage
+                    or ticket.stressed_loss > self.max_reserved_loss
+                    or reserved_notional > self.max_reserved_notional
+                ):
+                    raise PolicyViolation(
+                        "CHAT_EXECUTION_POLICY_SCOPE",
+                        "chat handoff exceeds or differs from execution policy",
+                    )
+
+                for row in connection.execute(
+                    """
+                    SELECT * FROM execution_plan_legs
+                    WHERE plan_hash = ? ORDER BY role
+                    """,
+                    (proposal.plan_hash,),
+                ).fetchall():
+                    self._verify_plan_leg_row(row)
+
+                if connection.execute(
+                    """
+                    SELECT 1 FROM execution_approvals
+                    WHERE approval_id = ? OR ticket_hash = ? OR token_hash = ?
+                    LIMIT 1
+                    """,
+                    (authorization_id, proposal.ticket_hash, token_hash),
+                ).fetchone() is not None:
+                    raise AdmissionDenied(
+                        "CHAT_TICKET_ALREADY_AUTHORIZED",
+                        "chat ticket already has an authorization source",
+                    )
+                if connection.execute(
+                    """
+                    SELECT 1 FROM execution_commands WHERE command_id = ? LIMIT 1
+                    """,
+                    (command_id,),
+                ).fetchone() is not None:
+                    raise StateConflict("chat command identity is already bound")
+                if connection.execute(
+                    """
+                    SELECT 1 FROM execution_incidents
+                    WHERE severity = 'critical' AND state != 'closed' LIMIT 1
+                    """
+                ).fetchone() is not None:
+                    raise AdmissionDenied(
+                        "ACCOUNT_CRITICAL_INCIDENT_ACTIVE",
+                        "critical account incident blocks new risk",
+                    )
+                if connection.execute(
+                    """
+                    SELECT 1 FROM execution_recovery_commands
+                    WHERE state != 'terminal' LIMIT 1
+                    """
+                ).fetchone() is not None:
+                    raise AdmissionDenied(
+                        "ACCOUNT_RECOVERY_ACTIVE",
+                        "active recovery command blocks new risk",
+                    )
+                if connection.execute(
+                    """
+                    SELECT 1 FROM execution_qualification_commands
+                    WHERE state IN ('queued', 'claimed', 'reconciling')
+                       OR reservation_released = 0 LIMIT 1
+                    """
+                ).fetchone() is not None:
+                    raise AdmissionDenied(
+                        "ACCOUNT_QUALIFICATION_ACTIVE",
+                        "qualification command or reservation blocks new risk",
+                    )
+                if connection.execute(
+                    """
+                    SELECT 1 FROM execution_qualification_cancel_reauthorizations
+                    WHERE state NOT IN ('terminal', 'halted') LIMIT 1
+                    """
+                ).fetchone() is not None:
+                    raise AdmissionDenied(
+                        "CANCEL_REAUTHORIZATION_ACTIVE",
+                        "safety cancel reauthorization blocks new risk",
+                    )
+                if connection.execute(
+                    """
+                    SELECT 1 FROM execution_commands
+                    WHERE state != 'terminal' LIMIT 1
+                    """
+                ).fetchone() is not None:
+                    raise AdmissionDenied(
+                        "ACCOUNT_COMMAND_ALREADY_ACTIVE",
+                        "flat-account v1 permits one nonterminal risk command",
+                    )
+
+                current_loss, current_notional, exposure_revision, _ = (
+                    self._read_exposure_locked(connection)
+                )
+                next_loss = decimal_add(
+                    current_loss,
+                    reserved_loss,
+                    field="aggregate reserved loss",
+                )
+                next_notional = decimal_add(
+                    current_notional,
+                    reserved_notional,
+                    field="aggregate reserved notional",
+                )
+                if next_loss > self.max_reserved_loss:
+                    raise PolicyViolation(
+                        "EXECUTION_ACCOUNT_LOSS_CAP",
+                        "aggregate reservation exceeds immutable loss cap",
+                    )
+                if next_notional > self.max_reserved_notional:
+                    raise PolicyViolation(
+                        "EXECUTION_ACCOUNT_NOTIONAL_CAP",
+                        "aggregate reservation exceeds immutable notional cap",
+                    )
+
+                approval_material = {
+                    "approval_id": authorization_id,
+                    "ticket_hash": proposal.ticket_hash,
+                    "token_hash": token_hash,
+                    "approver_id": "uid501:unattested-chat",
+                    "audience": checked_audience,
+                    "environment": self.environment.value,
+                    "account_id": self.account_id,
+                    "issued_at": _time_text(
+                        receipt.received_at,
+                        field="issued_at",
+                    ),
+                    "expires_at": _time_text(
+                        proposal.expires_at,
+                        field="expires_at",
+                    ),
+                    "state": "consumed",
+                    "command_id": command_id,
+                    "updated_at": _time_text(checked_at, field="updated_at"),
+                }
+                connection.execute(
+                    """
+                    INSERT INTO execution_approvals (
+                        approval_id, ticket_hash, token_hash, approver_id,
+                        audience, environment, account_id, issued_at,
+                        expires_at, state, command_id, updated_at, record_hash
+                    ) VALUES (?, ?, ?, ?, ?, 'testnet', ?, ?, ?, 'consumed', ?, ?, ?)
+                    """,
+                    (
+                        authorization_id,
+                        proposal.ticket_hash,
+                        token_hash,
+                        "uid501:unattested-chat",
+                        checked_audience,
+                        self.account_id,
+                        _time_text(receipt.received_at, field="issued_at"),
+                        _time_text(proposal.expires_at, field="expires_at"),
+                        command_id,
+                        _time_text(checked_at, field="updated_at"),
+                        _record_hash("approval", approval_material),
+                    ),
+                )
+                consumed_ticket_material = self._ticket_material(
+                    ticket_row,
+                    state="consumed",
+                )
+                changed_ticket = connection.execute(
+                    """
+                    UPDATE execution_tickets SET state = 'consumed', record_hash = ?
+                    WHERE ticket_hash = ? AND state = 'awaiting_approval'
+                    """,
+                    (
+                        _record_hash("ticket", consumed_ticket_material),
+                        proposal.ticket_hash,
+                    ),
+                )
+                if changed_ticket.rowcount != 1:
+                    raise StateConflict("chat ticket was consumed concurrently")
+
+                command_material = self._command_material_values(
+                    command_id,
+                    proposal.ticket_hash,
+                    proposal.plan_hash,
+                    authorization_id,
+                    "queued",
+                    reserved_loss,
+                    reserved_notional,
+                    checked_at,
+                    checked_at,
+                    None,
+                    1,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO execution_commands (
+                        command_id, ticket_hash, plan_hash, approval_id, state,
+                        reserved_loss, reserved_notional, created_at, updated_at,
+                        terminal_at, revision, record_hash
+                    ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, NULL, 1, ?)
+                    """,
+                    (
+                        command_id,
+                        proposal.ticket_hash,
+                        proposal.plan_hash,
+                        authorization_id,
+                        _decimal_text(reserved_loss, field="reserved_loss"),
+                        _decimal_text(
+                            reserved_notional,
+                            field="reserved_notional",
+                        ),
+                        _time_text(checked_at, field="created_at"),
+                        _time_text(checked_at, field="updated_at"),
+                        _record_hash("command", command_material),
+                    ),
+                )
+                plan_legs = connection.execute(
+                    """
+                    SELECT * FROM execution_plan_legs
+                    WHERE plan_hash = ? ORDER BY role
+                    """,
+                    (proposal.plan_hash,),
+                ).fetchall()
+                if {str(row["role"]) for row in plan_legs} != set(_ROLES):
+                    raise StorageError(
+                        "protected plan does not contain exactly three legs"
+                    )
+                for leg in plan_legs:
+                    self._verify_plan_leg_row(leg)
+                    leg_material = self._leg_material_values(
+                        command_id,
+                        str(leg["role"]),
+                        str(leg["cloid"]),
+                        str(leg["intent_hash"]),
+                        str(leg["side"]),
+                        bool(leg["reduce_only"]),
+                        _decimal(leg["quantity"], field="quantity"),
+                        ZERO,
+                        None,
+                        "queued",
+                        checked_at,
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO execution_command_legs (
+                            command_id, role, cloid, intent_hash, side,
+                            reduce_only, requested_quantity, cumulative_filled,
+                            venue_oid, status, updated_at, record_hash
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, '0', NULL, 'queued', ?, ?)
+                        """,
+                        (
+                            command_id,
+                            leg["role"],
+                            leg["cloid"],
+                            leg["intent_hash"],
+                            leg["side"],
+                            leg["reduce_only"],
+                            leg["quantity"],
+                            _time_text(checked_at, field="updated_at"),
+                            _record_hash("leg", leg_material),
+                        ),
+                    )
+                outbox_material = self._outbox_material_values(
+                    command_id,
+                    "queued",
+                    None,
+                    0,
+                    None,
+                    None,
+                    None,
+                    0,
+                    checked_at,
+                    checked_at,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO execution_outbox (
+                        command_id, state, worker_id, fencing_token, claimed_at,
+                        lease_expires_at, current_attempt_id, attempt_count,
+                        created_at, updated_at, record_hash
+                    ) VALUES (?, 'queued', NULL, 0, NULL, NULL, NULL, 0, ?, ?, ?)
+                    """,
+                    (
+                        command_id,
+                        _time_text(checked_at, field="created_at"),
+                        _time_text(checked_at, field="updated_at"),
+                        _record_hash("outbox", outbox_material),
+                    ),
+                )
+                self._write_exposure_locked(
+                    connection,
+                    loss=next_loss,
+                    notional=next_notional,
+                    previous_revision=exposure_revision,
+                    at=checked_at,
+                )
+                chat_material = self._chat_authorization_material(
+                    authorization_id=authorization_id,
+                    command_id=command_id,
+                    handoff=handoff,
+                    chat_scope_hash=scope.scope_hash,
+                    delivery_hash=delivery.delivery_hash,
+                    delivery_artifact_path=delivery.artifact_path,
+                    delivery_artifact_sha256=delivery.artifact_sha256,
+                    delivery_source_binding_hash=delivery.source_binding_hash,
+                    delivery_evidence_json=delivery_evidence_json,
+                    delivery_evidence_content_hash=delivery_evidence_content_hash,
+                    admitted_at=checked_at,
+                    payload_json=payload_json,
+                    content_hash=content_hash,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO execution_chat_authorizations (
+                        authorization_id, proposal_id, proposal_hash,
+                        approval_receipt_hash, approval_state_hash,
+                        handoff_id, handoff_hash, staging_document_id,
+                        staging_document_hash, ticket_hash, plan_hash,
+                        infrastructure_grant_hash, account_id,
+                        main_account_address, api_wallet_address,
+                        account_binding_hash, policy_hash,
+                        account_snapshot_hash, market_snapshot_hash,
+                        source_peer_uid, audience, approval_received_at,
+                        proposal_expires_at, handoff_published_at, state,
+                        revision, command_id, chat_scope_hash, delivery_hash,
+                        delivery_artifact_path, delivery_artifact_sha256,
+                        delivery_source_binding_hash, delivery_evidence_json,
+                        delivery_evidence_content_hash, admitted_at,
+                        human_message_attested, testnet_only,
+                        mainnet_authorized, payload_json, content_hash,
+                        record_hash
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, 501, ?, ?, ?, ?, 'consumed', 1, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, 0, 1, 0,
+                        ?, ?, ?
+                    )
+                    """,
+                    (
+                        authorization_id,
+                        proposal.proposal_id,
+                        proposal.proposal_hash,
+                        receipt.receipt_hash,
+                        handoff.approval_state.state_hash,
+                        handoff.handoff_id,
+                        handoff.handoff_hash,
+                        proposal.staging_document_id,
+                        proposal.staging_document_hash,
+                        proposal.ticket_hash,
+                        proposal.plan_hash,
+                        proposal.infrastructure_grant_hash,
+                        proposal.account_id,
+                        proposal.main_account_address,
+                        proposal.api_wallet_address,
+                        proposal.account_binding_hash,
+                        proposal.policy_hash,
+                        proposal.account_snapshot_hash,
+                        proposal.market_snapshot_hash,
+                        checked_audience,
+                        _time_text(receipt.received_at, field="approval_received_at"),
+                        _time_text(proposal.expires_at, field="proposal_expires_at"),
+                        _time_text(handoff.published_at, field="handoff_published_at"),
+                        command_id,
+                        scope.scope_hash,
+                        delivery.delivery_hash,
+                        delivery.artifact_path,
+                        delivery.artifact_sha256,
+                        delivery.source_binding_hash,
+                        delivery_evidence_json,
+                        delivery_evidence_content_hash,
+                        _time_text(checked_at, field="admitted_at"),
+                        payload_json,
+                        content_hash,
+                        _record_hash("chat-authorization", chat_material),
+                    ),
+                )
+                self._append_event_locked(
+                    connection,
+                    command_id=command_id,
+                    event_type="command_admitted",
+                    occurred_at=checked_at,
+                    payload={
+                        "ticket_hash": proposal.ticket_hash,
+                        "plan_hash": proposal.plan_hash,
+                        "approval_id": authorization_id,
+                        "authorization_kind": "testnet_chat",
+                        "proposal_id": proposal.proposal_id,
+                        "proposal_hash": proposal.proposal_hash,
+                        "approval_receipt_hash": receipt.receipt_hash,
+                        "handoff_hash": handoff.handoff_hash,
+                        "chat_scope_hash": scope.scope_hash,
+                        "delivery_hash": delivery.delivery_hash,
+                        "delivery_source_binding_hash": (
+                            delivery.source_binding_hash
+                        ),
+                        "delivery_evidence_content_hash": (
+                            delivery_evidence_content_hash
+                        ),
+                        "human_message_attested": False,
+                        "mainnet_authorized": False,
+                        "reserved_loss": _decimal_text(
+                            reserved_loss,
+                            field="reserved_loss",
+                        ),
+                        "reserved_notional": _decimal_text(
+                            reserved_notional,
+                            field="reserved_notional",
+                        ),
+                        "leg_count": 3,
+                    },
+                )
+                return self._command_from_row(
+                    connection.execute(
+                        """
+                        SELECT * FROM execution_commands WHERE command_id = ?
+                        """,
+                        (command_id,),
+                    ).fetchone()
+                )
+        except sqlite3.IntegrityError as error:
+            raise StateConflict(
+                "chat handoff or command identity is already consumed"
+            ) from error
+
     def register_approval(self, approval: TrustedApproval) -> TrustedApproval:
         if not isinstance(approval, TrustedApproval):
             raise TypeError("approval must be TrustedApproval")
@@ -4213,6 +6052,13 @@ class ExecutionStore:
                 ).fetchone()
                 record_hash = _record_hash("approval", material)
                 if existing is not None:
+                    if self._row_has_chat_provenance_locked(
+                        connection,
+                        approval.approval_id,
+                    ):
+                        raise StateConflict(
+                            "chat authorization cannot become an HMAC approval"
+                        )
                     if (
                         existing["ticket_hash"] == approval.ticket_hash
                         and existing["token_hash"] == approval.token_hash
@@ -4289,11 +6135,14 @@ class ExecutionStore:
             row = connection.execute(
                 "SELECT * FROM execution_approvals WHERE approval_id = ?", (checked,)
             ).fetchone()
+            is_chat = self._row_has_chat_provenance_locked(connection, checked)
         finally:
             connection.close()
         if row is None:
             raise RecordNotFound("approval is not registered")
         self._verify_approval_row(row)
+        if is_chat:
+            raise StateConflict("chat authorization is not an HMAC approval")
         return str(row["state"])
 
     def get_approval(self, approval_id: str) -> TrustedApproval:
@@ -4313,11 +6162,14 @@ class ExecutionStore:
                 "SELECT * FROM execution_approvals WHERE approval_id = ?",
                 (checked,),
             ).fetchone()
+            is_chat = self._row_has_chat_provenance_locked(connection, checked)
         finally:
             connection.close()
         if row is None:
             raise RecordNotFound("approval is not registered")
         self._verify_approval_row(row)
+        if is_chat:
+            raise StateConflict("chat authorization is not an HMAC approval")
         try:
             environment = Environment(str(row["environment"]))
             return TrustedApproval(
@@ -4348,6 +6200,8 @@ class ExecutionStore:
             if row is None:
                 raise RecordNotFound("approval is not registered")
             self._verify_approval_row(row)
+            if self._row_has_chat_provenance_locked(connection, checked):
+                raise StateConflict("chat authorization is not an HMAC approval")
             if row["state"] != "issued":
                 raise StateConflict("only an unused approval can be revoked")
             if checked_at < _parse_time(row["issued_at"], field="approval issued_at"):
@@ -4398,6 +6252,14 @@ class ExecutionStore:
                 if approval is None:
                     raise AdmissionDenied("APPROVAL_NOT_FOUND", "approval is not registered")
                 self._verify_approval_row(approval)
+                if self._row_has_chat_provenance_locked(
+                    connection,
+                    checked_approval,
+                ):
+                    raise AdmissionDenied(
+                        "APPROVAL_PROVENANCE_MISMATCH",
+                        "chat authorization requires chat admission",
+                    )
                 if approval["state"] != "issued":
                     raise AdmissionDenied("APPROVAL_ALREADY_USED", "approval is not issued")
                 if approval["token_hash"] != checked_token:
@@ -5503,6 +7365,458 @@ class ExecutionStore:
         return self._preflight_from_row(row)
 
     @staticmethod
+    def _entry_role_attestation_material(
+        attestation: TestnetEntryRoleAttestation,
+        *,
+        recorded_at: datetime,
+        payload_json: str,
+        content_hash: str,
+    ) -> dict[str, object]:
+        return {
+            **attestation.as_dict(),
+            "recorded_at": _time_text(recorded_at, field="recorded_at"),
+            "payload_json": payload_json,
+            "content_hash": content_hash,
+        }
+
+    @classmethod
+    def _entry_role_attestation_from_row(
+        cls,
+        row: Mapping[str, Any],
+    ) -> TestnetEntryRoleAttestation:
+        payload_json = str(row["payload_json"])
+        content_hash = _stored_hash(
+            row["content_hash"],
+            field="entry role attestation content_hash",
+        )
+        payload = _decode_payload(
+            payload_json,
+            content_hash,
+            field="entry role attestation",
+        )
+        if not isinstance(payload, dict):
+            raise StorageError("entry role attestation payload is not an object")
+        try:
+            attestation = testnet_entry_role_attestation_from_dict(payload)
+        except (TypeError, ValueError, ValidationError) as error:
+            raise StorageError("persisted entry role attestation is invalid") from error
+        comparisons = {
+            "attestation_hash": attestation.attestation_hash,
+            "stage": attestation.stage.value,
+            "account_id": attestation.account_id,
+            "main_account_address": attestation.main_account_address,
+            "api_wallet_address": attestation.api_wallet_address,
+            "command_id": attestation.command_id,
+            "ticket_hash": attestation.ticket_hash,
+            "plan_hash": attestation.plan_hash,
+            "preflight_hash": attestation.preflight_hash,
+            "action_hash": attestation.action_hash,
+            "worker_id": attestation.worker_id,
+            "fencing_token": attestation.fencing_token,
+            "attempt_id": attestation.attempt_id,
+            "signed_evidence_hash": attestation.signed_evidence_hash,
+            "collection_started_at_ms": attestation.collection_started_at_ms,
+            "first_received_at_ms": attestation.first_received_at_ms,
+            "second_received_at_ms": attestation.second_received_at_ms,
+            "expires_at_ms": attestation.expires_at_ms,
+            "first_response_hash": attestation.canonical_response_hashes[0],
+            "second_response_hash": attestation.canonical_response_hashes[1],
+        }
+        for field, expected in comparisons.items():
+            if row[field] != expected:
+                raise StorageError(
+                    f"entry role attestation {field} differs from payload"
+                )
+        recorded_at = _parse_time(
+            row["recorded_at"],
+            field="entry role attestation recorded_at",
+        )
+        expected_record_hash = _record_hash(
+            "entry-role-attestation",
+            cls._entry_role_attestation_material(
+                attestation,
+                recorded_at=recorded_at,
+                payload_json=payload_json,
+                content_hash=content_hash,
+            ),
+        )
+        if _stored_hash(
+            row["record_hash"],
+            field="entry role attestation record_hash",
+        ) != expected_record_hash:
+            raise StorageError("entry role attestation record hash differs")
+        return attestation
+
+    def record_entry_role_attestation(
+        self,
+        attestation: TestnetEntryRoleAttestation,
+        *,
+        at: datetime,
+    ) -> TestnetEntryRoleAttestation:
+        """Persist one fresh PRE_KEY or PRE_SEND normal-entry role fence."""
+
+        if type(attestation) is not TestnetEntryRoleAttestation:
+            raise TypeError(
+                "attestation must be exact TestnetEntryRoleAttestation"
+            )
+        try:
+            checked_attestation = testnet_entry_role_attestation_from_dict(
+                attestation.as_dict()
+            )
+        except (TypeError, ValueError, ValidationError) as error:
+            raise StateConflict(
+                "entry role attestation failed exact revalidation"
+            ) from error
+        if checked_attestation != attestation:
+            raise StateConflict(
+                "entry role attestation differs after canonical revalidation"
+            )
+        attestation = checked_attestation
+        checked_at = _utc(at, field="at")
+        attestation.verify_integrity(at=checked_at)
+        if attestation.account_id != self.account_id:
+            raise StateConflict("entry role attestation account differs")
+        payload_json, content_hash = _canonical_payload(attestation.as_dict())
+        record_hash = _record_hash(
+            "entry-role-attestation",
+            self._entry_role_attestation_material(
+                attestation,
+                recorded_at=checked_at,
+                payload_json=payload_json,
+                content_hash=content_hash,
+            ),
+        )
+        try:
+            with self._transaction() as connection:
+                outbox, _ = self._require_claim_locked(
+                    connection,
+                    command_id=attestation.command_id,
+                    worker_id=attestation.worker_id,
+                    fencing_token=attestation.fencing_token,
+                    at=checked_at,
+                    allowed_states=frozenset({"claimed"}),
+                )
+                command_row = connection.execute(
+                    """
+                    SELECT * FROM execution_commands WHERE command_id = ?
+                    """,
+                    (attestation.command_id,),
+                ).fetchone()
+                command = self._command_from_row(command_row)
+                self._require_chat_role_scope_locked(connection, attestation)
+                preflight_row = connection.execute(
+                    """
+                    SELECT * FROM execution_dispatch_preflights
+                    WHERE preflight_hash = ? AND command_id = ?
+                    """,
+                    (attestation.preflight_hash, attestation.command_id),
+                ).fetchone()
+                if preflight_row is None:
+                    raise StateConflict(
+                        "entry role attestation preflight is not registered"
+                    )
+                preflight = self._preflight_from_row(preflight_row)
+                assert outbox.claimed_at is not None
+                earliest_collection_ms = max(
+                    int(outbox.claimed_at.timestamp() * 1_000),
+                    int(preflight.observed_at.timestamp() * 1_000),
+                )
+                if (
+                    command.ticket_hash != attestation.ticket_hash
+                    or command.plan_hash != attestation.plan_hash
+                    or preflight.ticket_hash != attestation.ticket_hash
+                    or preflight.plan_hash != attestation.plan_hash
+                    or preflight.account_id != attestation.account_id
+                    or not preflight.passed
+                    or not preflight.observed_at <= checked_at < preflight.expires_at
+                    or attestation.collection_started_at_ms
+                    < earliest_collection_ms
+                    or (
+                        attestation.stage is EntryRoleAttestationStage.PRE_KEY
+                        and outbox.current_attempt_id is not None
+                    )
+                    or (
+                        attestation.stage is EntryRoleAttestationStage.PRE_SEND
+                        and outbox.current_attempt_id != attestation.attempt_id
+                    )
+                ):
+                    raise StateConflict(
+                        "entry role attestation differs from command or preflight"
+                    )
+                if attestation.stage is EntryRoleAttestationStage.PRE_KEY:
+                    if connection.execute(
+                        """
+                        SELECT 1 FROM execution_signed_envelopes
+                        WHERE command_id = ?
+                        """,
+                        (attestation.command_id,),
+                    ).fetchone() is not None:
+                        raise StateConflict(
+                            "PRE_KEY role attestation cannot follow signing"
+                        )
+                else:
+                    attempt_row = connection.execute(
+                        """
+                        SELECT * FROM execution_attempts WHERE attempt_id = ?
+                        """,
+                        (attestation.attempt_id,),
+                    ).fetchone()
+                    if attempt_row is None:
+                        raise StateConflict(
+                            "PRE_SEND role attestation attempt is missing"
+                        )
+                    attempt = self._attempt_from_row(attempt_row)
+                    signed_row = connection.execute(
+                        """
+                        SELECT * FROM execution_signed_envelopes
+                        WHERE evidence_hash = ? AND command_id = ?
+                        """,
+                        (
+                            attestation.signed_evidence_hash,
+                            attestation.command_id,
+                        ),
+                    ).fetchone()
+                    if signed_row is None:
+                        raise StateConflict(
+                            "PRE_SEND role attestation signed evidence is missing"
+                        )
+                    signed = self._signed_evidence_from_row(signed_row)
+                    attempt_prepared_ms = int(
+                        attempt.prepared_at.timestamp() * 1_000
+                    )
+                    if (
+                        attempt.command_id != attestation.command_id
+                        or attempt.worker_id != attestation.worker_id
+                        or attempt.fencing_token != attestation.fencing_token
+                        or attempt.preflight_hash != attestation.preflight_hash
+                        or attempt.signed_evidence_hash
+                        != attestation.signed_evidence_hash
+                        or attempt.action_hash != attestation.action_hash
+                        or signed.action_hash != attestation.action_hash
+                        or signed.preflight_hash != attestation.preflight_hash
+                        or attestation.collection_started_at_ms
+                        < attempt_prepared_ms
+                        or attestation.collection_started_at_ms
+                        < signed.signed_at_ms
+                    ):
+                        raise StateConflict(
+                            "PRE_SEND role attestation attempt binding differs"
+                        )
+                    pre_key_row = connection.execute(
+                        """
+                        SELECT * FROM execution_entry_role_attestations
+                        WHERE command_id = ? AND stage = 'pre_key'
+                        """,
+                        (attestation.command_id,),
+                    ).fetchone()
+                    if pre_key_row is None:
+                        raise StateConflict(
+                            "PRE_SEND role attestation lacks PRE_KEY history"
+                        )
+                    pre_key = self._entry_role_attestation_from_row(pre_key_row)
+                    if (
+                        pre_key.account_id != attestation.account_id
+                        or pre_key.main_account_address
+                        != attestation.main_account_address
+                        or pre_key.api_wallet_address
+                        != attestation.api_wallet_address
+                        or pre_key.ticket_hash != attestation.ticket_hash
+                        or pre_key.plan_hash != attestation.plan_hash
+                        or pre_key.preflight_hash != attestation.preflight_hash
+                        or pre_key.action_hash != attestation.action_hash
+                        or pre_key.worker_id != attestation.worker_id
+                        or pre_key.fencing_token != attestation.fencing_token
+                        or signed_row["pre_key_role_attestation_hash"]
+                        != pre_key.attestation_hash
+                    ):
+                        raise StateConflict(
+                            "PRE_SEND role attestation lacks signed PRE_KEY chain"
+                        )
+                existing = connection.execute(
+                    """
+                    SELECT * FROM execution_entry_role_attestations
+                    WHERE command_id = ? AND stage = ?
+                    """,
+                    (attestation.command_id, attestation.stage.value),
+                ).fetchone()
+                if existing is not None:
+                    current = self._entry_role_attestation_from_row(existing)
+                    if current == attestation:
+                        return current
+                    raise StateConflict(
+                        "entry role attestation stage is already bound"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO execution_entry_role_attestations (
+                        attestation_hash, stage, account_id,
+                        main_account_address, api_wallet_address, command_id,
+                        ticket_hash, plan_hash, preflight_hash, action_hash,
+                        worker_id, fencing_token, attempt_id,
+                        signed_evidence_hash, collection_started_at_ms,
+                        first_received_at_ms, second_received_at_ms,
+                        expires_at_ms, first_response_hash,
+                        second_response_hash, recorded_at, payload_json,
+                        content_hash, record_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        attestation.attestation_hash,
+                        attestation.stage.value,
+                        attestation.account_id,
+                        attestation.main_account_address,
+                        attestation.api_wallet_address,
+                        attestation.command_id,
+                        attestation.ticket_hash,
+                        attestation.plan_hash,
+                        attestation.preflight_hash,
+                        attestation.action_hash,
+                        attestation.worker_id,
+                        attestation.fencing_token,
+                        attestation.attempt_id,
+                        attestation.signed_evidence_hash,
+                        attestation.collection_started_at_ms,
+                        attestation.first_received_at_ms,
+                        attestation.second_received_at_ms,
+                        attestation.expires_at_ms,
+                        attestation.canonical_response_hashes[0],
+                        attestation.canonical_response_hashes[1],
+                        _time_text(checked_at, field="recorded_at"),
+                        payload_json,
+                        content_hash,
+                        record_hash,
+                    ),
+                )
+                self._append_event_locked(
+                    connection,
+                    command_id=attestation.command_id,
+                    event_type=f"entry_role_{attestation.stage.value}_recorded",
+                    occurred_at=checked_at,
+                    payload={
+                        "attestation_hash": attestation.attestation_hash,
+                        "preflight_hash": attestation.preflight_hash,
+                        "action_hash": attestation.action_hash,
+                        "attempt_id": attestation.attempt_id,
+                        "signed_evidence_hash": attestation.signed_evidence_hash,
+                        "expires_at_ms": attestation.expires_at_ms,
+                        "credential_loaded": False,
+                        "venue_write_attempted": False,
+                    },
+                )
+                return attestation
+        except sqlite3.IntegrityError as error:
+            raise StateConflict(
+                "entry role attestation identity is already consumed"
+            ) from error
+
+    def _require_entry_role_attestation_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        stage: EntryRoleAttestationStage,
+        command_id: str,
+        ticket_hash: str,
+        plan_hash: str,
+        preflight_hash: str,
+        action_hash: str,
+        worker_id: str,
+        fencing_token: int,
+        attempt_id: str | None,
+        signed_evidence_hash: str | None,
+        at: datetime,
+    ) -> TestnetEntryRoleAttestation:
+        row = connection.execute(
+            """
+            SELECT * FROM execution_entry_role_attestations
+            WHERE command_id = ? AND stage = ?
+            """,
+            (command_id, stage.value),
+        ).fetchone()
+        if row is None:
+            raise StateConflict(
+                f"entry {stage.value} role attestation is missing"
+            )
+        attestation = self._entry_role_attestation_from_row(row)
+        attestation.verify_integrity(at=at)
+        if (
+            attestation.stage is not stage
+            or attestation.account_id != self.account_id
+            or attestation.command_id != command_id
+            or attestation.ticket_hash != ticket_hash
+            or attestation.plan_hash != plan_hash
+            or attestation.preflight_hash != preflight_hash
+            or attestation.action_hash != action_hash
+            or attestation.worker_id != worker_id
+            or attestation.fencing_token != fencing_token
+            or attestation.attempt_id != attempt_id
+            or attestation.signed_evidence_hash != signed_evidence_hash
+        ):
+            raise StateConflict(
+                f"entry {stage.value} role attestation binding differs"
+            )
+        self._require_chat_role_scope_locked(connection, attestation)
+        return attestation
+
+    def require_entry_role_attestation(
+        self,
+        *,
+        stage: EntryRoleAttestationStage,
+        command_id: str,
+        ticket_hash: str,
+        plan_hash: str,
+        preflight_hash: str,
+        action_hash: str,
+        worker_id: str,
+        fencing_token: int,
+        attempt_id: str | None,
+        signed_evidence_hash: str | None,
+        at: datetime,
+    ) -> TestnetEntryRoleAttestation:
+        """Load and verify one exact, still-fresh entry role attestation."""
+
+        if type(stage) is not EntryRoleAttestationStage:
+            raise TypeError("stage must be exact EntryRoleAttestationStage")
+        checked_command = _text(command_id, field="command_id", maximum=128)
+        checked_ticket = _hash(ticket_hash, field="ticket_hash")
+        checked_plan = _hash(plan_hash, field="plan_hash")
+        checked_preflight = _hash(preflight_hash, field="preflight_hash")
+        checked_action = _hash(action_hash, field="action_hash")
+        checked_worker = _text(worker_id, field="worker_id", maximum=128)
+        checked_token = _positive_int(fencing_token, field="fencing_token")
+        checked_attempt = (
+            None
+            if attempt_id is None
+            else _text(attempt_id, field="attempt_id", maximum=128)
+        )
+        checked_signed = (
+            None
+            if signed_evidence_hash is None
+            else _hash(
+                signed_evidence_hash,
+                field="signed_evidence_hash",
+            )
+        )
+        checked_at = _utc(at, field="at")
+        connection = self._connect()
+        try:
+            return self._require_entry_role_attestation_locked(
+                connection,
+                stage=stage,
+                command_id=checked_command,
+                ticket_hash=checked_ticket,
+                plan_hash=checked_plan,
+                preflight_hash=checked_preflight,
+                action_hash=checked_action,
+                worker_id=checked_worker,
+                fencing_token=checked_token,
+                attempt_id=checked_attempt,
+                signed_evidence_hash=checked_signed,
+                at=checked_at,
+            )
+        finally:
+            connection.close()
+
+    @staticmethod
     def _signed_evidence_material(
         evidence: SignedEnvelopeEvidence,
         *,
@@ -5535,8 +7849,19 @@ class ExecutionStore:
                 environment=Environment(str(row["environment"])),
                 endpoint=str(row["endpoint"]),
                 account_id=str(row["account_id"]),
+                main_account_address=_stored_address(
+                    row["main_account_address"],
+                    field="signed evidence main_account_address",
+                ),
+                api_wallet_address=_stored_address(
+                    row["api_wallet_address"],
+                    field="signed evidence api_wallet_address",
+                ),
                 plan_hash=str(row["plan_hash"]),
                 action_hash=str(row["action_hash"]),
+                pre_key_role_attestation_hash=str(
+                    row["pre_key_role_attestation_hash"]
+                ),
                 nonce=int(row["nonce"]),
                 wire_hash=str(row["wire_hash"]),
                 signature_hash=str(row["signature_hash"]),
@@ -5546,6 +7871,7 @@ class ExecutionStore:
                     row["authorization_expires_at_ms"]
                 ),
                 expires_after_ms=int(row["expires_after_ms"]),
+                signing_started_at_ms=int(row["signing_started_at_ms"]),
                 signed_at_ms=int(row["signed_at_ms"]),
                 evidence_hash=str(row["evidence_hash"]),
             )
@@ -5601,11 +7927,14 @@ class ExecutionStore:
             """
             INSERT INTO execution_signed_envelopes (
                 evidence_hash, command_id, preflight_hash, environment,
-                endpoint, account_id, plan_hash, action_hash, nonce, wire_hash,
+                endpoint, account_id, main_account_address,
+                api_wallet_address, plan_hash, action_hash, nonce, wire_hash,
                 signature_hash, envelope_hash, signer_binding_hash,
-                authorization_expires_at_ms, expires_after_ms, signed_at_ms,
-                recorded_at, payload_json, content_hash, record_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                authorization_expires_at_ms, expires_after_ms,
+                signing_started_at_ms, signed_at_ms,
+                recorded_at, payload_json, content_hash, record_hash,
+                pre_key_role_attestation_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 evidence.evidence_hash,
@@ -5614,6 +7943,8 @@ class ExecutionStore:
                 evidence.environment.value,
                 evidence.endpoint,
                 evidence.account_id,
+                evidence.main_account_address,
+                evidence.api_wallet_address,
                 evidence.plan_hash,
                 evidence.action_hash,
                 evidence.nonce,
@@ -5623,11 +7954,13 @@ class ExecutionStore:
                 evidence.signer_binding_hash,
                 evidence.authorization_expires_at_ms,
                 evidence.expires_after_ms,
+                evidence.signing_started_at_ms,
                 evidence.signed_at_ms,
                 _time_text(at, field="recorded_at"),
                 payload_json,
                 content_hash,
                 record_hash,
+                evidence.pre_key_role_attestation_hash,
             ),
         )
         return evidence
@@ -5692,6 +8025,16 @@ class ExecutionStore:
                     else bool(row["venue_write_attempted"])
                 ),
                 evidence_basis=str(row["evidence_basis"]),
+                submission_authority_hash=(
+                    None
+                    if row["submission_authority_hash"] is None
+                    else str(row["submission_authority_hash"])
+                ),
+                pre_send_role_attestation_hash=(
+                    None
+                    if row["pre_send_role_attestation_hash"] is None
+                    else str(row["pre_send_role_attestation_hash"])
+                ),
                 evidence_hash=str(row["evidence_hash"]),
             )
         except (TypeError, ValueError) as error:
@@ -5749,8 +8092,9 @@ class ExecutionStore:
                 endpoint, attempted_at_ms, outcome, http_status, detail_code,
                 response_hash, transport_attempt_hash, send_count,
                 retry_performed, venue_write_attempted, evidence_basis,
-                recorded_at, payload_json, content_hash, record_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                recorded_at, payload_json, content_hash, record_hash,
+                submission_authority_hash, pre_send_role_attestation_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 evidence.evidence_hash,
@@ -5775,6 +8119,8 @@ class ExecutionStore:
                 payload_json,
                 content_hash,
                 record_hash,
+                evidence.submission_authority_hash,
+                evidence.pre_send_role_attestation_hash,
             ),
         )
         return evidence
@@ -5972,9 +8318,9 @@ class ExecutionStore:
                 if attempt is None:
                     raise StorageError("claimed outbox references missing attempt")
                 attempt_record = self._attempt_from_row(attempt)
-                submission_authority = connection.execute(
+                submission_authority_row = connection.execute(
                     """
-                    SELECT 1 FROM execution_submission_authorities
+                    SELECT * FROM execution_submission_authorities
                     WHERE command_id = ? AND attempt_id = ?
                       AND signed_evidence_hash = ?
                     """,
@@ -5984,7 +8330,7 @@ class ExecutionStore:
                         attempt_record.signed_evidence_hash,
                     ),
                 ).fetchone()
-                if submission_authority is None:
+                if submission_authority_row is None:
                     if attempt_record.state != "prepared":
                         raise StorageError(
                             "entry attempt without submission authority is not prepared"
@@ -6088,6 +8434,24 @@ class ExecutionStore:
                         },
                     )
                     continue
+                submission_authority = self._entry_submission_authority_from_row(
+                    submission_authority_row
+                )
+                if (
+                    submission_authority.command_id != attempt_record.command_id
+                    or submission_authority.attempt_id != attempt_record.attempt_id
+                    or submission_authority.signed_evidence_hash
+                    != attempt_record.signed_evidence_hash
+                    or submission_authority.nonce != attempt_record.nonce
+                    or submission_authority.action_hash != attempt_record.action_hash
+                    or submission_authority.wire_hash != attempt_record.wire_hash
+                    or submission_authority.worker_id != attempt_record.worker_id
+                    or submission_authority.fencing_token
+                    != attempt_record.fencing_token
+                ):
+                    raise StorageError(
+                        "expired entry claim submission authority differs from attempt"
+                    )
                 transport_evidence: TransportOutcomeEvidence | None = None
                 if attempt_record.signed_evidence_hash is not None:
                     transport_evidence = TransportOutcomeEvidence(
@@ -6105,6 +8469,12 @@ class ExecutionStore:
                         retry_performed=False,
                         venue_write_attempted=None,
                         evidence_basis="claim_expiry",
+                        submission_authority_hash=(
+                            submission_authority.authority_hash
+                        ),
+                        pre_send_role_attestation_hash=(
+                            submission_authority.pre_send_role_attestation_hash
+                        ),
                     )
                     self._put_transport_evidence_locked(
                         connection, transport_evidence, at=at
@@ -6516,16 +8886,44 @@ class ExecutionStore:
                     "DISPATCH_PREFLIGHT_STALE",
                     "attempt preflight is stale",
                 )
+            pre_key_role = self._require_entry_role_attestation_locked(
+                connection,
+                stage=EntryRoleAttestationStage.PRE_KEY,
+                command_id=checked_command,
+                ticket_hash=preflight.ticket_hash,
+                plan_hash=preflight.plan_hash,
+                preflight_hash=checked_preflight,
+                action_hash=checked_action,
+                worker_id=checked_worker,
+                fencing_token=token,
+                attempt_id=None,
+                signed_evidence_hash=None,
+                at=checked_at,
+            )
             preflight_expiry_ms = int(preflight.expires_at.timestamp() * 1_000)
             if (
                 signed_evidence.command_id != checked_command
                 or signed_evidence.preflight_hash != checked_preflight
                 or signed_evidence.environment is not self.environment
                 or signed_evidence.account_id != self.account_id
+                or signed_evidence.main_account_address
+                != pre_key_role.main_account_address
+                or signed_evidence.api_wallet_address
+                != pre_key_role.api_wallet_address
                 or signed_evidence.plan_hash != preflight.plan_hash
                 or signed_evidence.nonce != checked_nonce
                 or signed_evidence.action_hash != checked_action
+                or signed_evidence.pre_key_role_attestation_hash
+                != pre_key_role.attestation_hash
                 or signed_evidence.wire_hash != checked_wire
+                or not (
+                    pre_key_role.second_received_at_ms
+                    <= signed_evidence.signing_started_at_ms
+                    <= signed_evidence.signed_at_ms
+                    < pre_key_role.expires_at_ms
+                )
+                or signed_evidence.signed_at_ms
+                > int(checked_at.timestamp() * 1_000)
             ):
                 raise AdmissionDenied(
                     "SIGNED_EVIDENCE_BINDING_MISMATCH",
@@ -6644,6 +9042,7 @@ class ExecutionStore:
         worker_id: str,
         fencing_token: int,
         *,
+        pre_send_role_attestation_hash: str,
         at: datetime,
     ) -> EntrySubmissionAuthority:
         """Consume the sole durable pre-send authority for a protected entry."""
@@ -6655,6 +9054,10 @@ class ExecutionStore:
         )
         checked_worker = _text(worker_id, field="worker_id", maximum=128)
         token = _positive_int(fencing_token, field="fencing_token")
+        checked_pre_send_role = _hash(
+            pre_send_role_attestation_hash,
+            field="pre_send_role_attestation_hash",
+        )
         checked_at = _utc(at, field="at")
         with self._transaction() as connection:
             outbox, _ = self._require_claim_locked(
@@ -6701,6 +9104,35 @@ class ExecutionStore:
                 or int(checked_at.timestamp() * 1_000) >= signed.expires_after_ms
             ):
                 raise StateConflict("entry signed evidence is stale or mismatched")
+            command_row = connection.execute(
+                """
+                SELECT * FROM execution_commands WHERE command_id = ?
+                """,
+                (checked_command,),
+            ).fetchone()
+            command = self._command_from_row(command_row)
+            if command.plan_hash != signed.plan_hash:
+                raise StateConflict(
+                    "entry submission command and signed plan differ"
+                )
+            pre_send_role = self._require_entry_role_attestation_locked(
+                connection,
+                stage=EntryRoleAttestationStage.PRE_SEND,
+                command_id=checked_command,
+                ticket_hash=command.ticket_hash,
+                plan_hash=signed.plan_hash,
+                preflight_hash=attempt.preflight_hash,
+                action_hash=attempt.action_hash,
+                worker_id=checked_worker,
+                fencing_token=token,
+                attempt_id=checked_attempt,
+                signed_evidence_hash=checked_signed,
+                at=checked_at,
+            )
+            if pre_send_role.attestation_hash != checked_pre_send_role:
+                raise StateConflict(
+                    "entry PRE_SEND role attestation identity differs"
+                )
             if connection.execute(
                 """
                 SELECT 1 FROM execution_submission_authorities
@@ -6718,6 +9150,8 @@ class ExecutionStore:
                 "wire_hash": attempt.wire_hash,
                 "worker_id": checked_worker,
                 "fencing_token": token,
+                "pre_send_role_attestation_hash": checked_pre_send_role,
+                "pre_send_role_expires_at_ms": pre_send_role.expires_at_ms,
                 "issued_at": checked_at,
                 "lease_expires_at": outbox.lease_expires_at,
             }
@@ -6730,8 +9164,10 @@ class ExecutionStore:
                     authority_hash, command_id, attempt_id,
                     signed_evidence_hash, worker_id, fencing_token,
                     issued_at, lease_expires_at, payload_json,
-                    content_hash, record_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    content_hash, record_hash,
+                    pre_send_role_attestation_hash,
+                    pre_send_role_expires_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     authority_hash,
@@ -6752,6 +9188,8 @@ class ExecutionStore:
                             "content_hash": content_hash,
                         },
                     ),
+                    checked_pre_send_role,
+                    pre_send_role.expires_at_ms,
                 ),
             )
             self._append_event_locked(
@@ -6763,6 +9201,8 @@ class ExecutionStore:
                     "attempt_id": checked_attempt,
                     "signed_evidence_hash": checked_signed,
                     "authority_hash": authority_hash,
+                    "pre_send_role_attestation_hash": checked_pre_send_role,
+                    "pre_send_role_expires_at_ms": pre_send_role.expires_at_ms,
                     "retry_allowed": False,
                 },
             )
@@ -6775,9 +9215,190 @@ class ExecutionStore:
                 wire_hash=attempt.wire_hash,
                 worker_id=checked_worker,
                 fencing_token=token,
+                pre_send_role_attestation_hash=checked_pre_send_role,
+                pre_send_role_expires_at_ms=pre_send_role.expires_at_ms,
+                issued_at=checked_at,
                 lease_expires_at=outbox.lease_expires_at,
                 authority_hash=authority_hash,
             )
+
+    @classmethod
+    def _entry_submission_authority_from_row(
+        cls,
+        row: Mapping[str, Any],
+    ) -> EntrySubmissionAuthority:
+        payload_json = str(row["payload_json"])
+        content_hash = _stored_hash(
+            row["content_hash"],
+            field="entry submission authority content_hash",
+        )
+        payload = _decode_payload(
+            payload_json,
+            content_hash,
+            field="entry submission authority",
+        )
+        if not isinstance(payload, dict):
+            raise StorageError("entry submission authority payload is not an object")
+        try:
+            authority = EntrySubmissionAuthority(
+                command_id=str(row["command_id"]),
+                attempt_id=str(row["attempt_id"]),
+                signed_evidence_hash=str(row["signed_evidence_hash"]),
+                nonce=int(payload["nonce"]),
+                action_hash=str(payload["action_hash"]),
+                wire_hash=str(payload["wire_hash"]),
+                worker_id=str(row["worker_id"]),
+                fencing_token=int(row["fencing_token"]),
+                pre_send_role_attestation_hash=str(
+                    row["pre_send_role_attestation_hash"]
+                ),
+                pre_send_role_expires_at_ms=int(
+                    row["pre_send_role_expires_at_ms"]
+                ),
+                issued_at=_parse_time(
+                    row["issued_at"],
+                    field="entry submission authority issued_at",
+                ),
+                lease_expires_at=_parse_time(
+                    row["lease_expires_at"],
+                    field="entry submission authority lease_expires_at",
+                ),
+                authority_hash=str(row["authority_hash"]),
+            )
+        except (KeyError, TypeError, ValueError, ValidationError) as error:
+            raise StorageError(
+                "persisted entry submission authority is invalid"
+            ) from error
+        if authority.as_dict() != payload:
+            raise StorageError(
+                "entry submission authority differs from its payload"
+            )
+        expected_record = _record_hash(
+            "entry-submission-authority-record",
+            {
+                "authority_hash": authority.authority_hash,
+                "payload_json": payload_json,
+                "content_hash": content_hash,
+            },
+        )
+        if _stored_hash(
+            row["record_hash"],
+            field="entry submission authority record_hash",
+        ) != expected_record:
+            raise StorageError(
+                "entry submission authority record hash differs"
+            )
+        return authority
+
+    def get_entry_submission_authority(
+        self,
+        command_id: str,
+    ) -> EntrySubmissionAuthority:
+        checked = _text(command_id, field="command_id", maximum=128)
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT * FROM execution_submission_authorities
+                WHERE command_id = ?
+                """,
+                (checked,),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            raise RecordNotFound("entry submission authority is missing")
+        return self._entry_submission_authority_from_row(row)
+
+    def _require_entry_outcome_authority_locked(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        attempt: AttemptRecord,
+        evidence: TransportOutcomeEvidence,
+        recorded_at: datetime,
+    ) -> EntrySubmissionAuthority:
+        """Reload the exact consumed PRE_SEND chain before outcome mutation."""
+
+        if attempt.preflight_hash is None or attempt.signed_evidence_hash is None:
+            raise StorageError("entry outcome attempt lacks durable signed bindings")
+        authority_row = connection.execute(
+            """
+            SELECT * FROM execution_submission_authorities
+            WHERE command_id = ? AND attempt_id = ?
+            """,
+            (attempt.command_id, attempt.attempt_id),
+        ).fetchone()
+        if authority_row is None:
+            raise StateConflict(
+                "entry transport outcome requires consumed submission authority"
+            )
+        authority = self._entry_submission_authority_from_row(authority_row)
+        signed_row = connection.execute(
+            """
+            SELECT * FROM execution_signed_envelopes
+            WHERE evidence_hash = ? AND command_id = ?
+            """,
+            (attempt.signed_evidence_hash, attempt.command_id),
+        ).fetchone()
+        if signed_row is None:
+            raise StorageError("entry outcome signed evidence is missing")
+        signed = self._signed_evidence_from_row(signed_row)
+        command_row = connection.execute(
+            "SELECT * FROM execution_commands WHERE command_id = ?",
+            (attempt.command_id,),
+        ).fetchone()
+        command = self._command_from_row(command_row)
+        attempted_at = _EPOCH + timedelta(milliseconds=evidence.attempted_at_ms)
+        recorded = _utc(recorded_at, field="recorded_at")
+        self._require_entry_role_attestation_locked(
+            connection,
+            stage=EntryRoleAttestationStage.PRE_SEND,
+            command_id=attempt.command_id,
+            ticket_hash=command.ticket_hash,
+            plan_hash=signed.plan_hash,
+            preflight_hash=attempt.preflight_hash,
+            action_hash=attempt.action_hash,
+            worker_id=attempt.worker_id,
+            fencing_token=attempt.fencing_token,
+            attempt_id=attempt.attempt_id,
+            signed_evidence_hash=attempt.signed_evidence_hash,
+            at=attempted_at,
+        )
+        if (
+            attempt.state != "prepared"
+            or authority.command_id != attempt.command_id
+            or authority.attempt_id != attempt.attempt_id
+            or authority.signed_evidence_hash != attempt.signed_evidence_hash
+            or authority.nonce != attempt.nonce
+            or authority.action_hash != attempt.action_hash
+            or authority.wire_hash != attempt.wire_hash
+            or authority.worker_id != attempt.worker_id
+            or authority.fencing_token != attempt.fencing_token
+            or evidence.submission_authority_hash != authority.authority_hash
+            or evidence.pre_send_role_attestation_hash
+            != authority.pre_send_role_attestation_hash
+            or evidence.attempted_at_ms < _milliseconds(
+                attempt.prepared_at,
+                field="attempt prepared_at",
+            )
+            or evidence.attempted_at_ms < _milliseconds(
+                authority.issued_at,
+                field="submission authority issued_at",
+            )
+            or evidence.attempted_at_ms < signed.signed_at_ms
+            or evidence.attempted_at_ms >= signed.expires_after_ms
+            or evidence.attempted_at_ms
+            >= authority.pre_send_role_expires_at_ms
+            or attempted_at >= authority.lease_expires_at
+            or recorded < attempted_at
+            or recorded < attempt.updated_at
+            or recorded < authority.issued_at
+        ):
+            raise StateConflict(
+                "entry transport outcome differs from its durable authority chain"
+            )
+        return authority
 
     def get_attempt(self, command_id: str) -> AttemptRecord:
         checked = _text(command_id, field="command_id", maximum=128)
@@ -6853,6 +9474,12 @@ class ExecutionStore:
                 raise StateConflict(
                     "unknown transport evidence differs from prepared attempt"
                 )
+            self._require_entry_outcome_authority_locked(
+                connection,
+                attempt=attempt,
+                evidence=transport_evidence,
+                recorded_at=checked_at,
+            )
             self._put_transport_evidence_locked(
                 connection, transport_evidence, at=checked_at
             )
@@ -7043,6 +9670,12 @@ class ExecutionStore:
                 raise StateConflict(
                     "response transport evidence differs from prepared attempt"
                 )
+            self._require_entry_outcome_authority_locked(
+                connection,
+                attempt=attempt,
+                evidence=transport_evidence,
+                recorded_at=checked_at,
+            )
             self._put_transport_evidence_locked(
                 connection, transport_evidence, at=checked_at
             )
@@ -10995,6 +13628,13 @@ class ExecutionStore:
         checked_at = _utc(at, field="at")
         if not isinstance(transport_evidence, TransportOutcomeEvidence):
             raise TypeError("transport_evidence must be TransportOutcomeEvidence")
+        if (
+            transport_evidence.submission_authority_hash is not None
+            or transport_evidence.pre_send_role_attestation_hash is not None
+        ):
+            raise StateConflict(
+                "recovery transport cannot claim normal-entry role authority"
+            )
         if noop_response is not None and not isinstance(
             noop_response, NoopFenceResponseEvidence
         ):
@@ -11942,6 +14582,7 @@ class ExecutionStore:
 
 __all__ = (
     "AttemptRecord",
+    "ChatExecutionAuthorization",
     "CommandRecord",
     "DispatchPreflight",
     "EntrySubmissionAuthority",

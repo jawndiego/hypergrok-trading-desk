@@ -21,6 +21,7 @@ from .learning_ledger import (
     SourceEvidence,
 )
 from .execution_store import (
+    ChatExecutionAuthorization,
     CommandRecord,
     LegRecord,
     RecoveryCommand,
@@ -276,6 +277,45 @@ class LearningRecorder:
             idempotency_key=f"approval:{approval.approval_id}:{state.value}",
         )
 
+    def record_chat_approval_reference(
+        self,
+        cycle_id: str,
+        authorization: ChatExecutionAuthorization,
+        *,
+        state: ApprovalState,
+    ):
+        """Record explicit weak-chat provenance without HMAC coercion."""
+
+        if not isinstance(authorization, ChatExecutionAuthorization):
+            raise TypeError(
+                "authorization must be ChatExecutionAuthorization"
+            )
+        handoff = authorization.handoff
+        if (
+            authorization.command_id == ""
+            or handoff.human_message_attested is not False
+            or handoff.testnet_only is not True
+            or handoff.mainnet_authorized is not False
+            or handoff.execution_performed is not False
+            or handoff.venue_write_attempted is not False
+        ):
+            raise ValueError("chat authorization overstates its authority")
+        reference = ApprovalReference(
+            cycle_id=cycle_id,
+            reference_id=authorization.authorization_id,
+            state=state,
+            occurred_at=handoff.approval_receipt.received_at,
+            ticket_hash=handoff.proposal.ticket_hash,
+            authority_kind="testnet_chat_approval_unattested",
+            authority_evidence_hash=handoff.handoff_hash,
+        )
+        return self.ledger.record_approval(
+            reference,
+            idempotency_key=(
+                f"chat-approval:{authorization.authorization_id}:{state.value}"
+            ),
+        )
+
     def record_execution_reference(
         self,
         cycle_id: str,
@@ -289,17 +329,10 @@ class LearningRecorder:
             raise TypeError("command must be CommandRecord")
         if len(legs) != 3 or any(not isinstance(item, LegRecord) for item in legs):
             raise TypeError("legs must contain the three durable command legs")
-        record_hash = domain_hash(
-            "trading-harness/learning-execution-reference/v1",
-            {
-                "command_id": command.command_id,
-                "ticket_hash": command.ticket_hash,
-                "plan_hash": command.plan_hash,
-                "approval_id": command.approval_id,
-                "state": command.state,
-                "revision": command.revision,
-                "leg_cloids": tuple(item.cloid for item in legs),
-            },
+        record_hash = self.execution_reference_hash(
+            command,
+            legs,
+            state=state,
         )
         reference = ExecutionReference(
             cycle_id=cycle_id,
@@ -312,6 +345,35 @@ class LearningRecorder:
         return self.ledger.record_execution(
             reference,
             idempotency_key=f"execution:{command.command_id}:{state.value}",
+        )
+
+    @staticmethod
+    def execution_reference_hash(
+        command: CommandRecord,
+        legs: tuple[LegRecord, ...],
+        *,
+        state: ExecutionState,
+    ) -> str:
+        """Hash the exact immutable execution identity for one learning state."""
+
+        if not isinstance(command, CommandRecord):
+            raise TypeError("command must be CommandRecord")
+        if not isinstance(state, ExecutionState):
+            raise TypeError("state must be ExecutionState")
+        if len(legs) != 3 or any(not isinstance(item, LegRecord) for item in legs):
+            raise TypeError("legs must contain the three durable command legs")
+        if any(item.command_id != command.command_id for item in legs):
+            raise ValueError("execution legs differ from command")
+        return domain_hash(
+            "trading-harness/learning-execution-reference/v2",
+            {
+                "command_id": command.command_id,
+                "ticket_hash": command.ticket_hash,
+                "plan_hash": command.plan_hash,
+                "approval_id": command.approval_id,
+                "learning_state": state.value,
+                "leg_cloids": tuple(item.cloid for item in legs),
+            },
         )
 
     def record_recovery_execution_reference(

@@ -103,6 +103,7 @@ from .testnet_qualification import (
     start_qualification_workflow,
     verified_qualification_permit,
 )
+from .testnet_chat_delivery import testnet_chat_execution_scope_from_config
 
 
 Clock = Callable[[], datetime]
@@ -308,6 +309,7 @@ def _qualification_store(config: ExecutorConfig) -> QualificationStore:
             account_id=config.account_id,
             max_reserved_loss=config.max_reserved_loss,
             max_reserved_notional=config.max_reserved_notional,
+            chat_scope=testnet_chat_execution_scope_from_config(config),
             must_exist=True,
         )
     )

@@ -38,6 +38,9 @@ from tests.test_hyperliquid_signer import (
 )
 
 
+PRE_SEND_ROLE_HASH = "f" * 64
+
+
 class FakeSender:
     def __init__(self, result: object) -> None:
         self.result = result
@@ -75,6 +78,11 @@ def submit(signed, sender, *, clock, **kwargs):
             wire_hash=signed.wire_hash,
             worker_id="transport-test-worker",
             fencing_token=1,
+            pre_send_role_attestation_hash=PRE_SEND_ROLE_HASH,
+            pre_send_role_expires_at_ms=int(
+                (NOW + timedelta(seconds=2)).timestamp() * 1_000
+            ),
+            issued_at=NOW,
             lease_expires_at=NOW + timedelta(seconds=30),
             authority_hash="a" * 64,
         )
@@ -85,6 +93,7 @@ def submit(signed, sender, *, clock, **kwargs):
             "signed_evidence_hash": evidence_hash,
             "worker_id": "transport-test-worker",
             "fencing_token": 1,
+            "pre_send_role_attestation_hash": PRE_SEND_ROLE_HASH,
         }
         authority_patch = mock.patch.object(
             ExecutionStore,
@@ -159,6 +168,11 @@ class SingleAttemptTransportTests(unittest.TestCase):
                 wire_hash=signed.wire_hash,
                 worker_id="worker-1",
                 fencing_token=1,
+                pre_send_role_attestation_hash=PRE_SEND_ROLE_HASH,
+                pre_send_role_expires_at_ms=int(
+                    (NOW + timedelta(seconds=2)).timestamp() * 1_000
+                ),
+                issued_at=NOW,
                 lease_expires_at=NOW + timedelta(seconds=30),
                 authority_hash="c" * 64,
             )
@@ -169,6 +183,7 @@ class SingleAttemptTransportTests(unittest.TestCase):
                 "signed_evidence_hash": evidence.evidence_hash,
                 "worker_id": "worker-1",
                 "fencing_token": 1,
+                "pre_send_role_attestation_hash": PRE_SEND_ROLE_HASH,
             }
             with (
                 mock.patch.object(
@@ -212,6 +227,8 @@ class SingleAttemptTransportTests(unittest.TestCase):
         self.assertRegex(attempt.attempt_hash, r"^[0-9a-f]{64}$")
         self.assertEqual(attempt.signed_envelope_hash, signed.envelope_hash)
         self.assertEqual(attempt.signer_binding_hash, signed.signer_binding_hash)
+        self.assertEqual(attempt.pre_send_role_attestation_hash, PRE_SEND_ROLE_HASH)
+        self.assertRegex(attempt.submission_authority_hash or "", r"^[0-9a-f]{64}$")
         attempt.verify_integrity()
         signed_evidence = signed.execution_store_evidence("command-1")
         persisted = attempt.execution_store_evidence(
@@ -238,6 +255,39 @@ class SingleAttemptTransportTests(unittest.TestCase):
         self.assertEqual(attempt.send_count, 1)
         self.assertFalse(attempt.retry_performed)
         self.assertNotIn("private timeout material", json.dumps(attempt.as_dict()))
+
+    def test_pre_send_role_expiry_after_authority_skips_http_and_is_unknown(self) -> None:
+        signed = make_signed()
+        sender = FakeSender(successful_response(signed.exchange_url))
+        times = iter((NOW, NOW + timedelta(seconds=2)))
+
+        attempt = submit(signed, sender, clock=lambda: next(times))
+
+        self.assertEqual([], sender.calls)
+        self.assertIs(attempt.outcome, SubmissionOutcome.UNKNOWN)
+        self.assertEqual("entry_role_expired_after_authority", attempt.detail_code)
+        self.assertEqual(PRE_SEND_ROLE_HASH, attempt.pre_send_role_attestation_hash)
+        self.assertRegex(attempt.submission_authority_hash or "", r"^[0-9a-f]{64}$")
+        self.assertFalse(attempt.retry_performed)
+
+    def test_clock_failure_after_authority_skips_http_and_is_unknown(self) -> None:
+        signed = make_signed()
+        sender = FakeSender(successful_response(signed.exchange_url))
+        calls = 0
+
+        def clock():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return NOW
+            raise RuntimeError("PRIVATE CLOCK")
+
+        attempt = submit(signed, sender, clock=clock)
+
+        self.assertEqual([], sender.calls)
+        self.assertEqual("clock_invalid_after_authority", attempt.detail_code)
+        self.assertNotIn("PRIVATE", json.dumps(attempt.as_dict()))
+        self.assertTrue(attempt.outcome_unknown)
 
     def test_non_200_redirect_oversize_and_bad_json_are_all_unknown(self) -> None:
         signed = make_signed()
@@ -364,6 +414,8 @@ class SingleAttemptTransportTests(unittest.TestCase):
         for tampered in (
             replace(attempt, attempt_hash="0" * 64),
             replace(attempt, signer_binding_hash="0" * 64),
+            replace(attempt, pre_send_role_attestation_hash="0" * 64),
+            replace(attempt, submission_authority_hash="0" * 64),
             replace(attempt, response_json='{"status":"err"}'),
             replace(attempt, retry_performed=True),
         ):

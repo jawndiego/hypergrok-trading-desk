@@ -3,12 +3,14 @@ from __future__ import annotations
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from trading_harness.execution_learning_sync import (
     ExecutionLearningProjector,
     LearningProjectionError,
 )
 from trading_harness.canonical import domain_hash
+from trading_harness.domain import Environment
 from trading_harness.execution_store import (
     LegReconciliation,
     RecoveryPermit,
@@ -17,9 +19,13 @@ from trading_harness.execution_store import (
 )
 from trading_harness.learning_bridge import LearningRecorder
 from trading_harness.learning_ledger import (
+    ApprovalReference,
+    ApprovalState,
     ComponentVersions,
     DecisionClass,
     DecisionCycle,
+    ExecutionReference,
+    ExecutionState,
     FillRole,
     LearningLedger,
     ProposedBracket,
@@ -27,10 +33,52 @@ from trading_harness.learning_ledger import (
     VenueFill as LearningVenueFill,
 )
 from trading_harness.post_trade_review import PostTradeReviewer
-from tests.test_execution_store import ExecutionStoreTestCase, NOW, digest
+from tests.test_execution_store import (
+    ExecutionStoreTestCase,
+    NOW,
+    digest,
+    make_infrastructure_grant,
+    make_ticket,
+)
+from tests.test_testnet_chat_admission import (
+    approved_handoff,
+)
+from tests.test_testnet_chat_delivery import VerifiedDeliveryFixture
 
 
 class ExecutionLearningProjectorTests(ExecutionStoreTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.chat_delivery = VerifiedDeliveryFixture(Path(self.temporary.name))
+        self.addCleanup(self.chat_delivery.close)
+        self.store = self.store.__class__(
+            self.path,
+            environment=Environment.TESTNET,
+            account_id="testnet-account",
+            max_reserved_loss="100",
+            max_reserved_notional="2000",
+            chat_scope=self.chat_delivery.scope,
+            chat_clock=lambda: NOW + timedelta(milliseconds=5),
+        )
+
+    def _admit_chat(self, ticket, grant):
+        handoff = approved_handoff(
+            ticket,
+            grant,
+            audience=self.chat_delivery.scope.audience,
+        )
+        self.chat_delivery.write(handoff)
+        delivery = self.chat_delivery.read(handoff)
+        with patch(
+            "trading_harness.execution_store.read_verified_testnet_chat_delivery",
+            return_value=delivery,
+        ) as reader:
+            command = self.store.admit_chat_handoff(
+                handoff.handoff_id,
+            )
+        reader.assert_called_once_with(self.chat_delivery.scope, handoff.handoff_id)
+        return handoff, command
+
     def _ledger(self) -> LearningLedger:
         return LearningLedger(Path(self.temporary.name) / "learning.sqlite3", clock=lambda: NOW + timedelta(minutes=1))
 
@@ -174,6 +222,133 @@ class ExecutionLearningProjectorTests(ExecutionStoreTestCase):
             projector.synchronize()
         with self.assertRaisesRegex(Exception, "no staged learning decision"):
             projector.require_entry_ready("command-1")
+
+    def test_chat_authorization_projects_explicit_unattested_provenance(self) -> None:
+        ticket = make_ticket("chat-learning-ticket")
+        grant = make_infrastructure_grant(
+            ticket,
+            grant_id="chat-learning-grant",
+        )
+        self.store.register_infrastructure_grant(grant, at=NOW)
+        self.store.register_ticket(
+            ticket,
+            infrastructure_grant_hash=grant.grant_hash,
+            stored_at=NOW + timedelta(milliseconds=1),
+        )
+        handoff, command = self._admit_chat(ticket, grant)
+        ledger = self._ledger()
+        cycle_id = self._decision(ticket, ledger)
+        projector = ExecutionLearningProjector(
+            self.store,
+            LearningRecorder(ledger),
+            settlement_asset="USDC",
+        )
+
+        report = projector.synchronize()
+        projector.require_entry_ready(command.command_id)
+        repeated = projector.synchronize()
+        approvals = [
+            event
+            for event in ledger.events(cycle_id=cycle_id)
+            if event.event_type == "approval_reference"
+        ]
+
+        self.assertGreaterEqual(report.execution_references_inserted, 2)
+        self.assertEqual(0, repeated.execution_references_inserted)
+        self.assertEqual(1, len(approvals))
+        self.assertEqual(
+            "testnet_chat_approval_unattested",
+            approvals[0].payload["authority_kind"],
+        )
+        self.assertEqual(
+            handoff.handoff_hash,
+            approvals[0].payload["authority_evidence_hash"],
+        )
+        self.assertEqual(command.approval_id, approvals[0].payload["reference_id"])
+
+    def test_chat_readiness_rejects_wrong_approval_ticket_and_handoff_hash(self) -> None:
+        ticket = make_ticket("chat-learning-wrong-approval")
+        grant = make_infrastructure_grant(ticket, grant_id="chat-learning-wrong-grant")
+        self.store.register_infrastructure_grant(grant, at=NOW)
+        self.store.register_ticket(
+            ticket,
+            infrastructure_grant_hash=grant.grant_hash,
+            stored_at=NOW + timedelta(milliseconds=1),
+        )
+        _, command = self._admit_chat(ticket, grant)
+        ledger = self._ledger()
+        cycle_id = self._decision(ticket, ledger)
+        ledger.record_approval(
+            ApprovalReference(
+                cycle_id=cycle_id,
+                reference_id=command.approval_id,
+                state=ApprovalState.APPROVED,
+                occurred_at=command.created_at,
+                ticket_hash=digest("wrong-learning-ticket"),
+                authority_kind="testnet_chat_approval_unattested",
+                authority_evidence_hash=digest("wrong-learning-handoff"),
+            ),
+            idempotency_key="wrong-chat-approval-reference",
+        )
+        legs = self.store.get_legs(command.command_id)
+        LearningRecorder(ledger).record_execution_reference(
+            cycle_id,
+            command,
+            legs,
+            state=ExecutionState.AUTHORIZED,
+            occurred_at=command.created_at,
+        )
+        projector = ExecutionLearningProjector(
+            self.store,
+            LearningRecorder(ledger),
+            settlement_asset="USDC",
+        )
+
+        with self.assertRaisesRegex(
+            Exception, "learning authorization evidence is incomplete"
+        ):
+            projector.require_entry_ready(command.command_id)
+
+    def test_chat_readiness_rejects_wrong_execution_hash_and_cloids(self) -> None:
+        ticket = make_ticket("chat-learning-wrong-execution")
+        grant = make_infrastructure_grant(ticket, grant_id="chat-learning-exec-grant")
+        self.store.register_infrastructure_grant(grant, at=NOW)
+        self.store.register_ticket(
+            ticket,
+            infrastructure_grant_hash=grant.grant_hash,
+            stored_at=NOW + timedelta(milliseconds=1),
+        )
+        _, command = self._admit_chat(ticket, grant)
+        ledger = self._ledger()
+        cycle_id = self._decision(ticket, ledger)
+        recorder = LearningRecorder(ledger)
+        authorization = self.store.get_chat_authorization_by_id(command.approval_id)
+        recorder.record_chat_approval_reference(
+            cycle_id,
+            authorization,
+            state=ApprovalState.APPROVED,
+        )
+        ledger.record_execution(
+            ExecutionReference(
+                cycle_id=cycle_id,
+                command_id=command.command_id,
+                state=ExecutionState.AUTHORIZED,
+                occurred_at=command.created_at,
+                execution_record_hash=digest("wrong-learning-execution-record"),
+                client_order_ids=("wrong-entry", "wrong-stop", "wrong-target"),
+            ),
+            idempotency_key="wrong-chat-execution-reference",
+        )
+        projector = ExecutionLearningProjector(
+            self.store,
+            recorder,
+            settlement_asset="USDC",
+        )
+
+        with self.assertRaisesRegex(
+            Exception, "learning authorization evidence is incomplete"
+        ):
+            projector.require_entry_ready(command.command_id)
 
     def test_recovery_close_economics_reach_learning_and_review(self) -> None:
         ticket, _ = self.admit_one()
