@@ -42,7 +42,7 @@ staged under an explicit `profitability_qualified: false` grant.
 | Isolated credential provider | Schema-v3 native role readers, sealed provisioner and nonprinting UID probe implemented; exact pack install and live pre/post-reboot probe evidence pending; no key present |
 | Always-on serialized executor runtime | Implemented with fenced lease, daily-loss sync, strict recovery priority and graceful drain |
 | Direct attended control CLI | Implemented as an administrative fallback; confirmation is read from `/dev/tty`, never argv/stdin/MCP |
-| Future remote TESTNET approval | Reserved design: exact `execute trade <proposal-id>` over one immutable, short-lived, fully risk-bound proposal; not implemented, and bare/free-form chat is not authority |
+| Remote TESTNET chat approval | Offline proposal-v2 model, durable single-use approval CAS, mutually authenticated AF_UNIX protocol/client and separate one-field stdio MCP implemented; no listener, trusted presentation, executor admission or installation yet; bare/free-form chat is invalid |
 | TESTNET qualification canary/close core | Schema-v12 typed GTC/query/cancel/terminal and full-residual close semantics, pinned SDK 0.24.0 signing/independent recovery, pre-key/pre-send role fences, one fresh attended same-CLOID cancel successor, dormant bounded foreground worker, one-shot sender and advisory WS decoder implemented; submission stays compiled off and no live venue qualification has run |
 | macOS storage/ACL/install plan | Credential-free, rollback-safe plan/apply artifacts implemented; not applied; encryption, reboot and exhaustion evidence pending |
 | Local Ubuntu VM egress router | Public-input replay plus an apply-disabled root media/host-tool specification implemented; all root/Lima/VM/guest/network phases and live qualification pending; not VPN-qualified |
@@ -91,7 +91,15 @@ bounded MCP research tools + local research database
 non-authoritative TESTNET staging inbox
         |
         v
-administrative `/dev/tty` approval fallback + atomic execution store
+immutable TESTNET proposal + exact `execute trade <proposal-id>`
+        |
+        v
+separate Codex stdio bridge -> UID-452 AF_UNIX broker -> approval receipt
+        |                                  (offline; not yet installed/admitted)
+        +--> administrative `/dev/tty` approval fallback
+        |
+        v
+atomic execution store
         |
         v
 daily-loss sync + independent reconciliation + protection watchdog
@@ -111,9 +119,10 @@ immutable fill/fee/slippage/PnL review by exact component version
 
 Agents explain and route evidence. Deterministic code owns indicators,
 classification, risk arithmetic, hashes, state transitions, signing policy,
-and reconciliation. Free-form chat is never approval. A separate future
-TESTNET lane may accept only the exact `execute trade <proposal-id>` command
-for an immutable, expiring, single-use proposal; that lane is not implemented.
+and reconciliation. Free-form chat is never approval. The offline TESTNET
+lane accepts only the exact `execute trade <proposal-id>` command for an
+immutable, expiring proposal and durably records one approval receipt. It is
+not installed and cannot yet create an execution command.
 
 ## Codex/ChatGPT plugin
 
@@ -121,6 +130,14 @@ for an immutable, expiring, single-use proposal; that lane is not implemented.
 bounded MCP tools. Five tools write only local research, analysis, sentiment,
 or non-authoritative staging state; none approves, signs, reserves capital, or
 writes to an exchange.
+
+A second, deliberately unregistered stdio server exposes only
+`approve_testnet_trade(command_text)`. It is not part of the plugin descriptor,
+research tool catalog or OpenCode profile. It can only forward one bounded
+command to the fixed local TESTNET approval socket, and reports every
+post-send ambiguity as `unknown` without retrying. Until the broker listener,
+ACLs, trusted proposal display and executor admission are commissioned, this
+server remains unavailable in normal Codex sessions.
 
 Research tools:
 
@@ -382,9 +399,10 @@ The execution path now includes:
   recovery-close fills into the learning ledger.
 
 There is intentionally no execution MCP tool. The current `/dev/tty` HMAC path
-is the administrative fallback; the reserved proposal-ID chat provenance lane
-is not implemented or connected to the signer/store. The model process never
-receives the wallet object. The macOS
+is the administrative fallback. The distinct proposal-ID lane can now record a
+durable TESTNET approval offline, but is uninstalled and not connected to
+execution admission or signing. The model process never receives the wallet
+object. The macOS
 launchd executor template is separate from the credential-free research
 service. Linux execution is not advertised because no Linux secret provider
 is implemented; the systemd template is for the credential-free research/MCP

@@ -2,22 +2,22 @@
 
 This module is deliberately infrastructure-neutral.  It opens no socket,
 reads no credential, persists no state, signs nothing, and sends nothing.  A
-future local broker may use these types only after independently establishing
+separate local broker may use these types only after independently establishing
 its peer identity and loading an authoritative proposal from protected local
 storage.
 
 The UID/session provenance modeled here is weak attended friction, not proof
 that a human authored a chat message.  It is structurally forbidden for
-mainnet.  This pure module exposes no tool; a future, separately reviewed
-TESTNET-only Codex bridge may forward only raw command text to the local
-broker and must never gain signer, executor, credential, or venue authority.
+mainnet.  This pure module exposes no tool.  The separately reviewed,
+unregistered TESTNET-only Codex bridge forwards only raw command text to the
+local broker and has no signer, executor, credential, or venue authority.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Context, Decimal, localcontext
+from decimal import Decimal
 from enum import Enum
 import re
 import secrets
@@ -26,9 +26,10 @@ from typing import Any, Mapping
 from .canonical import canonical_decimal, domain_hash, validate_decimal_bounds
 from .domain import Environment, Side
 from .errors import StateConflict, ValidationError
+from .policy import decimal_multiply, decimal_subtract
 
 
-PROPOSAL_HASH_DOMAIN = "trading-harness/testnet-chat-trade-proposal/v1"
+PROPOSAL_HASH_DOMAIN = "trading-harness/testnet-chat-trade-proposal/v2"
 ACCOUNT_BINDING_HASH_DOMAIN = "trading-harness/testnet-chat-account-binding/v1"
 APPROVAL_TEXT_HASH_DOMAIN = "trading-harness/testnet-chat-approval-text/v1"
 APPROVAL_RECEIPT_HASH_DOMAIN = "trading-harness/testnet-chat-approval-receipt/v1"
@@ -37,7 +38,6 @@ LOCAL_CHAT_PROVENANCE = "local-macos-af-unix-uid501-session/v1"
 CHAT_APPROVER_UID = 501
 MAX_PROPOSAL_LIFETIME = timedelta(minutes=5)
 
-_DECIMAL_CONTEXT = Context(prec=96, Emin=-192, Emax=192)
 _HASH_RE = re.compile(r"[0-9a-f]{64}")
 _ADDRESS_RE = re.compile(r"0x[0-9a-f]{40}")
 _PROPOSAL_ID_RE = re.compile(r"tp_[A-Za-z0-9_-]{32}", re.ASCII)
@@ -57,13 +57,19 @@ _PROPOSAL_DOCUMENT_FIELDS = frozenset(
         "stop",
         "target",
         "max_loss",
+        "staging_document_id",
+        "staging_document_hash",
+        "ticket_id",
+        "ticket_hash",
         "account_id",
         "main_account_address",
         "api_wallet_address",
         "account_binding_hash",
-        "risk_plan_hash",
+        "plan_hash",
+        "infrastructure_grant_hash",
         "policy_hash",
-        "snapshot_hash",
+        "account_snapshot_hash",
+        "market_snapshot_hash",
         "uid_session_hash",
         "issued_at",
         "expires_at",
@@ -216,13 +222,19 @@ def _proposal_material(
     stop: object,
     target: object,
     max_loss: object,
+    staging_document_id: object,
+    staging_document_hash: object,
+    ticket_id: object,
+    ticket_hash: object,
     account_id: object,
     main_account_address: object,
     api_wallet_address: object,
     account_binding_hash: object,
-    risk_plan_hash: object,
+    plan_hash: object,
+    infrastructure_grant_hash: object,
     policy_hash: object,
-    snapshot_hash: object,
+    account_snapshot_hash: object,
+    market_snapshot_hash: object,
     uid_session_hash: object,
     issued_at: object,
     expires_at: object,
@@ -237,6 +249,14 @@ def _proposal_material(
         "stop": _positive_decimal(stop, "stop"),
         "target": _positive_decimal(target, "target"),
         "max_loss": _positive_decimal(max_loss, "max_loss"),
+        "staging_document_id": _text(
+            staging_document_id, "staging_document_id", maximum=80
+        ),
+        "staging_document_hash": _hash(
+            staging_document_hash, "staging_document_hash"
+        ),
+        "ticket_id": _text(ticket_id, "ticket_id", maximum=128),
+        "ticket_hash": _hash(ticket_hash, "ticket_hash"),
         "account_id": _text(account_id, "account_id"),
         "main_account_address": _address(
             main_account_address, "main_account_address"
@@ -245,9 +265,17 @@ def _proposal_material(
         "account_binding_hash": _hash(
             account_binding_hash, "account_binding_hash"
         ),
-        "risk_plan_hash": _hash(risk_plan_hash, "risk_plan_hash"),
+        "plan_hash": _hash(plan_hash, "plan_hash"),
+        "infrastructure_grant_hash": _hash(
+            infrastructure_grant_hash, "infrastructure_grant_hash"
+        ),
         "policy_hash": _hash(policy_hash, "policy_hash"),
-        "snapshot_hash": _hash(snapshot_hash, "snapshot_hash"),
+        "account_snapshot_hash": _hash(
+            account_snapshot_hash, "account_snapshot_hash"
+        ),
+        "market_snapshot_hash": _hash(
+            market_snapshot_hash, "market_snapshot_hash"
+        ),
         "uid_session_hash": _hash(uid_session_hash, "uid_session_hash"),
         "issued_at": _utc(issued_at, "issued_at"),
         "expires_at": _utc(expires_at, "expires_at"),
@@ -281,11 +309,18 @@ def _proposal_material(
         bracket_valid = checked_target < checked_entry < checked_stop
     if not bracket_valid:
         raise ValidationError("proposal stop/entry/target ordering differs from its side")
-    with localcontext(_DECIMAL_CONTEXT):
-        price_risk = abs(checked_entry - checked_stop) * checked_size
     try:
-        validate_decimal_bounds(price_risk, field="price_risk")
-    except (ArithmeticError, ValueError) as error:
+        positive_stop_distance = decimal_subtract(
+            checked_entry if checked_side is Side.BUY else checked_stop,
+            checked_stop if checked_side is Side.BUY else checked_entry,
+            field="proposal stop distance",
+        )
+        price_risk = decimal_multiply(
+            positive_stop_distance,
+            checked_size,
+            field="proposal price risk",
+        )
+    except (ArithmeticError, TypeError, ValueError) as error:
         raise ValidationError("proposal price risk is outside supported bounds") from error
     if price_risk > checked_max_loss:
         raise ValidationError("proposal stop-distance loss exceeds max_loss")
@@ -300,7 +335,7 @@ def _proposal_material(
         )
 
     material = {
-        "schema_version": "testnet_chat_trade_proposal.v1",
+        "schema_version": "testnet_chat_trade_proposal.v2",
         "proposal_id": normalized["proposal_id"],
         "environment": Environment.TESTNET.value,
         "instrument": normalized["instrument"],
@@ -310,13 +345,19 @@ def _proposal_material(
         "stop": checked_stop,
         "target": checked_target,
         "max_loss": checked_max_loss,
+        "staging_document_id": normalized["staging_document_id"],
+        "staging_document_hash": normalized["staging_document_hash"],
+        "ticket_id": normalized["ticket_id"],
+        "ticket_hash": normalized["ticket_hash"],
         "account_id": normalized["account_id"],
         "main_account_address": normalized["main_account_address"],
         "api_wallet_address": normalized["api_wallet_address"],
         "account_binding_hash": normalized["account_binding_hash"],
-        "risk_plan_hash": normalized["risk_plan_hash"],
+        "plan_hash": normalized["plan_hash"],
+        "infrastructure_grant_hash": normalized["infrastructure_grant_hash"],
         "policy_hash": normalized["policy_hash"],
-        "snapshot_hash": normalized["snapshot_hash"],
+        "account_snapshot_hash": normalized["account_snapshot_hash"],
+        "market_snapshot_hash": normalized["market_snapshot_hash"],
         "uid_session_hash": normalized["uid_session_hash"],
         "issued_at": issued,
         "expires_at": expires,
@@ -337,13 +378,19 @@ class TradeProposal:
     stop: Decimal
     target: Decimal
     max_loss: Decimal
+    staging_document_id: str
+    staging_document_hash: str
+    ticket_id: str
+    ticket_hash: str
     account_id: str
     main_account_address: str
     api_wallet_address: str
     account_binding_hash: str
-    risk_plan_hash: str
+    plan_hash: str
+    infrastructure_grant_hash: str
     policy_hash: str
-    snapshot_hash: str
+    account_snapshot_hash: str
+    market_snapshot_hash: str
     uid_session_hash: str
     issued_at: datetime
     expires_at: datetime
@@ -360,13 +407,19 @@ class TradeProposal:
             stop=self.stop,
             target=self.target,
             max_loss=self.max_loss,
+            staging_document_id=self.staging_document_id,
+            staging_document_hash=self.staging_document_hash,
+            ticket_id=self.ticket_id,
+            ticket_hash=self.ticket_hash,
             account_id=self.account_id,
             main_account_address=self.main_account_address,
             api_wallet_address=self.api_wallet_address,
             account_binding_hash=self.account_binding_hash,
-            risk_plan_hash=self.risk_plan_hash,
+            plan_hash=self.plan_hash,
+            infrastructure_grant_hash=self.infrastructure_grant_hash,
             policy_hash=self.policy_hash,
-            snapshot_hash=self.snapshot_hash,
+            account_snapshot_hash=self.account_snapshot_hash,
+            market_snapshot_hash=self.market_snapshot_hash,
             uid_session_hash=self.uid_session_hash,
             issued_at=self.issued_at,
             expires_at=self.expires_at,
@@ -379,7 +432,7 @@ class TradeProposal:
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "schema_version": "testnet_chat_trade_proposal.v1",
+            "schema_version": "testnet_chat_trade_proposal.v2",
             "proposal_id": self.proposal_id,
             "environment": self.environment.value,
             "instrument": self.instrument,
@@ -389,13 +442,19 @@ class TradeProposal:
             "stop": canonical_decimal(self.stop),
             "target": canonical_decimal(self.target),
             "max_loss": canonical_decimal(self.max_loss),
+            "staging_document_id": self.staging_document_id,
+            "staging_document_hash": self.staging_document_hash,
+            "ticket_id": self.ticket_id,
+            "ticket_hash": self.ticket_hash,
             "account_id": self.account_id,
             "main_account_address": self.main_account_address,
             "api_wallet_address": self.api_wallet_address,
             "account_binding_hash": self.account_binding_hash,
-            "risk_plan_hash": self.risk_plan_hash,
+            "plan_hash": self.plan_hash,
+            "infrastructure_grant_hash": self.infrastructure_grant_hash,
             "policy_hash": self.policy_hash,
-            "snapshot_hash": self.snapshot_hash,
+            "account_snapshot_hash": self.account_snapshot_hash,
+            "market_snapshot_hash": self.market_snapshot_hash,
             "uid_session_hash": self.uid_session_hash,
             "issued_at": _time_text(self.issued_at),
             "expires_at": _time_text(self.expires_at),
@@ -414,7 +473,7 @@ class TradeProposal:
         """Return the exact deterministic object an interface must display."""
 
         return {
-            "schema_version": "testnet_chat_trade_proposal_display.v1",
+            "schema_version": "testnet_chat_trade_proposal_display.v2",
             "proposal": self.as_dict(),
             "required_approval_text": self.required_approval_text,
             "testnet_only": True,
@@ -432,12 +491,18 @@ def issue_trade_proposal(
     stop: Decimal,
     target: Decimal,
     max_loss: Decimal,
+    staging_document_id: str,
+    staging_document_hash: str,
+    ticket_id: str,
+    ticket_hash: str,
     account_id: str,
     main_account_address: str,
     api_wallet_address: str,
-    risk_plan_hash: str,
+    plan_hash: str,
+    infrastructure_grant_hash: str,
     policy_hash: str,
-    snapshot_hash: str,
+    account_snapshot_hash: str,
+    market_snapshot_hash: str,
     uid_session_hash: str,
     issued_at: datetime,
     expires_at: datetime,
@@ -460,13 +525,19 @@ def issue_trade_proposal(
         stop=stop,
         target=target,
         max_loss=max_loss,
+        staging_document_id=staging_document_id,
+        staging_document_hash=staging_document_hash,
+        ticket_id=ticket_id,
+        ticket_hash=ticket_hash,
         account_id=account_id,
         main_account_address=main_account_address,
         api_wallet_address=api_wallet_address,
         account_binding_hash=account_binding_hash,
-        risk_plan_hash=risk_plan_hash,
+        plan_hash=plan_hash,
+        infrastructure_grant_hash=infrastructure_grant_hash,
         policy_hash=policy_hash,
-        snapshot_hash=snapshot_hash,
+        account_snapshot_hash=account_snapshot_hash,
+        market_snapshot_hash=market_snapshot_hash,
         uid_session_hash=uid_session_hash,
         issued_at=issued_at,
         expires_at=expires_at,
@@ -491,7 +562,7 @@ def trade_proposal_from_dict(value: Mapping[str, Any]) -> TradeProposal:
         document[key] = item
     if set(document) != _PROPOSAL_DOCUMENT_FIELDS:
         raise ValidationError("trade proposal document fields differ")
-    if document.get("schema_version") != "testnet_chat_trade_proposal.v1":
+    if document.get("schema_version") != "testnet_chat_trade_proposal.v2":
         raise ValidationError("trade proposal schema_version differs")
     proposal = TradeProposal(
         proposal_id=document["proposal_id"],
@@ -503,13 +574,19 @@ def trade_proposal_from_dict(value: Mapping[str, Any]) -> TradeProposal:
         stop=_parse_decimal(document["stop"], "stop"),
         target=_parse_decimal(document["target"], "target"),
         max_loss=_parse_decimal(document["max_loss"], "max_loss"),
+        staging_document_id=document["staging_document_id"],
+        staging_document_hash=document["staging_document_hash"],
+        ticket_id=document["ticket_id"],
+        ticket_hash=document["ticket_hash"],
         account_id=document["account_id"],
         main_account_address=document["main_account_address"],
         api_wallet_address=document["api_wallet_address"],
         account_binding_hash=document["account_binding_hash"],
-        risk_plan_hash=document["risk_plan_hash"],
+        plan_hash=document["plan_hash"],
+        infrastructure_grant_hash=document["infrastructure_grant_hash"],
         policy_hash=document["policy_hash"],
-        snapshot_hash=document["snapshot_hash"],
+        account_snapshot_hash=document["account_snapshot_hash"],
+        market_snapshot_hash=document["market_snapshot_hash"],
         uid_session_hash=document["uid_session_hash"],
         issued_at=_parse_time(document["issued_at"], "issued_at"),
         expires_at=_parse_time(document["expires_at"], "expires_at"),
@@ -561,7 +638,7 @@ def _state_material(
 
 @dataclass(frozen=True, slots=True)
 class TradeApprovalState:
-    """Immutable state intended for a future durable compare-and-swap store."""
+    """Immutable state persisted by the separate durable CAS adapter."""
 
     proposal_id: str
     proposal_hash: str
@@ -665,7 +742,7 @@ def pending_trade_approval(proposal: TradeProposal) -> TradeApprovalState:
 
 @dataclass(frozen=True, slots=True)
 class TestnetChatApprovalReceipt:
-    """Hash-bound event a future broker must persist before acknowledging."""
+    """Hash-bound event the durable broker adapter persists before acknowledgement."""
 
     proposal_id: str
     proposal_hash: str

@@ -26,10 +26,16 @@ NOW = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
 ACCOUNT_ID = "hyperliquid-testnet-primary"
 MAIN_ACCOUNT_ADDRESS = "0x" + "1" * 40
 API_WALLET_ADDRESS = "0x" + "2" * 40
-RISK_PLAN_HASH = "a" * 64
-POLICY_HASH = "b" * 64
-SNAPSHOT_HASH = "c" * 64
-SESSION_HASH = "d" * 64
+STAGING_DOCUMENT_ID = "stg_testnet_eth_001"
+STAGING_DOCUMENT_HASH = "a" * 64
+TICKET_ID = "ticket-testnet-eth-001"
+TICKET_HASH = "b" * 64
+PLAN_HASH = "c" * 64
+INFRASTRUCTURE_GRANT_HASH = "d" * 64
+POLICY_HASH = "e" * 64
+ACCOUNT_SNAPSHOT_HASH = "f" * 64
+MARKET_SNAPSHOT_HASH = "1" * 64
+SESSION_HASH = "2" * 64
 
 
 def proposal(**changes: object):
@@ -41,12 +47,18 @@ def proposal(**changes: object):
         "stop": Decimal("2990"),
         "target": Decimal("3030"),
         "max_loss": Decimal("0.10"),
+        "staging_document_id": STAGING_DOCUMENT_ID,
+        "staging_document_hash": STAGING_DOCUMENT_HASH,
+        "ticket_id": TICKET_ID,
+        "ticket_hash": TICKET_HASH,
         "account_id": ACCOUNT_ID,
         "main_account_address": MAIN_ACCOUNT_ADDRESS,
         "api_wallet_address": API_WALLET_ADDRESS,
-        "risk_plan_hash": RISK_PLAN_HASH,
+        "plan_hash": PLAN_HASH,
+        "infrastructure_grant_hash": INFRASTRUCTURE_GRANT_HASH,
         "policy_hash": POLICY_HASH,
-        "snapshot_hash": SNAPSHOT_HASH,
+        "account_snapshot_hash": ACCOUNT_SNAPSHOT_HASH,
+        "market_snapshot_hash": MARKET_SNAPSHOT_HASH,
         "uid_session_hash": SESSION_HASH,
         "issued_at": NOW,
         "expires_at": NOW + timedelta(seconds=90),
@@ -64,6 +76,17 @@ class TradeProposalTests(unittest.TestCase):
         self.assertRegex(issued.proposal_hash, r"^[0-9a-f]{64}$")
         self.assertRegex(issued.account_binding_hash, r"^[0-9a-f]{64}$")
         self.assertEqual(issued, trade_proposal_from_dict(issued.as_dict()))
+        self.assertEqual(STAGING_DOCUMENT_ID, issued.staging_document_id)
+        self.assertEqual(STAGING_DOCUMENT_HASH, issued.staging_document_hash)
+        self.assertEqual(TICKET_ID, issued.ticket_id)
+        self.assertEqual(TICKET_HASH, issued.ticket_hash)
+        self.assertEqual(PLAN_HASH, issued.plan_hash)
+        self.assertEqual(
+            INFRASTRUCTURE_GRANT_HASH,
+            issued.infrastructure_grant_hash,
+        )
+        self.assertEqual(ACCOUNT_SNAPSHOT_HASH, issued.account_snapshot_hash)
+        self.assertEqual(MARKET_SNAPSHOT_HASH, issued.market_snapshot_hash)
         self.assertEqual(
             f"execute trade {issued.proposal_id}",
             issued.required_approval_text,
@@ -98,6 +121,21 @@ class TradeProposalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "account_binding_hash"):
             replace(issued, api_wallet_address="0x" + "3" * 40)
 
+    def test_stop_distance_loss_rounds_conservatively_at_decimal_bound(self) -> None:
+        entry = Decimal("1")
+        stop = Decimal("0." + "0" * 95 + "1")
+        size = Decimal("0." + "9" * 96)
+        understated_limit = Decimal("0." + "9" * 95 + "8")
+
+        with self.assertRaisesRegex(ValidationError, "exceeds max_loss"):
+            proposal(
+                entry=entry,
+                stop=stop,
+                target=Decimal("2"),
+                size=size,
+                max_loss=understated_limit,
+            )
+
     def test_document_parser_rejects_extra_noncanonical_and_tampered_fields(self) -> None:
         issued = proposal()
         document = issued.as_dict()
@@ -116,6 +154,21 @@ class TradeProposalTests(unittest.TestCase):
         tampered["target"] = "3040"
         with self.assertRaisesRegex(ValidationError, "proposal_hash"):
             trade_proposal_from_dict(tampered)
+
+        for field in (
+            "staging_document_hash",
+            "ticket_hash",
+            "plan_hash",
+            "infrastructure_grant_hash",
+            "policy_hash",
+            "account_snapshot_hash",
+            "market_snapshot_hash",
+        ):
+            with self.subTest(field=field):
+                rebound = dict(document)
+                rebound[field] = "9" * 64
+                with self.assertRaisesRegex(ValidationError, "proposal_hash"):
+                    trade_proposal_from_dict(rebound)
 
         with self.assertRaisesRegex(ValidationError, "proposal_hash"):
             replace(issued, size=Decimal("0.005"))

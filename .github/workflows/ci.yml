@@ -67,7 +67,7 @@ jobs:
       - name: Install pinned optional MCP runtime
         run: python -m pip install --disable-pip-version-check -e ".[mcp]"
       - name: Run MCP contract tests
-        run: python -m unittest tests.test_tool_api tests.test_mcp_server -v
+        run: python -m unittest tests.test_tool_api tests.test_mcp_server tests.test_testnet_chat_mcp -v
       - name: Qualify the real MCP stdio protocol
         run: python tests/mcp_stdio_smoke.py
       - name: Qualify an isolated cached plugin copy

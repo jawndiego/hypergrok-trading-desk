@@ -48,11 +48,13 @@
   pre-key/pre-send role fences, a full bounded foreground lifecycle and one
   fresh same-CLOID cancel successor. Submission remains compiled off and live
   qualification has not run.
-- Added a pure TESTNET chat-approval foundation with immutable account/risk-
-  bound proposals, 192-bit short-lived IDs, exact
-  `execute trade <proposal-id>` parsing and single-use approval transitions.
-  The future Codex bridge and local broker remain unimplemented; model-selected
-  tool calls are explicitly not treated as cryptographic human attestation.
+- Added TESTNET chat proposal v2 with 192-bit short-lived IDs and exact
+  staging/ticket/plan/grant/economics/account/policy/snapshot/session binding;
+  a separate durable single-use approval CAS; a bounded mutually peer-checked
+  AF_UNIX protocol/client; and an unregistered one-field stdio MCP for exact
+  `execute trade <proposal-id>`. Model-selected tool calls are explicitly not
+  cryptographic human attestation. Listener/ACL installation, trusted proposal
+  presentation, executor admission and signing remain disconnected.
 - Added credential-free, plan-gated macOS APFS quota, final-path pre/post-init
   ACL, exact offline install and storage-headroom guard artifacts. No machine
   mutation or service activation is implied.

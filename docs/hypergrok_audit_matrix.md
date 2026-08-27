@@ -45,7 +45,9 @@ No current-main artifact qualifies for unchanged reuse in the capital-bearing pa
 - Retain the MIT license unchanged.
 - Preserve desk vocabulary, evidence discipline, testnet-first intent, no-blind-retry intent, incident structure, and process/outcome review as requirements.
 - Rewrite read-only research, market-data, thesis-validation, monitoring, lifecycle, and review behavior against typed services and immutable stores.
-- Reject prompt-conferred financial authority, shared-host key handling, chat approval, agent-authored risk PASS, agent execution, mutable Markdown state, and copy-paste write snippets.
+- Reject prompt-conferred financial authority, shared-host key handling,
+  unbound/free-form chat approval, agent-authored risk PASS, agent execution,
+  mutable Markdown state, and copy-paste write snippets.
 - Use Hyperliquid examples as contract-test and fault-test fixtures, not executable skills.
 
 ## 4. Critical Cross-Cutting Findings
@@ -53,7 +55,7 @@ No current-main artifact qualifies for unchanged reuse in the capital-bearing pa
 | ID | Finding | Consequence | Required control |
 | --- | --- | --- | --- |
 | HG-P0-001 | Named roles, `writes_to_exchange` metadata, and `alwaysApply` prompts are treated as authority | Any same-host agent/process can potentially reach the key and venue | Agents have no credentials; mTLS/RBAC control plane; isolated signer and egress allowlist |
-| HG-P0-002 | Approval is a replayable chat phrase, not an authorization object | Approval can be edited, replayed, or applied to changed economics | Trusted approval UI; semantic-intent hash; signed, expiring, audience-bound, single-use command authorization |
+| HG-P0-002 | Approval is a replayable chat phrase, not an authorization object | Approval can be edited, replayed, or applied to changed economics | Trusted approval UI; semantic-intent hash; signed, expiring, audience-bound, single-use command authorization; any weaker TESTNET-only chat gesture must name one immutable, expiring, fully bound proposal and durably consume once |
 | HG-P0-003 | Risk is sized to the stop trigger, not stressed executable loss | Example states $51 while its own bound permits $124.95 before costs, with larger gap risk possible | Exact-decimal risk engine; worst-fill/gap/liquidity stress; hard platform ceilings; segregated capped account |
 | HG-P0-004 | CLOIDs/nonces and `send once` exist only as prose/file conventions | Concurrent or late requests can duplicate exposure | Serializable per-account admission; atomic nonce/CLOID allocation; durable outbox; action-specific unknown-outcome contract |
 | HG-P0-005 | Partial or per-leg fills can leave exposure without protection | Live position may wait for another agent/human turn | Standing account-safety policy; continuous protected-size reconciliation; serialized reduce-only protection/flatten |

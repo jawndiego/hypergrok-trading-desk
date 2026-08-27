@@ -4,7 +4,8 @@ Status: **offline engine, schema-v12 qualification core/result coordinator,
 credential-free signer-envelope, pinned SDK 0.24.0 signer and independent
 recovery verifier, dormant one-shot sender, advisory WebSocket decoder and
 local response-drop/crash harness, machine plans and guest/VM renderers
-and role-bound full-lifecycle qualification orchestration implemented;
+and role-bound full-lifecycle qualification orchestration implemented; the
+separate TESTNET chat proposal/store/wire/stdio-MCP foundation is implemented;
 submission promotion, live qualification, machine apply and network
 qualification incomplete; first harness order write remains blocked**.
 
@@ -55,6 +56,14 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   read-only replay verifier. A root media/host-tool specification is
   implemented but its launcher/apply gates remain false; writable Lima state,
   guest installation and preflight are also disabled.
+- A TESTNET-only proposal-v2 model binds the staging document, ticket,
+  protected plan, grant, displayed economics, account identity, policy,
+  account/market snapshots, broker session and expiry. A separate control
+  SQLite adapter durably performs its single-use approval CAS. The bounded
+  AF_UNIX handler and client mutually verify UID/GID before request bytes, and
+  a separate stdio MCP exposes only `approve_testnet_trade(command_text)`. No
+  listener, ACL install, trusted display path or executor admission exists, so
+  this is not yet a callable or capital-bearing path.
 
 These facts do not make the machine transaction-ready.
 
@@ -65,10 +74,10 @@ Keychain secret. Router-only WireGuard keys are generated during item 6 on
 their owning machines because their derived public keys are renderer inputs.
 
 1. **macOS security update.** Completed on the current host on 2026-08-26:
-   macOS was updated from 15.3.1 to 26.6.2 build 25G83 and rebooted. The pinned
-   Python 3.11.16/OpenSSL 3.5.8 runtime and all 849 tests were requalified on
-   Python 3.11, 3.12 and 3.13. Retain that evidence and repeat this gate after
-   any later OS/runtime change.
+   macOS was updated from 15.3.1 to 26.6.2 build 25G83 and rebooted. On that
+   updated host, the pinned Python 3.11.16/OpenSSL 3.5.8 runtime and the current
+   1,134-test suite were requalified on Python 3.11, 3.12 and 3.13. Retain that
+   evidence and repeat this gate after any later OS/runtime change.
 2. **Root inventory.** Seal the exact-commit deployment pack and retain owner,
    mode, ACL, mount, LaunchDaemon and empty-state evidence from an attended
    root console.
@@ -111,6 +120,12 @@ their owning machines because their derived public keys are renderer inputs.
    ENOSPC and prove executor execution/nonce/daily-loss WAL commits and one
    verification snapshot still succeed. Prove the executor shutdown threshold
    leaves recovery headroom.
+10. **Chat-control storage and socket.** Render a separate UID-452-owned
+    mode-0700 proposal-store parent and dedicated fixed AF_UNIX socket parent.
+    Prove UID 501 can only traverse/connect to the socket and cannot create,
+    replace, list or read control state. Add named-ACL inspection, stale-node
+    refusal, restart/crash evidence and broker-generation persistence before
+    installing either the broker or its unregistered stdio MCP client.
 
 No `init`, venue/Keychain secret, grant issuance, launchd installation or
 harness venue write belongs in this phase.
@@ -131,15 +146,17 @@ code and attended-evidence gaps:
 | Router health as an admission capability | No application router-health field or pre-admission guard exists |
 | Executor free-space shutdown threshold | External fail-closed guard and launchd templates exist; root-owned config, real APFS `statvfs`, shutdown and restart behavior are not installed/qualified |
 | Signed qualification artifact | No artifact builder/signing workflow exists; the deliverable is still manual |
+| Codex chat proposal approval | Proposal v2, durable approval CAS, mutual peer-checked wire/client and exact one-field stdio MCP exist offline. Missing: trusted stored-proposal presentation, fixed listener/ACL service, broker-generation record, at-least-once control-to-executor handoff, atomic `ExecutionStore` chat consume/reservation/outbox admission, and normal-bracket PRE_KEY/PRE_SEND `userRole` fences |
 
 Close the remaining items as narrow TESTNET-only, durable workflows with
 observable failure tests. They may not become generic MCP execution tools,
 widen signer actions, expose mainnet, or weaken the one-shot unknown-outcome
-contract. The current `/dev/tty` HMAC is an administrative fallback. A future
-remote lane is reserved only for exact `execute trade <proposal-id>` approval
-of an immutable, short-lived, account/policy/risk-bound single-use proposal;
-it is not implemented and bare/free-form chat remains invalid. Until the live
-gates pass, the first harness order write remains blocked.
+contract. The current `/dev/tty` HMAC is an administrative fallback. The
+offline remote lane recognizes only exact `execute trade <proposal-id>` for an
+immutable, short-lived, fully bound proposal and can durably record approval,
+but is neither installed nor connected to execution. Bare/free-form chat
+remains invalid. Until the live gates pass, the first harness order write
+remains blocked.
 
 ## Credential provisioning
 

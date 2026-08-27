@@ -17,17 +17,20 @@ This repository builds an agent-runtime-neutral trading research and execution h
 
 - No agent, prompt, skill, webpage, generated script, or free-form chat message
   may hold a signing key, create authority by itself, or call a venue write
-  endpoint. A future TESTNET chat-approval lane is reserved only for the exact
+  endpoint. The offline TESTNET chat-approval lane recognizes only the exact
   `execute trade <proposal-id>` command over an immutable, short-lived,
-  fully risk-bound proposal; it is not implemented and a bare command is
-  invalid.
+  staging/ticket/plan/grant/account/policy-bound proposal; a bare command is
+  invalid. Its durable approval CAS, mutually authenticated AF_UNIX protocol
+  and separate one-field stdio MCP exist, but no listener, trusted presentation
+  path, executor admission or installation exists.
 - The isolated TESTNET worker has a deployable write path, but it is a separate process and CLI. It is never an MCP tool or skill capability. Mainnet remains hard-disabled.
 - The foundation admits only local `infrastructure_testnet` `simulate_order`
   commands; deny strategy, shadow, mainnet, and systematic grants.
 - `stage_trade_candidate` can create only an all-false authority document.
   Current authorization uses exact confirmation read directly from `/dev/tty`
-  by the role-isolated CLI as an administrative fallback. Do not reinterpret
-  ordinary chat as that HMAC permit or expose the signer/store to MCP.
+  by the role-isolated CLI as an administrative fallback. The distinct chat
+  receipt must never masquerade as that HMAC permit. Do not expose the signer,
+  execution store, proposal economics or receipt store to either MCP.
 - Evidence status and deployment authority are separate.
 - Use exact `Decimal`/integer monetary arithmetic; reject binary floats for prices, sizes, fees, and limits.
 - Admission must atomically reserve risk, consume a single-use command authorization, update policy counters, and create the durable outbox row before network I/O.
@@ -55,6 +58,10 @@ This repository builds an agent-runtime-neutral trading research and execution h
 - Run `python3 scripts/sync_plugin_runtime.py --check` after changing any module under `src/trading_harness`; the cached plugin runtime must be an exact generated mirror.
 - Keep the venue executor disabled by default. Tests must prove writes fail closed.
 - Update `docs/trading_harness_spec.md` when an invariant, state, authorization model, or promotion gate changes.
+- Keep the chat bridge outside the fifteen-tool research `TOOL_CATALOG` and
+  OpenCode. Its sole tool input is raw `command_text`; it uses stdio only,
+  calls the fixed local AF_UNIX client once and reports post-send ambiguity as
+  `UNKNOWN` with no automatic retry.
 - Add tests for observable invariants and failure transitions, not wording.
 - Preserve upstream provenance in `UPSTREAM.md`; do not copy legacy capital-path prompts or snippets back into runtime locations.
 
@@ -96,6 +103,12 @@ This repository builds an agent-runtime-neutral trading research and execution h
 - Credential-free macOS plans live under `deploy/macos/testnet`. They are
   plan-only by default and do not authorize APFS creation, ACL mutation,
   application installation, `init`, launchd, credentials or venue calls.
+- Read `docs/testnet_chat_approval.md` before changing the remote TESTNET
+  approval path. The fixed broker must run as UID 452, verify UID/GID 501 before
+  reading, and be mutually verified by the UID-501 bridge before it sends. The
+  control database needs a canonical UID-452 mode-0700 parent, mode-0600
+  single-link files and no UID-501 ACL. Those ACL/listener/install checks and
+  executor-side atomic consumption are still promotion blockers.
 - Never provision a real secret through `security add-generic-password` or
   trust the shared `/usr/bin/security` executable in an item ACL. The macOS
   execution design requires the sealed role-specific native readers, fixed

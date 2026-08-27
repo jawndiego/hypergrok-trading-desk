@@ -10,19 +10,22 @@ adapter gaps remain; live venue qualification not run**.
 The ordinary isolated TESTNET executor contains a real write boundary. The
 qualification worker is complete but its submission authority is compiled
 off. No account, API wallet or worker service is configured by the repository,
-and no Codex/MCP tool can invoke either capital path.
+and no installed Codex/MCP tool can invoke either capital path.
 
 This checklist is a release gate, not a setup shortcut. Unit tests, local paper
 fills and valid SDK signatures do not prove that an API wallet is registered to
 the intended account or that venue recovery works.
 
 The current attended approval-HMAC path reads exact confirmation from
-`/dev/tty` and remains the administrative fallback. A separate future TESTNET
-provenance lane is reserved for the exact `execute trade <proposal-id>` command
-over an immutable, short-lived proposal binding entry, size, stop, target,
-maximum loss, account and policy. It is not implemented; a bare command or
-free-form chat is invalid, and no chat-facing surface may receive the signer or
-execution store.
+`/dev/tty` and remains the administrative fallback. The separate TESTNET
+provenance lane recognizes only exact `execute trade <proposal-id>` over an
+immutable, short-lived proposal binding the staged ticket/plan/grant, entry,
+size, stop, target, maximum loss, account, policy, snapshots and broker
+session. Its durable approval CAS, AF_UNIX protocol/client and one-field stdio
+MCP exist offline, but the listener/ACLs, trusted presentation, executor
+admission and normal-bracket send-time account fences are not qualified. A
+bare command or free-form chat is invalid, and no chat-facing surface may
+receive the signer or execution store.
 
 ## User-provided prerequisites
 
@@ -273,9 +276,11 @@ account snapshot, router manifest/health result and reconciliation result.
    `profitability_qualified: false` infrastructure grant, run one Codex/ChatGPT
    analysis, stage its exact hash, and prove every staging authority flag is
    false. Review and authorize it through the current direct-terminal
-   administrative fallback; a future proposal-ID chat lane may replace this
-   step only after its separate durable provenance is implemented and
-   qualified. Preserve the learning cycle and command IDs.
+   administrative fallback. The proposal-ID chat lane may replace this step
+   only after its trusted display, fixed broker service/ACLs, durable
+   control-to-executor import, atomic `ExecutionStore` admission and
+   PRE_KEY/PRE_SEND `userRole` checks are implemented and qualified. Preserve
+   the learning cycle and command IDs.
 4. Submit a minimum-size long IOC + reduce-only SL + TP as `normalTpsl`.
    Accept only a full entry plus an independently visible stop covering the
    exact signed position.

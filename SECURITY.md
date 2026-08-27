@@ -5,7 +5,7 @@
 This branch has no configured or qualified live account. It contains an armed
 TESTNET-only signer, one-shot transport, entry/recovery dispatchers, typed
 reconciliation, and a macOS Keychain reader. Mainnet is hard-disabled and no
-Codex/MCP tool can reach the execution boundary.
+installed Codex/MCP tool can reach the execution boundary.
 
 The packaged ChatGPT/Codex plugin and OpenCode connection expose fifteen
 bounded research/learning tools. Five write only local research, analysis,
@@ -25,6 +25,10 @@ Use this fork's GitHub **Report a vulnerability** flow to open a private securit
 - An agent role or `writes_to_exchange` label is not an authorization boundary.
 - Agents must never receive exchange signing credentials or direct venue-write capability.
 - MCP tool annotations are advisory; authorization and validation are repeated inside every handler. Local research writes confer no capital authority.
+- A separate, unregistered TESTNET stdio MCP has one raw `command_text` field
+  and can only forward one request to a fixed local AF_UNIX approval broker. It
+  is not in the research plugin/OpenCode surface and cannot access proposal
+  economics, credentials, execution state, admission, signing or venue I/O.
 - The signer code must run under a separate security principal with a narrow typed API, explicit account/network/asset/recovery-CLOID/action allowlists, restricted egress, and managed key storage. Checked-in service templates do not provision or qualify that principal.
 - The optional Ubuntu VM is a network-only local router. It receives no venue
   credential, executor state, repository mount or authority. Its
@@ -33,7 +37,11 @@ Use this fork's GitHub **Report a vulnerability** flow to open a private securit
 - Capital HTTP clients ignore ambient urllib proxy discovery, and executor
   config rejects proxy, CA-bundle and TLS-key-log environment variables. Route
   selection and trust roots may not be silently replaced by a login shell.
-- Human approval must occur in the separate operator control plane and bind the exact staged risk ticket. The current TESTNET CLI reads confirmation directly from `/dev/tty`; approval in agent chat or piped stdin is invalid.
+- Human approval must bind the exact staged risk ticket. The current installed
+  TESTNET CLI reads confirmation directly from `/dev/tty`. The offline weaker
+  chat lane recognizes only exact `execute trade <proposal-id>` for an already
+  stored, fully bound proposal; bare/free-form/piped text is invalid, and its
+  receipt always records `human_message_attested=false`.
 - `/dev/tty` is an attended TESTNET gesture, not cryptographic proof of a
   human. Running an agent shell under the control/executor UID is unsupported;
   production separation depends on distinct OS identities, file ACLs and
@@ -66,6 +74,12 @@ Use this fork's GitHub **Report a vulnerability** flow to open a private securit
 - The attended control identity may write the execution database and shared
   staging/learning state required for exact authorization, but it receives no
   directory capability for nonce, daily-loss or control-socket state.
+- The chat proposal database is separate control-plane state. Its adapter
+  requires a canonical current-UID mode-0700 parent and mode-0600 regular
+  single-link database/WAL/SHM files. Live use remains forbidden until named
+  ACLs, the fixed socket parent/node, stale-node handling and broker generation
+  are verified so UID 501 can connect but cannot read, create, replace or
+  delete control state.
 
 ### Config-bound state ownership
 
@@ -143,14 +157,16 @@ exhaustion probe pass after reboot, resource isolation is unqualified and
 always-on operation is forbidden.
 
 The local router and machine setup do not make the live checklist executable.
-The qualification-only GTC/query/cancel, retained snapshot and attended-close
-semantics have a separate TESTNET-only durable core, but no SDK signer, sender,
-credential loader, executor CLI or MCP path can dispatch them. Transport-result
-transitions, terminal reservation release, WebSocket recovery and bounded
-forwarded-request/response-drop control remain reviewed implementation gaps.
-The first harness order write is forbidden until those gaps and the commissioning
-sequence in [`docs/testnet_commissioning.md`](docs/testnet_commissioning.md)
-are closed.
+The qualification-only GTC/query/cancel, retained snapshot, attended-close and
+fresh same-CLOID cancel-successor semantics have a separate TESTNET-only
+durable core, pinned SDK signer/recovery verifier, dormant sender and bounded
+foreground lifecycle; submission remains compiled off. The chat proposal CAS,
+mutually peer-checked protocol/client and stdio MCP likewise remain offline.
+They still lack a trusted proposal presentation path, installed listener/ACLs,
+atomic executor-side chat admission and normal-bracket PRE_KEY/PRE_SEND
+`userRole` fences. The first harness order write is forbidden until these and
+the commissioning sequence in
+[`docs/testnet_commissioning.md`](docs/testnet_commissioning.md) are closed.
 
 The normative requirements are in [`docs/trading_harness_spec.md`](docs/trading_harness_spec.md).
 
@@ -162,6 +178,10 @@ The normative requirements are in [`docs/trading_harness_spec.md`](docs/trading_
   harness qualification evidence. API-wallet registration is an account
   prerequisite and still must occur outside agents/chat/repository.
 - Treating the local testnet HMAC approval helper as suitable for mainnet; mainnet requires a later independently reviewed hardware-backed/asymmetric authority.
+- Enabling the TESTNET chat MCP/broker before its fixed listener, ACLs, trusted
+  proposal presentation, execution import/admission and send-time identity
+  fences are implemented and commissioned; using it for mainnet is always
+  forbidden.
 - Loading an API-wallet or main-wallet key.
 - Transfers, withdrawals, bridges, vault/subaccount fund movement, builder fees, or staking actions.
 - Enabling an adapter by environment variable alone.

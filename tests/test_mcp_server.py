@@ -433,7 +433,7 @@ class PluginWiringTests(unittest.TestCase):
         self.assertNotIn("env", server)
         self.assertNotIn("env_vars", server)
 
-    def test_optional_runtime_is_exactly_pinned_and_has_one_entrypoint(self) -> None:
+    def test_optional_runtime_is_exactly_pinned_and_research_entrypoint_is_stable(self) -> None:
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
         self.assertEqual(

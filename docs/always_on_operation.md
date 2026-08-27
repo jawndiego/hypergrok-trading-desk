@@ -2,7 +2,7 @@
 
 Status: deployable research node plus an isolated, mainnet-impossible TESTNET
 worker. No account is configured or live-qualified by the repository, and no
-agent tool can approve, sign, or submit an order.
+installed agent tool can approve, sign, or submit an order.
 
 The first always-on process is the credential-free, research-only node. It polls
 registered assets, writes immutable research artifacts and heartbeats to one
@@ -479,6 +479,33 @@ sudo -u trading-control -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /o
 sudo -u trading-control -- /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /opt/trading-desk/current/executor/.venv/bin/trading-harness-executor authorize-stage --config /etc/trading-desk/testnet-executor.toml --grant /var/db/trading-desk/control-private/grants/learning-grant-g1.json --document-id stg_REVIEWED_ID --approver-id local-operator
 ```
 
+### Separate TESTNET chat approval path — offline only
+
+The repository now contains an unregistered stdio MCP whose sole tool is
+`approve_testnet_trade(command_text)`. It runs only as UID 501, accepts no
+socket/account/action/environment argument, verifies the fixed AF_UNIX peer as
+the OS-observed UID 452 before sending, forwards one bounded request and never
+retries. The broker handler independently verifies UID/GID 501 before reading,
+accepts only exact `execute trade <proposal-id>`, and can atomically record one
+approval in the separate control-owned SQLite store. All results keep
+`human_message_attested`, `mainnet_authorized`, `execution_performed` and
+`venue_write_attempted` false.
+
+That code is not yet installed or added to the plugin MCP descriptor. No
+fixed-path listener, named-ACL verifier, broker-generation record or trusted
+read-only proposal presentation path exists. The approval receipt is also not
+imported into `ExecutionStore`; normal bracket signing lacks the qualification
+path's fresh PRE_KEY/PRE_SEND `userRole` fences. Therefore the chat path cannot
+currently queue or submit an order.
+
+After those gates are implemented and commissioned, the intended TESTNET UX
+is: Codex displays the exact control-produced proposal (entry, size, stop,
+target, maximum loss, account and expiry); the user replies exactly
+`execute trade <proposal-id>`; the isolated bridge records approval; and the
+executor independently refreshes account/market/policy state before atomic
+admission. `/dev/tty` remains an administrative fallback, not the primary
+remote UX. Mainnet never uses this weaker chat provenance.
+
 After the configured MCP passes in the foreground, render the matching
 `deploy/launchd/com.jawndiego.trading-desk-learning-mcp.plist.example` or
 `deploy/systemd/trading-desk-learning-mcp.service.example`. It binds only to
@@ -647,15 +674,13 @@ audit; never copy them into the execution/control-shared parent.
 
 The public split prepare/sign commands are disabled, and `run` fails before
 config/state/Keychain/network while qualification submission remains compiled
-off. Even after sender promotion, the current one-phase run contract is not a
-complete live canary. In particular, an expired proven-unsent cancel retains
-reservation and halts the command, but no fresh attended same-CLOID cancel
-reauthorization/account-safety lane exists. Live promotion therefore still
-requires read-proven-open state followed by fresh bounded cancel authority,
-never a blind retry, and one in-process place/query/cancel/terminal exercise.
-It also requires a final stable `userRole` mapping read after claim and
-immediately before key use/send, bound into attempt evidence, because the
-agent-signed wire does not encode the intended main account.
+off. The full bounded run now composes place, paired CLOID/OID reads, cancel and
+terminal reconciliation. An expired proven-unsent cancel retains reservation;
+one fresh attended, read-proven-open same-CLOID successor may use a new permit,
+action, envelope and global nonce. It never becomes a blind retry. Both PRE_KEY
+and PRE_SEND require fresh paired `userRole` reads bound through attempt
+evidence and submission authority. Live promotion still requires enabling the
+compiled gate through review and exercising this complete path against TESTNET.
 
 ## Promotion boundary
 

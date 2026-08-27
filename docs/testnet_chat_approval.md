@@ -1,14 +1,17 @@
 # Local chat approval foundation for TESTNET
 
-Status: **pure proposal, exact-text parser and single-use transition model
-implemented; AF_UNIX broker, durable schema and executor integration are not
-implemented; mainnet prohibited**.
+Status: **immutable proposal v2, exact-text parser, durable approval CAS,
+mutually authenticated AF_UNIX protocol/client and a separate one-tool stdio
+MCP adapter implemented offline; listener installation, trusted proposal
+presentation and executor admission are not implemented; mainnet prohibited**.
 
 This design adds a convenient attended TESTNET approval gesture without making
 chat, Codex, MCP or a model part of the signing or submission boundary. The
-implemented module is
-`src/trading_harness/testnet_chat_approval.py`. It imports no socket,
-credential, signer, transport or execution-store module and performs no I/O.
+pure model is `src/trading_harness/testnet_chat_approval.py`. The independent
+durable adapter is `testnet_chat_approval_store.py`; the bounded wire and
+client are `testnet_chat_broker.py` and `testnet_chat_bridge.py`; and the
+separate stdio adapter is `testnet_chat_mcp.py`. None imports a credential,
+signer, venue transport or execution-store module.
 
 ## Security meaning
 
@@ -41,10 +44,10 @@ Consequences:
 - A receipt always records `human_message_attested=false`,
   `mainnet_authorized=false`, `execution_performed=false` and
   `venue_write_attempted=false`.
-- This pure foundation exposes no MCP or function tool. The required future
-  Codex channel is a separately reviewed, narrow TESTNET-only bridge
-  tool/client whose sole input is raw `command_text`. It is not the research
-  MCP, signer or executor and gains no other method or parameter.
+- The separately implemented `approve_testnet_trade` stdio MCP has exactly one
+  `command_text` field. It remains absent from the installed plugin descriptor,
+  the fifteen-tool research MCP and OpenCode, and no broker listener is
+  installed, so it is not currently callable from Codex.
 - The model selects whether to call that bridge tool. Neither the tool call nor
   UID/session provenance cryptographically attests that the human authored the
   command, so the bridge must never authorize mainnet or be described as
@@ -61,11 +64,13 @@ Consequences:
   `secrets.token_urlsafe(24)`, providing 192 bits of OS-generated entropy.
 - fixed `environment=testnet`, instrument and side;
 - exact `Decimal` entry, size, stop, target and maximum loss;
+- exact staging-document ID/hash, ticket ID/hash, protected-plan hash and
+  infrastructure-grant hash;
 - canonical account ID, lowercase Hyperliquid main-account address and
   lowercase API-wallet address;
 - `account_binding_hash`, computed over the TESTNET environment, Hyperliquid
   venue, account ID and both addresses;
-- risk-plan, policy, account/market snapshot and broker-session hashes;
+- policy, separate account/market snapshot and broker-session hashes;
 - UTC issue/expiry instants with a maximum lifetime of five minutes; and
 - a domain-separated hash over every preceding field.
 
@@ -75,9 +80,10 @@ must satisfy `stop < entry < target`; for a sell it must satisfy
 must not exceed `max_loss`. Binary floating point is rejected.
 
 The hashes provide deterministic binding and tamper evidence; they are not a
-signature. The future proposal issuer must derive the risk-plan, policy and
-snapshot hashes from already verified authoritative records. It must create
-the proposal and initial `PENDING` state in storage that UID 501 cannot modify.
+signature. The future proposal issuer must derive the staging, ticket, plan,
+grant, policy and account/market snapshot hashes from already verified
+authoritative records. It must create the proposal and initial `PENDING` state
+in storage that UID 501 cannot modify.
 It must not accept a caller's self-asserted account-binding hash: the module
 derives that hash from the typed account identity itself.
 
@@ -102,19 +108,21 @@ Codex/ChatGPT presentation must:
 4. never claim that displaying, replying to or recording the proposal placed
    an order.
 
-This slice gives the model no execution tool. The intended later remote UX adds
-a separate TESTNET-only Codex bridge tool/client—not a method on the existing
-research MCP. Its only input is the raw `command_text`; it forwards those bytes
-to the local broker and cannot load proposal economics, read a receipt store,
-sign, submit or call an executor itself. The broker remains the component that
-checks UID/session provenance, parses the exact sentence, loads the protected
-proposal and performs the durable approval transition. This design does not
-implement that bridge yet.
+This slice gives the model no execution tool. The implemented, separately
+named stdio bridge is not a method on the existing research MCP. Its only input
+is raw `command_text`; it forwards those bytes unchanged and cannot load
+proposal economics, read a receipt store, sign, submit or call an executor.
+The broker protocol remains the component that checks UID/session provenance,
+parses the exact sentence, loads the protected proposal and performs the
+durable approval transition. A trusted read-only path that publishes the exact
+stored `display_payload()` to Codex is still missing; model-reconstructed
+economics are not an acceptable substitute.
 
-## Future macOS AF_UNIX broker contract
+## macOS AF_UNIX broker protocol and remaining service contract
 
-The broker is a separate, local, non-network service. A later implementation
-must satisfy every condition below before it can be promoted.
+The reviewed handler and client are separate, local and non-network. They do
+not bind or listen on a socket. A later installed service must satisfy every
+remaining condition below before it can be promoted.
 
 ### Identity and filesystem boundary
 
@@ -130,6 +138,12 @@ must satisfy every condition below before it can be promoted.
   stale socket nodes and unexpected files before listening.
 - The broker process must have no filesystem access to signer, nonce,
   execution, daily-loss or recovery state and no Keychain credential ACL.
+
+The durable store already rejects noncanonical/symlinked parents, requires its
+current UID to own an exact mode-0700 parent, and requires regular single-link
+mode-0600 database/WAL/SHM files. Named-ACL inspection and the fixed-path
+listener/service are not implemented, so these checks do not yet qualify a
+live broker.
 
 ### Session and request framing
 
@@ -151,10 +165,16 @@ must satisfy every condition below before it can be promoted.
   hash, session value, account value, endpoint, action, signature, credential,
   environment selector or arbitrary command is accepted.
 
+The current protocol implements those framing rules, derives each broker
+session from one 256-bit nonce plus observed socket/UID/GID context, and uses
+Darwin `getpeereid` before broker reads. The client also verifies the server as
+the OS-observed UID-452/GID before sending any byte. A post-callback anomaly or
+lost acknowledgement is `UNKNOWN`; the client never retries automatically.
+
 ### Required Codex-to-Mac bridge
 
-- Provide one separately named, TESTNET-only bridge tool/client outside the
-  fifteen-tool research MCP and outside the signer/executor processes.
+- The implemented separately named, TESTNET-only bridge tool/client remains
+  outside the fifteen-tool research MCP and the signer/executor processes.
 - Its exact input schema contains one required string field,
   `command_text`, and no other fields. It accepts no account, proposal object,
   economic value, environment, endpoint, credential, signature or action
@@ -165,17 +185,19 @@ must satisfy every condition below before it can be promoted.
 - Tool availability and model selection are not evidence of human authorship.
   The broker receipt therefore retains
   `human_message_attested=false`, and the complete bridge remains TESTNET-only.
-- The bridge must not be installed or enabled until its exact tool schema,
-  remote-to-local session binding, peer process identity, timeout/output bounds
-  and negative capability tests receive separate review.
+- Its exact schema, peer checks, timeout/output bounds and negative capability
+  tests are implemented and reviewed. It must remain unregistered until the
+  fixed-path listener, ACLs, broker lifecycle and trusted proposal presentation
+  path are implemented and separately commissioned.
 
 ### Lookup and transition
 
 1. Parse the proposal ID with `parse_trade_approval_text`.
 2. Load the exact proposal and current state by that ID from protected storage;
    never trust proposal fields supplied by the client.
-3. Require the proposal hash, account binding, risk-plan hash, policy hash,
-   snapshot hash, UID-session hash and active time window to revalidate.
+3. Require the proposal hash, account binding, staging/ticket/plan/grant hashes,
+   policy hash, account/market snapshot hashes, UID-session hash and active time
+   window to revalidate.
 4. Run `approve_trade_proposal` with the UID returned by `getpeereid` and the
    broker-derived session hash.
 5. In one durable transaction, compare-and-swap the exact `PENDING`, revision-0
@@ -187,8 +209,11 @@ must satisfy every condition below before it can be promoted.
    second transition.
 
 The pure state function cannot defeat a caller that deliberately reuses a
-stale in-memory `PENDING` object. The future durable compare-and-swap is the
-authoritative replay defense. No live database schema is added by this slice.
+stale in-memory `PENDING` object. The schema-v1 SQLite adapter is the durable
+replay defense: it stores the exact canonical proposal, atomically inserts the
+receipt and performs the state-hash CAS under `BEGIN IMMEDIATE`. An exact
+same-session replay returns the one existing receipt without another
+transition; a conflicting replay fails closed.
 
 Expiry is terminal. At `expires_at` the proposal cannot be approved and may
 transition only from `PENDING` revision 0 to `EXPIRED` revision 1. An approved
@@ -196,7 +221,7 @@ or expired state cannot transition again.
 
 ### Durable receipt
 
-The future durable record is the canonical
+The durable record is the canonical
 `testnet_chat_trade_approval_receipt.v1` document represented by
 `TestnetChatApprovalReceipt`. It binds:
 
@@ -210,11 +235,9 @@ The future durable record is the canonical
 - the explicit false authority/execution claims above; and
 - its own domain-separated receipt hash.
 
-The raw chat text need not be retained after hashing. Publication must be
-create-only/no-replace with file and parent durability barriers, or an
-equivalent fully durable database transaction. Conflicting existing bytes,
-receipt/state disagreement or an ambiguous crash outcome is a hard halt for
-that proposal.
+The raw chat text is not retained after hashing. Conflicting persisted bytes,
+receipt/state disagreement or an ambiguous post-commit outcome is a hard halt
+or `UNKNOWN` for that proposal, never a blind retry.
 
 ## Approval is not execution
 
@@ -232,19 +255,20 @@ part of this foundation.
 
 ## Explicit non-goals and stop line
 
-This slice does not implement or authorize:
+This slice still does not implement or authorize:
 
-- an AF_UNIX listener or client;
-- a database/file schema or migration;
-- a live Codex bridge tool/client in this slice (the separately reviewed,
-  raw-`command_text` TESTNET bridge above is a required later integration);
+- an AF_UNIX listener/daemon or socket/ACL installation;
+- broker-generation persistence or a trusted proposal issuer/presentation path;
+- registration or enabling of the existing raw-`command_text` stdio MCP;
 - executor, admission, signer, Keychain, nonce or transport integration;
 - HTTP, WebSocket, VPN or venue access;
 - order placement, cancellation, closing or any other venue write;
 - credentials or HMAC provisioning; or
 - mainnet use under any circumstances.
 
-Promotion requires a separate review of socket peer-credential tests, ACLs,
-durable stale-state races, crash points, receipt recovery, executor
-revalidation and end-to-end TESTNET limits. Until then `/dev/tty` plus the
-control-role HMAC is the only implemented attended authorization route.
+Promotion requires fixed-path socket and named-ACL enforcement, trusted display
+publication, broker-generation persistence, an at-least-once control-to-executor
+handoff, atomic executor-side consume/reservation/outbox admission, fresh
+PRE_KEY/PRE_SEND `userRole` fences on the normal bracket path, and end-to-end
+TESTNET limits. Until then `/dev/tty` plus the control-role HMAC is the only
+installed attended authorization route.

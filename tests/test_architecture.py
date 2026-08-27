@@ -50,6 +50,41 @@ class AgentRuntimeBoundaryTests(unittest.TestCase):
         present = [str(path.relative_to(ROOT)) for path in forbidden if path.exists()]
         self.assertEqual([], present)
 
+    def test_chat_approval_slice_has_no_capital_or_network_client_imports(self) -> None:
+        forbidden_modules = {
+            "admission",
+            "credential_provider",
+            "execution_store",
+            "executor",
+            "hyperliquid_signer",
+            "hyperliquid_transport",
+            "keychain_secret",
+            "qualification_signer",
+            "qualification_transport",
+            "requests",
+            "subprocess",
+            "urllib",
+        }
+        violations: list[str] = []
+        for path in sorted(SRC.glob("testnet_chat_*.py")):
+            source = path.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(path))
+            for node in ast.walk(tree):
+                modules: list[str] = []
+                if isinstance(node, ast.Import):
+                    modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    modules = [node.module]
+                for module in modules:
+                    leaf = module.rsplit(".", 1)[-1]
+                    if leaf in forbidden_modules:
+                        violations.append(
+                            f"{path.relative_to(ROOT)}:{node.lineno}:{module}"
+                        )
+            if "AF_INET" in source or "streamable-http" in source:
+                violations.append(f"{path.relative_to(ROOT)}:network-surface")
+        self.assertEqual([], violations)
+
 
 if __name__ == "__main__":
     unittest.main()

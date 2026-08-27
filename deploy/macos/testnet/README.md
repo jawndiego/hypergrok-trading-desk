@@ -24,6 +24,24 @@ the APFS reserve protects 8 GiB from sibling-volume competition. These values
 remain unqualified until post-reboot research-ENOSPC and executor WAL/recovery
 headroom probes pass under the real service UIDs.
 
+## TESTNET chat-approval addition — not in the apply scripts yet
+
+The reviewed offline channel uses the fixed socket
+`/private/var/run/trading-desk/testnet-chat-approval.sock` and requires a
+separate canonical UID-452-owned mode-0700 control-state parent, proposed as
+`/private/var/db/trading-desk/control-private/chat-approval`. Its SQLite main,
+WAL and SHM are mode 0600, regular, single-link and unavailable to UID 501.
+The socket parent may grant UID 501 only the exact traversal/connect rights;
+it may not grant state read/list/create/delete/rename/replace rights.
+
+The current storage/ACL scripts do not create or verify either path, and no
+script installs or launches a broker. The application wheel includes the
+dormant stdio MCP entry point, but the installer does not register or enable it
+in Codex, the plugin descriptor, OpenCode or launchd. A later exact-head pack
+must add named-ACL inspection, stale socket refusal, broker-generation evidence,
+restart/crash probes and negative UID tests before these paths are applied. The
+router VM receives none of this state.
+
 ## Irreversible operator choice
 
 `01-provision-apfs-storage.sh` creates volumes only through the conspicuous
@@ -119,8 +137,12 @@ later resize changes the tested resource boundary.
 The headroom guard is not log rotation. The guarded launchd examples still
 write stdout/stderr to regular files, so bounded rotation/reopen and retention
 must be implemented and qualified before any LaunchDaemon installation or
-always-on claim. The first TESTNET harness write also remains blocked: the
-separate GTC/query/cancel and canary-close durable core still needs its signer,
-sender, transport-result transitions, terminal reservation release and
-direct-terminal CLI; WebSocket recovery, response-loss injection and the
-qualification artifact also remain incomplete.
+always-on claim. The first TESTNET harness write also remains blocked. The
+qualification GTC/query/cancel/close lifecycle, signer/verifier, dormant sender,
+terminal reservation release and direct-terminal fallback now exist offline,
+but submission is compiled off and live evidence is absent. The chat approval
+CAS/wire/stdio MCP is likewise offline and still needs trusted proposal
+presentation, its fixed listener/ACL service, atomic executor admission and
+normal-bracket PRE_KEY/PRE_SEND `userRole` fences. WebSocket live recovery,
+real response-loss injection and the signed qualification artifact remain
+incomplete.

@@ -100,6 +100,12 @@ The deterministic core must not import, invoke, or depend on ChatGPT, Codex, Gro
 - OpenCode is a compatible second interface over a byte-identical mirror under `.agents/skills` and the same local MCP server. Its checked-in [`opencode.json`](../opencode.json) defaults to `ask`, denies external-directory and sensitive-file access, omits a model/provider, allows the reviewed read tools by exact name, and keeps local research/staging writes at `ask` and unavailable to plan mode.
 - Repository skills contain workflow guidance only; they call typed core interfaces and cannot confer credentials, evidence status, deployment grants, or exchange authority.
 - The current fifteen-tool MCP surface adds asset tracking, manual sentiment persistence, immutable deterministic analysis, historical validation, non-authoritative staging, learning review and node status to harness status, public briefs and intent hashing. Its only mutations are local research/learning/staging state. It cannot read the API wallet, authorize or admit an intent, reserve exposure, sign, or write to a venue.
+- A distinct, unregistered TESTNET stdio MCP has exactly one
+  `approve_testnet_trade(command_text)` tool. It is outside the research tool
+  catalog and OpenCode, calls one fixed AF_UNIX client once, and can only ask a
+  UID-452 broker to record the exact proposal-specific approval. It cannot read
+  proposal economics, execution state or credentials, and cannot admit, sign
+  or submit an order.
 - Future private data, authentication, authorization, and controlled actions belong in narrow server-side tools rather than skill prose. Any write tool requires a separate qualification milestone and must enforce its own authorization at the side-effect boundary.
 - The same domain, validation, risk, admission, OMS, ledger, and adapter APIs must work without any agent attached.
 - Removing or replacing the agent interface must not change deterministic results or capital-path behavior.
@@ -143,8 +149,9 @@ The implemented loop is intentionally asymmetric:
    canonical parent/recovery fills are attributed into one continuous position
    chain, persisted once and never hidden as unmatched account activity.
 
-The MCP server never exposes approval, admission, signing, cancellation,
-flattening or venue-write tools. The separate executor config accepts only
+The research MCP server never exposes approval, admission, signing,
+cancellation, flattening or venue-write tools. The isolated chat MCP is only a
+bounded approval-recorder transport and is not an execution tool. The separate executor config accepts only
 TESTNET and has distinct signer, approval, recovery and grant Keychain
 references. Dynamic plan CLOIDs are trusted only from the exact durable
 three-leg plan; flatten CLOIDs are domain-separated derivatives of the exact
@@ -620,9 +627,11 @@ Treat agents, webpages, social content, imported repositories, generated code, m
 Required controls:
 
 - Human approvers authenticate through a trusted channel with strong identity
-  and MFA. Free-form agent chat is invalid; the reserved TESTNET proposal lane
-  may recognize only the exact proposal-ID command after its separate
-  provenance and anti-replay boundary is implemented.
+  and MFA for mainnet. Free-form agent chat is invalid. The weaker TESTNET-only
+  proposal lane recognizes only the exact proposal-ID command and records
+  `human_message_attested=false`; its durable CAS and local peer/session
+  anti-replay boundary exist offline, but its listener, trusted presentation
+  and execution integration are uncommissioned.
 - Approval tokens are signed, audience-bound, expiring, single-use, and protected against replay and cross-environment use.
 - Services use mutually authenticated identities and least-privilege authorization.
 - Signer keys are generated, stored, rotated, and revoked in a managed KMS/HSM or equivalent isolated secret boundary.
@@ -793,12 +802,14 @@ The assessment verdict is `buy`, `sell`, `nothing`, or `unavailable`; risk eligi
 
 The currently implemented administrative approval fallback reads exact
 confirmation from `/dev/tty` and signs a schema-versioned, domain-separated
-semantic-intent hash. A distinct future TESTNET provenance lane may accept only
-the exact command `execute trade <proposal-id>` for an already-created,
-immutable and short-lived proposal. That lane is not implemented: a bare
-command, free-form chat, quoted/replayed text, or any changed proposal is not
-authority, and neither path exposes the signer or execution store to MCP. The
-approved semantic intent covers:
+semantic-intent hash. A distinct TESTNET provenance lane accepts only the
+exact command `execute trade <proposal-id>` for an already-created, immutable
+and short-lived proposal. Its proposal model, durable approval CAS, bounded
+mutually authenticated AF_UNIX protocol/client and one-field stdio MCP exist
+offline. A bare command, free-form chat, quoted/replayed text, or changed
+proposal is not authority. Recording the chat receipt does not admit an order,
+and neither MCP exposes the signer or execution store. The approved semantic
+intent covers:
 
 - Venue, network, and account.
 - Instrument, side, quantity, and reduce-only state.
@@ -810,10 +821,23 @@ approved semantic intent covers:
 
 Any economic-field change invalidates the approval. Runtime-only venue nonce, timestamp, and signature fields do not alter the semantic intent and are produced only by the isolated deterministic signer. The authorization token is signed, audience-bound, identity-attributed, expiring, single-use, and anti-replay protected.
 
-The reserved proposal-ID lane must use separate durable provenance rather than
-masquerading as the `/dev/tty` HMAC permit. Its proposal must bind entry, size,
-stop, target, maximum loss, account and policy version; the proposal ID is
-single-use, and the one-shot sender preserves UNKNOWN-without-retry semantics.
+The proposal-ID lane uses separate durable provenance rather than masquerading
+as the `/dev/tty` HMAC permit. Proposal v2 binds staging document and ticket
+identities, the exact protected plan, infrastructure grant, entry, size, stop,
+target, maximum loss, account identity, policy, account/market snapshots,
+broker session and expiry. The control-store approval transition is single-use.
+The still-missing execution import must enforce the proposal ID uniquely inside
+the same `ExecutionStore` transaction that consumes its ticket, reserves risk
+and creates the command/legs/outbox. Cross-database delivery is at-least-once;
+exactly-once authority belongs to that execution transaction. The one-shot
+sender preserves `UNKNOWN` without blind retry.
+
+Before this lane can reach normal bracket signing, that path must gain the
+qualification worker's two fresh `userRole(api_wallet)` reads at both PRE_KEY
+and PRE_SEND, bound through signed attempt evidence. A mapping change,
+staleness or expiry after the point of no return produces no HTTP send or an
+explicit durable unknown outcome as applicable; it never selects another
+account or retries blindly.
 
 ### 7.2 Account-safety policy
 

@@ -46,6 +46,7 @@ execution = [
 [project.scripts]
 trading-harness = "trading_harness.cli:main"
 trading-harness-mcp = "trading_harness.mcp_server:main"
+trading-harness-testnet-chat-mcp = "trading_harness.testnet_chat_mcp:main"
 trading-harness-executor = "trading_harness.executor_cli:main"
 trading-harness-qualification = "trading_harness.qualification_cli:main"
 
