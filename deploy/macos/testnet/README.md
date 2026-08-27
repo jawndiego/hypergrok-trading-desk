@@ -127,14 +127,14 @@ later resize changes the tested resource boundary.
    `/opt/trading-desk/libexec/trading-keychain-reader-executor-v1` and
    `/opt/trading-desk/libexec/trading-keychain-reader-control-v1` as
    `root:trading-executor`/`root:trading-control`, mode `0510`. The installer is
-   bound to application commit `a0f82d5928e57c43e511127a490ecbcf48110684`
+   bound to application commit `df93d8ca8b69a59d25545cc3a16d38805b18bea3`
    and its exact archive, schema-v3 wheel, dependency manifest and readers.
    Apply is valid only from the separately sealed replacement pack after its
    binding commit passes exact-head CI. The separate
    [uncommissioned-release migration](UNCOMMISSIONED_RELEASE_MIGRATION.md)
    is the only permitted way to supersede the exact already-installed
-   pre-commission release; its checked-in source remains inert until a later
-   binding commit. The separate
+   pre-commission release; mutation remains an explicit attended root action
+   even after its exact replacement binding. The separate
    [attended System Keychain provisioning plan](KEYCHAIN_PROVISIONING_PLAN.md)
    describes the fixed-slot, non-exporting native provisioner and its removal
    after qualification. Its harmless probe records must pass the sealed

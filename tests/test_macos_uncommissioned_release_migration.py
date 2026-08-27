@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import re
 import stat
@@ -45,11 +46,13 @@ class UncommissionedReleaseMigrationTests(unittest.TestCase):
         )
         self.assertEqual(0, plan.returncode, plan.stderr)
         self.assertIn("PLAN_ONLY", plan.stdout)
-        self.assertIn("rebind_required=1", plan.stdout)
+        self.assertIn("rebind_required=0", plan.stdout)
         self.assertIn("a0f82d5928e57c43e511127a490ecbcf48110684", plan.stdout)
         self.assertIn("281b8829eddd4d75a340e0bd1894792904686e0276b84bc6415812e80a10fb9b", plan.stdout)
+        self.assertIn("df93d8ca8b69a59d25545cc3a16d38805b18bea3", plan.stdout)
+        self.assertIn("b1e1663ad12179a0bf9f560f1f9a979274f3342caf838eb649a23d0dede26e6b", plan.stdout)
 
-    def test_unbound_apply_and_restore_fail_before_deployment_path_access(self) -> None:
+    def test_bound_apply_and_restore_require_attended_root(self) -> None:
         text = source()
         bound = shell_function("require_bound_release")
         self.assertTrue(bound.lstrip().startswith('[ "$REBIND_REQUIRED" = 0 ]'))
@@ -61,17 +64,21 @@ class UncommissionedReleaseMigrationTests(unittest.TestCase):
                 text=True,
             )
             self.assertNotEqual(0, result.returncode)
-            self.assertIn("binding is required", result.stderr)
-        self.assertIn("NEW_COMMIT=__REVIEWED_NEW_COMMIT__", text)
+            self.assertIn("real/effective root", result.stderr)
         self.assertIn(
-            "NEW_RECEIPT_SHA256=__REVIEWED_NEW_RECEIPT_SHA256__",
+            "NEW_COMMIT=df93d8ca8b69a59d25545cc3a16d38805b18bea3",
             text,
         )
         self.assertIn(
-            "EXPECTED_INSTALLER_SHA256=__REVIEWED_INSTALLER_SHA256__",
+            "NEW_RECEIPT_SHA256=b1e1663ad12179a0bf9f560f1f9a979274f3342caf838eb649a23d0dede26e6b",
             text,
         )
-        self.assertIn("REBIND_REQUIRED=1", text)
+        installer_hash = hashlib.sha256(
+            (MIGRATOR.parent / "04-install-merged-main.sh").read_bytes()
+        ).hexdigest()
+        self.assertIn(f"EXPECTED_INSTALLER_SHA256={installer_hash}", text)
+        self.assertIn("REBIND_REQUIRED=0", text)
+        self.assertNotIn("__REVIEWED_", text)
 
     def test_old_current_and_parked_link_are_exact_and_same_parent(self) -> None:
         text = source()

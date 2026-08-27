@@ -6,11 +6,10 @@ already-installed but never-commissioned application release
 must change fixed runtime paths and venv symlink hardening while the first-install
 installer correctly refuses to overwrite `/opt/trading-desk/current`.
 
-The checked-in script is plan-only. `NEW_COMMIT`, `NEW_RECEIPT_SHA256` and
-`EXPECTED_INSTALLER_SHA256` are placeholders, and `REBIND_REQUIRED=1` makes both
-mutation actions fail before deployment paths are opened. A later reviewed
-binding commit must replace all three values, set the literal gate to zero and
-pass exact-head CI before an attended root operator seals or runs it.
+The checked-in script is plan-only without an argument and is bound to the
+reviewed replacement application, release receipt and sibling-installer hash.
+Its literal rebind gate is zero only in the binding commit. Exact-head CI must
+pass before an attended root operator seals or runs it.
 
 The migration accepts only:
 

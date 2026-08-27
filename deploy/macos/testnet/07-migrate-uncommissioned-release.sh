@@ -2,12 +2,12 @@
 set -eu
 umask 077
 
-# This source copy is deliberately inert. A later reviewed binding commit must
-# replace all three placeholders and flip the literal gate in the same commit.
-NEW_COMMIT=__REVIEWED_NEW_COMMIT__
-NEW_RECEIPT_SHA256=__REVIEWED_NEW_RECEIPT_SHA256__
-EXPECTED_INSTALLER_SHA256=__REVIEWED_INSTALLER_SHA256__
-REBIND_REQUIRED=1
+# These values bind the replacement application, release receipt and sibling
+# installer. Mutation still requires an explicit attended root action.
+NEW_COMMIT=df93d8ca8b69a59d25545cc3a16d38805b18bea3
+NEW_RECEIPT_SHA256=b1e1663ad12179a0bf9f560f1f9a979274f3342caf838eb649a23d0dede26e6b
+EXPECTED_INSTALLER_SHA256=dfce2e363fed0056fb86de8ecc2209a89b30e27b5f41cfb281fe46f0520fbe7a
+REBIND_REQUIRED=0
 
 OLD_COMMIT=a0f82d5928e57c43e511127a490ecbcf48110684
 OLD_RECEIPT_SHA256=281b8829eddd4d75a340e0bd1894792904686e0276b84bc6415812e80a10fb9b
