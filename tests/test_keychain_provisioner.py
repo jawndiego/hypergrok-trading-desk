@@ -297,7 +297,7 @@ class NativeKeychainProvisionerContractTests(unittest.TestCase):
 
             reader_output = Path(directory) / "readers"
             subprocess.run(
-                [os.fspath(READER_BUILD), "--build", os.fspath(reader_output)],
+                [os.fspath(READER_BUILD), "--build-development", os.fspath(reader_output)],
                 check=True,
                 capture_output=True,
                 text=True,

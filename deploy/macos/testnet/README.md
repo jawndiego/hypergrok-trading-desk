@@ -77,7 +77,13 @@ later resize changes the tested resource boundary.
    deleted. All transitions retain `fsync`/`F_FULLFSYNC` ordering and negative
    create/delete/rename/replace probes for UIDs 501/450/451/452.
    The same sealed media must contain the two reproducibly built hardened
-   readers from `build-keychain-role-readers.sh`. The installer hash-pins and
+   readers from `build-keychain-role-readers.sh --build-release` in a canonical
+   root-owned, non-writable, ACL-free sealed source tree and sealed output
+   parent. Its `--build-development` output is explicitly untrusted and is not
+   eligible for sealing or installation. The release builder pins its source,
+   direct compiler and SDK settings, independently reproduces each arm64
+   artifact, statically checks symbols and system-only load paths, and requires
+   the same authoritative hashes already bound below. The installer hash-pins and
    code-signature-verifies them, then installs immutable copies at
    `/opt/trading-desk/libexec/trading-keychain-reader-executor-v1` and
    `/opt/trading-desk/libexec/trading-keychain-reader-control-v1` as

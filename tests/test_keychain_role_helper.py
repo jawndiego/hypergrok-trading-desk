@@ -5,6 +5,7 @@ import hashlib
 from pathlib import Path
 import platform
 import plistlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -26,6 +27,15 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy" / "macos" / "testnet"
 SOURCE = DEPLOY / "keychain-role-reader.c"
 BUILD = DEPLOY / "build-keychain-role-readers.sh"
+EXPECTED_SOURCE_SHA256 = (
+    "a5a526b9c8817f98843489f9c42593d887a411377014dedac4f8b20aa839c7f1"
+)
+EXPECTED_EXECUTOR_SHA256 = (
+    "42e583ee40d48546a92bf40bf650fa576ec3d86455bf663cc3760b90d050df27"
+)
+EXPECTED_CONTROL_SHA256 = (
+    "da10752940f726258f4e2439b657db0c2f3fefcb3c30ef6a1eaa69df3da8e194"
+)
 
 
 class NativeRoleReaderContractTests(unittest.TestCase):
@@ -95,19 +105,77 @@ class NativeRoleReaderContractTests(unittest.TestCase):
             [os.fspath(BUILD)], check=True, capture_output=True, text=True
         )
         self.assertIn("PLAN_ONLY", result.stdout)
+        self.assertIn("no candidate is executed", result.stdout)
+        self.assertIn("--build-development", result.stdout)
+        self.assertIn("--build-release", result.stdout)
         text = BUILD.read_text(encoding="utf-8")
+        self.assertEqual(EXPECTED_SOURCE_SHA256, hashlib.sha256(SOURCE.read_bytes()).hexdigest())
         for required in (
             "/Library/Developer/CommandLineTools/usr/bin/clang",
             "/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk",
+            "/Library/Developer/CommandLineTools/usr/bin/llvm-nm",
+            "/Library/Developer/CommandLineTools/usr/bin/llvm-otool",
             "/usr/bin/codesign",
+            "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+            f"EXPECTED_SOURCE_SHA256={EXPECTED_SOURCE_SHA256}",
+            f"EXPECTED_EXECUTOR_ARTIFACT_SHA256={EXPECTED_EXECUTOR_SHA256}",
+            f"EXPECTED_CONTROL_ARTIFACT_SHA256={EXPECTED_CONTROL_SHA256}",
+            "EXPECTED_CLANG_SHA256=",
+            "EXPECTED_SDK_SETTINGS_SHA256=",
+            '"$CLANG" --analyze',
             "--options runtime",
             "--timestamp=none",
             "-Wno-deprecated-declarations",
             "TRADING_HELPER_EXECUTOR",
             "TRADING_HELPER_CONTROL",
+            "assert_sealed_release_inputs",
+            "assert_sealed_path_chain",
+            "release builder must be canonical and non-symlinked",
+            "release source digest mismatch",
+            "release artifact digest differs from authoritative pin",
+            "independent $role reader builds are not byte-for-byte deterministic",
+            "unexpected Security API symbol in reader",
+            "forbidden reader load command present",
+            "reader is not a thin arm64 PIE executable",
             "SHA256SUMS",
         ):
             self.assertIn(required, text)
+
+    @unittest.skipUnless(platform.system() == "Darwin", "release rejection requires macOS")
+    def test_release_rejects_symlinked_builder_and_sibling_source_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            symlink_builder = base / BUILD.name
+            symlink_builder.symlink_to(BUILD)
+            shutil.copyfile(SOURCE, base / SOURCE.name)
+            output = base / "symlink-output"
+            result = subprocess.run(
+                [os.fspath(symlink_builder), "--build-release", os.fspath(output)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("canonical and non-symlinked", result.stderr)
+            self.assertFalse(output.exists())
+
+            sibling = base / "sibling"
+            sibling.mkdir()
+            copied_builder = sibling / BUILD.name
+            shutil.copyfile(BUILD, copied_builder)
+            copied_builder.chmod(0o700)
+            (sibling / SOURCE.name).write_text(
+                SOURCE.read_text(encoding="utf-8") + "\n/* substitution */\n",
+                encoding="utf-8",
+            )
+            output = base / "sibling-output"
+            result = subprocess.run(
+                [os.fspath(copied_builder), "--build-release", os.fspath(output)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("release source digest mismatch", result.stderr)
+            self.assertFalse(output.exists())
 
     @unittest.skipUnless(platform.system() == "Darwin", "native helper build requires macOS")
     def test_local_candidates_compile_and_have_distinct_hardened_identifiers(self) -> None:
@@ -119,15 +187,15 @@ class NativeRoleReaderContractTests(unittest.TestCase):
             outputs = (Path(directory) / "artifacts-a", Path(directory) / "artifacts-b")
             for output in outputs:
                 subprocess.run(
-                    [os.fspath(BUILD), "--build", os.fspath(output)],
+                    [os.fspath(BUILD), "--build-development", os.fspath(output)],
                     check=True,
                     capture_output=True,
                     text=True,
                 )
             identifiers = []
             expected_hashes = {
-                "trading-keychain-reader-executor-v1": "42e583ee40d48546a92bf40bf650fa576ec3d86455bf663cc3760b90d050df27",
-                "trading-keychain-reader-control-v1": "da10752940f726258f4e2439b657db0c2f3fefcb3c30ef6a1eaa69df3da8e194",
+                "trading-keychain-reader-executor-v1": EXPECTED_EXECUTOR_SHA256,
+                "trading-keychain-reader-control-v1": EXPECTED_CONTROL_SHA256,
             }
             for name, expected_hash in expected_hashes.items():
                 artifact = outputs[0] / name
