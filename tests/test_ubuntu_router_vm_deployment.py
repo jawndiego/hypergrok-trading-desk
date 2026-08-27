@@ -518,8 +518,15 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
             write_json(manifest_path, manifest)
             manifest_path.chmod(0o600)
             digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-            with self.assertRaisesRegex(error, "filename allowlist"):
-                verify_manifest(bundle, digest, os.getuid())
+            # The privileged commissioner is Darwin-only.  This unit isolates
+            # its basename allowlist from the platform ACL adapter so the same
+            # traversal assertion also runs on Linux CI.
+            with mock.patch.dict(
+                namespace,
+                {"_no_named_acl": lambda _path: None},
+            ):
+                with self.assertRaisesRegex(error, "filename allowlist"):
+                    verify_manifest(bundle, digest, os.getuid())
             self.assertFalse((root / "escape").exists())
 
     def test_renders_deterministic_implicit_wan_plan_and_verifies_manifest(self) -> None:
