@@ -42,11 +42,11 @@ staged under an explicit `profitability_qualified: false` grant.
 | Isolated credential provider | Schema-v3 native role readers, sealed provisioner and nonprinting UID probe implemented; exact pack install and live pre/post-reboot probe evidence pending; no key present |
 | Always-on serialized executor runtime | Implemented with fenced lease, daily-loss sync, strict recovery priority and graceful drain |
 | Direct attended control CLI | Implemented as an administrative fallback; confirmation is read from `/dev/tty`, never argv/stdin/MCP |
-| Remote TESTNET chat approval | Offline proposal-v2 issuer/presentation, durable CAS, AF_UNIX bridge/broker, one-field stdio MCP, UID-452 artifact-first publisher/ID-only ready index, startup repair, dormant UID-451 consumer, verified reader and atomic admission implemented; all gates remain false and listener/ACL/runtime installation, authenticated account/market/grant provenance and same-process active-session issuance remain absent; bare/free-form chat is invalid |
-| TESTNET qualification canary/close core | Schema-v12 typed GTC/query/cancel/terminal and full-residual close semantics, pinned SDK 0.24.0 signing/independent recovery, pre-key/pre-send role fences, one fresh attended same-CLOID cancel successor, dormant bounded foreground worker, one-shot sender and advisory WS decoder implemented; submission stays compiled off and no live venue qualification has run |
+| Remote TESTNET chat approval | Proposal-v2 issuer/presentation, durable CAS, AF_UNIX bridge/broker, one-field stdio MCP, UID-452 artifact-first publisher/ID-only ready index, startup repair, UID-451 consumer, verified collector/preregistration provenance and atomic admission implemented with TESTNET source gates enabled; fixed listener/ACL/runtime paths remain uninstalled and fail closed; bare/free-form chat is invalid |
+| TESTNET qualification canary/close core | Schema-v12 typed GTC/query/cancel/terminal and full-residual close semantics, pinned SDK 0.24.0 signing/independent recovery, pre-key/pre-send role fences, one fresh attended same-CLOID cancel successor, bounded foreground worker and one-shot sender implemented. The TESTNET source gates are promoted, but every send now requires fresh root-cached remote-WireGuard/PF evidence before route-bound authority and immediately before HTTP; no live venue qualification has run |
 | macOS storage/ACL/install plan | Credential-free, rollback-safe plan/apply artifacts implemented; not applied; encryption, reboot and exhaustion evidence pending |
-| Local Ubuntu VM egress router | Public-input replay, apply-disabled root media/host-tool plan and a default-unavailable two-sample entry route gate implemented; trusted collector, durable binding, all root/Lima/VM/guest/network phases, PF/remote exit and live qualification pending; not VPN-qualified |
-| Live Hyperliquid testnet | **No account configured; first responsible write remains blocked because submission/lifecycle promotion and commissioning gates are incomplete** |
+| Ubuntu VM remote VPN router | Default-drop `wg-egress`, UID-451/UID-65 PF renderer, fixed sample/probe helpers, continuous collector, root artifact installer and durable normal/qualification route authority are implemented; provider values, VM/WireGuard/PF apply, installed artifacts/process and live leak/reboot qualification remain pending; not yet VPN-qualified |
+| Live Hyperliquid testnet | **No installed account/config/credential or qualified VPN evidence yet; the first write remains blocked by machine commissioning, not by a missing sender** |
 | Live Hyperliquid mainnet | **Hard-disabled in store, signer and transport** |
 
 The research/MCP executor remains disabled. Environment variables cannot turn
@@ -95,12 +95,12 @@ immutable TESTNET proposal + exact `execute trade <proposal-id>`
         |
         v
 separate Codex stdio bridge -> UID-452 AF_UNIX broker -> approval receipt
-        |                                  (offline; listener/ACL not installed)
+        |                                  (source enabled; listener/ACL not installed)
         +--> administrative `/dev/tty` approval fallback
         |
         v
 control-owned handoff artifact -> fixed UID-451 verified reader
-        |                         (offline publisher/consumer disabled/uninstalled)
+        |                         (source enabled; paths/ACLs uninstalled)
         v
 atomic execution store (schema v13-v16)
         |
@@ -124,14 +124,14 @@ Agents explain and route evidence. Deterministic code owns indicators,
 classification, risk arithmetic, hashes, state transitions, signing policy,
 and reconciliation. Free-form chat is never approval. The offline TESTNET
 lane accepts only the exact `execute trade <proposal-id>` command for an
-immutable, expiring proposal and durably records one approval receipt. It is
-not installed. A caller may supply only a handoff ID; the store itself invokes
+immutable, expiring proposal and durably records one approval receipt. Its
+machine paths are not installed. A caller may supply only a handoff ID; the store itself invokes
 the fixed UID-451 reader for a config-bound, exactly ACL-scoped, UID-452-owned
 canonical artifact and persists its full evidence. No control publisher or
-executor watcher is installed: source can durably publish the artifact before
-an empty ID-only ready marker and a dormant cached consumer can admit it, but
-both compile-time gates remain false. Marker archival/GC is required before the
-hard 1,024-entry ready-index cap.
+executor watcher is installed: enabled source can durably publish the artifact
+before an empty ID-only ready marker and the cached consumer can admit it.
+Broker maintenance retires verified expired markers before the hard
+1,024-entry ready-index cap.
 
 ## Codex/ChatGPT plugin
 
@@ -295,8 +295,9 @@ before normal entry preparation and final submission authority. Reader timing
 is checked before/after with two seconds of final headroom; transient
 preparation failures can only requeue the same active proven-unsent command,
 while route-independent maintenance releases it at the earliest ticket/leg
-expiry. Its trusted collector, durable command binding, PF enforcement and
-remote exit remain unimplemented. The complete first-write blockers are tracked in
+   expiry. The remote collector/helpers and durable route-bound authority are
+   implemented, but the provider profile, VM, WireGuard, PF, root artifacts and
+   collector process are not installed or live-qualified. The complete first-write blockers are tracked in
 [`docs/testnet_commissioning.md`](docs/testnet_commissioning.md).
 
 Start from

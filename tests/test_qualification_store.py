@@ -30,6 +30,7 @@ from trading_harness.qualification_role_attestation import (
     collect_testnet_user_role_attestation,
 )
 from trading_harness import qualification_store as qualification_store_module
+from trading_harness.testnet_remote_vpn_health import REMOTE_VPN_MODE
 from trading_harness.testnet_qualification import (
     QUALIFICATION_WORKFLOW_HASH_DOMAIN,
     QualificationAttemptPhase,
@@ -63,6 +64,15 @@ class QualificationStoreTests(ExecutionStoreTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.qualification = QualificationStore(self.store)
+
+    @staticmethod
+    def route_binding() -> dict[str, object]:
+        return {
+            "route_mode": REMOTE_VPN_MODE,
+            "route_expectation_hash": digest("remote-route-expectation"),
+            "route_evidence_hash": digest("remote-route-evidence"),
+            "route_expires_at_ms": int(at(10_000).timestamp() * 1_000),
+        }
 
     def test_legacy_signed_evidence_v1_hash_contract_is_unchanged(self) -> None:
         legacy = build_qualification_signed_evidence(
@@ -364,7 +374,14 @@ class QualificationStoreTests(ExecutionStoreTestCase):
             "claimed",
         )
 
-    def test_only_reverified_envelope_can_prepare_and_submission_stays_disabled(self) -> None:
+    @mock.patch.object(
+        qualification_store_module,
+        "QUALIFICATION_SUBMISSION_ENABLED",
+        False,
+    )
+    def test_only_reverified_envelope_can_prepare_and_submission_stays_disabled(
+        self,
+    ) -> None:
         _, intent, _, _, command = self.admission_fixture()
         claim = self.qualification.claim(
             command.command_id,
@@ -430,6 +447,7 @@ class QualificationStoreTests(ExecutionStoreTestCase):
                 signed.evidence_hash,
                 worker_id="qualification-worker",
                 fencing_token=claim.fencing_token,
+                **self.route_binding(),
                 at=at(1_400),
             )
         connection = self.store._connect()
@@ -479,6 +497,7 @@ class QualificationStoreTests(ExecutionStoreTestCase):
                 signed.evidence_hash,
                 worker_id="qualification-worker",
                 fencing_token=claim.fencing_token,
+                **self.route_binding(),
                 at=at(1_500),
             )
         connection = self.store._connect()
@@ -507,6 +526,7 @@ class QualificationStoreTests(ExecutionStoreTestCase):
                 signed.evidence_hash,
                 worker_id="qualification-worker",
                 fencing_token=claim.fencing_token,
+                **self.route_binding(),
                 at=at(1_600),
             )
         connection = self.store._connect()
@@ -583,6 +603,7 @@ class QualificationStoreTests(ExecutionStoreTestCase):
                 signed.evidence_hash,
                 worker_id="qualification-worker",
                 fencing_token=claim.fencing_token,
+                **self.route_binding(),
                 at=at(1_400),
             )
         self.assertEqual(authority_record.command_id, command.command_id)
@@ -594,6 +615,20 @@ class QualificationStoreTests(ExecutionStoreTestCase):
         self.assertEqual(
             authority_record.pre_send_expires_at_ms,
             pre_send.expires_at_ms,
+        )
+        route_binding = self.route_binding()
+        self.assertEqual(authority_record.route_mode, route_binding["route_mode"])
+        self.assertEqual(
+            authority_record.route_expectation_hash,
+            route_binding["route_expectation_hash"],
+        )
+        self.assertEqual(
+            authority_record.route_evidence_hash,
+            route_binding["route_evidence_hash"],
+        )
+        self.assertEqual(
+            authority_record.route_expires_at_ms,
+            route_binding["route_expires_at_ms"],
         )
         self.assertEqual(
             self.qualification.get_step(
@@ -870,6 +905,7 @@ class QualificationStoreTests(ExecutionStoreTestCase):
                 signed.evidence_hash,
                 worker_id="qualification-worker",
                 fencing_token=claim.fencing_token,
+                **self.route_binding(),
                 at=at(500),
             )
         self.assertEqual(
@@ -898,7 +934,7 @@ class QualificationStoreTests(ExecutionStoreTestCase):
         with self.assertRaises(StorageError):
             self.qualification.get_command(command.command_id)
 
-        self.assertFalse(
+        self.assertTrue(
             qualification_store_module.QUALIFICATION_SUBMISSION_ENABLED
         )
         source = inspect.getsource(qualification_store_module)

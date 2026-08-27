@@ -45,9 +45,9 @@ from .testnet_chat_ready import (
 )
 
 
-# This lane remains compile-time dormant.  It has no environment-variable,
-# configuration-file, CLI, or runtime override.
-TESTNET_CHAT_READY_CONSUMER_ENABLED = False
+# This TESTNET lane is source-enabled. It has no environment-variable,
+# configuration-file, CLI, or runtime override; fixed path/ACL preflight gates it.
+TESTNET_CHAT_READY_CONSUMER_ENABLED = True
 
 _SYSTEM_ANCESTORS = (
     Path("/private"),

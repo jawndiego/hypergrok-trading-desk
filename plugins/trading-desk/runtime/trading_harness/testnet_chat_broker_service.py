@@ -1,4 +1,4 @@
-"""Dormant fixed-path UID-452 service for the TESTNET chat broker.
+"""Fixed-path UID-452 service for the TESTNET chat broker.
 
 The module contains a bounded sequential AF_UNIX listener and exact macOS
 filesystem/ACL verification, but the public service gate is deliberately
@@ -35,6 +35,13 @@ from .darwin_acl import (
 )
 from .errors import StorageError, ValidationError
 from .executor_config import load_executor_config
+from .executor_state_binding import (
+    verified_state_database_trust,
+    verify_state_database_binding,
+    verify_state_database_layout,
+)
+from .planning import RiskSizingPolicy
+from .staging_inbox import TradeStagingInbox, TrustedQuoteDecision
 from .testnet_chat_approval import CHAT_APPROVER_UID
 from .testnet_chat_approval_store import TestnetChatApprovalStore
 from .testnet_chat_broker import (
@@ -52,9 +59,19 @@ from .testnet_chat_handoff_publisher import (
     TestnetChatApprovalPublisherCallback,
     TestnetChatHandoffPublisher,
 )
+from .testnet_chat_live_issuance import (
+    TESTNET_CHAT_LIVE_ISSUANCE_ENABLED,
+    TestnetChatExecutorRegistrationReader,
+    TestnetChatLiveProposalIssuer,
+    TestnetChatQualificationEvidenceReader,
+)
+from .testnet_chat_presentation import (
+    TESTNET_CHAT_PRESENTATION_ROOT,
+    TestnetChatProposalPresentationPublisher,
+)
 
 
-TESTNET_CHAT_BROKER_SERVICE_ENABLED = False
+TESTNET_CHAT_BROKER_SERVICE_ENABLED = True
 TESTNET_CHAT_BROKER_GID = 452
 TESTNET_CHAT_CLIENT_UID = CHAT_APPROVER_UID
 TESTNET_CHAT_SOCKET_MODE = 0o622
@@ -74,7 +91,6 @@ TESTNET_CHAT_GENERATIONS_PARENT = TESTNET_CHAT_STATE_PARENT / "broker-generation
 TESTNET_CHAT_EXECUTOR_CONFIG_PATH = Path(
     "/etc/trading-desk/testnet-executor.toml"
 )
-
 BROKER_GENERATION_RECEIPT_HASH_DOMAIN = (
     "trading-harness/testnet-chat-broker-generation-receipt/v1"
 )
@@ -719,6 +735,7 @@ def serve_testnet_chat_broker_sequentially(
     commit_approval: Callable[..., object],
     stop_event: threading.Event,
     clock: Clock,
+    maintain_proposals: Callable[[], object] | None = None,
 ) -> BrokerServiceSummary:
     """Serve one bounded connection at a time; never retry an approval."""
 
@@ -728,8 +745,12 @@ def serve_testnet_chat_broker_sequentially(
         raise TypeError("commit_approval must be callable")
     if not isinstance(stop_event, threading.Event):
         raise TypeError("stop_event must be threading.Event")
+    if maintain_proposals is not None and not callable(maintain_proposals):
+        raise TypeError("maintain_proposals must be callable or None")
     accepted = approvals = rejected = unknown = 0
     while not stop_event.is_set():
+        if maintain_proposals is not None:
+            maintain_proposals()
         try:
             connection, _ = listener.accept()
         except socket.timeout:
@@ -768,6 +789,44 @@ def serve_testnet_chat_broker_sequentially(
     return BrokerServiceSummary(accepted, approvals, rejected, unknown)
 
 
+def _build_live_proposal_issuer(
+    *,
+    store: TestnetChatApprovalStore,
+    config: object,
+) -> TestnetChatLiveProposalIssuer:
+    """Compose fixed receipt-backed issuance inside this broker process."""
+
+    from .executor_config import ExecutorConfig
+
+    if TESTNET_CHAT_LIVE_ISSUANCE_ENABLED is not True:
+        raise ValidationError("TESTNET chat live issuance remains disabled")
+    if type(config) is not ExecutorConfig:
+        raise TypeError("live broker issuer requires exact ExecutorConfig")
+    policy = RiskSizingPolicy()
+    if policy.policy_hash != config.risk_policy_hash:
+        raise ValidationError("installed TESTNET risk policy differs from config")
+    verify_state_database_layout(config, config.paths.staging_database)
+    verify_state_database_binding(config, config.paths.staging_database)
+    presentation_directory = TESTNET_CHAT_PRESENTATION_ROOT / config.config_hash
+    inbox = TradeStagingInbox(
+        config.paths.staging_database,
+        quote_callback=lambda _request: TrustedQuoteDecision.blocked(
+            block_code="broker_read_only"
+        ),
+        must_exist=True,
+    )
+    return TestnetChatLiveProposalIssuer(
+        store,
+        TestnetChatProposalPresentationPublisher(presentation_directory),
+        inbox,
+        TestnetChatQualificationEvidenceReader(config),
+        TestnetChatExecutorRegistrationReader(config),
+        config=config,
+        policy=policy,
+        clock=lambda: datetime.now(timezone.utc),
+    )
+
+
 @contextmanager
 def _signal_stop_event() -> Iterator[threading.Event]:
     if threading.current_thread() is not threading.main_thread():
@@ -792,6 +851,8 @@ def _signal_stop_event() -> Iterator[threading.Event]:
 def _run_enabled_service() -> int:
     """Run the fixed service; reachable only after source-level promotion."""
 
+    if TESTNET_CHAT_LIVE_ISSUANCE_ENABLED is not True:
+        raise ValidationError("TESTNET chat live issuance remains disabled")
     verify_fixed_service_preflight()
     store = TestnetChatApprovalStore(TESTNET_CHAT_DATABASE_PATH, must_exist=True)
     config = load_executor_config(TESTNET_CHAT_EXECUTOR_CONFIG_PATH)
@@ -802,6 +863,7 @@ def _run_enabled_service() -> int:
         publisher,
         scope,
     )
+    publisher.retire_expired_ready_markers(at=datetime.now(timezone.utc))
     approval_callback.reconcile_approved_startup()
     listener: socket.socket | None = None
     created_identity: _PathIdentity | None = None
@@ -817,11 +879,41 @@ def _run_enabled_service() -> int:
             started_at=started_at,
         )
         publish_broker_generation_receipt(receipt)
+        with verified_state_database_trust(
+            config,
+            config.paths.staging_database,
+            require_named_acl=True,
+        ):
+            live_issuer = _build_live_proposal_issuer(store=store, config=config)
         _activate_listener(
             listener,
             created_identity,
             acl_reader=darwin_named_acl_lines,
         )
+        with verified_state_database_trust(
+            config,
+            config.paths.staging_database,
+            require_named_acl=True,
+        ):
+            live_issuer.issue_available(
+                broker_session=session,
+                at=datetime.now(timezone.utc),
+            )
+
+        def maintain_live_state() -> None:
+            publisher.retire_expired_ready_markers(
+                at=datetime.now(timezone.utc)
+            )
+            with verified_state_database_trust(
+                config,
+                config.paths.staging_database,
+                require_named_acl=True,
+            ):
+                live_issuer.issue_available(
+                    broker_session=session,
+                    at=datetime.now(timezone.utc),
+                )
+
         with _signal_stop_event() as stop_event:
             summary = serve_testnet_chat_broker_sequentially(
                 listener,
@@ -829,6 +921,7 @@ def _run_enabled_service() -> int:
                 commit_approval=approval_callback,
                 stop_event=stop_event,
                 clock=lambda: datetime.now(timezone.utc),
+                maintain_proposals=maintain_live_state,
             )
         print(
             "TESTNET chat broker stopped "
@@ -850,7 +943,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if supplied:
         if supplied == ("--help",):
             print("usage: python -m trading_harness.testnet_chat_broker_service")
-            print("Fixed UID-452 TESTNET chat broker; currently disabled.")
+            print("Fixed UID-452 TESTNET chat broker; requires commissioned paths.")
             return 0
         print("TESTNET chat broker accepts no arguments", file=sys.stderr)
         return 2
@@ -883,6 +976,7 @@ __all__ = (
     "BrokerServiceSummary",
     "TESTNET_CHAT_BROKER_SERVICE_ENABLED",
     "TESTNET_CHAT_EXECUTOR_CONFIG_PATH",
+    "TESTNET_CHAT_PRESENTATION_ROOT",
     "build_broker_generation_receipt",
     "darwin_named_acl_lines",
     "darwin_uid_uuid",

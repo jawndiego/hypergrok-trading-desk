@@ -50,6 +50,7 @@ from . import testnet_chat_ready as ready_contract
 
 
 MAX_TESTNET_CHAT_STARTUP_RECONCILIATIONS = 256
+MAX_TESTNET_CHAT_READY_RETIREMENTS = 256
 TESTNET_CHAT_STARTUP_PAGE_SIZE = 64
 TESTNET_CHAT_HANDOFF_PUBLICATION_HASH_DOMAIN = (
     "trading-harness/testnet-chat-handoff-publication/v1"
@@ -717,6 +718,158 @@ class TestnetChatHandoffPublisher:
             handoff_id for handoff_id, _kind in identities
         )
 
+    def retire_expired_ready_markers(
+        self,
+        *,
+        at: datetime,
+        limit: int = MAX_TESTNET_CHAT_READY_RETIREMENTS,
+    ) -> tuple[str, ...]:
+        """Remove only expired notification markers; retain every handoff.
+
+        A ready marker is not authority or audit state.  The immutable handoff
+        artifact remains in place, while retiring its expired marker prevents
+        the bounded ready index from eventually deadlocking new TESTNET work.
+        Pending-marker crash debris is eligible only when the already-durable
+        handoff proves the same ID and is expired.  Active or unreadable state
+        is never removed.
+        """
+
+        if (
+            not isinstance(at, datetime)
+            or at.tzinfo is None
+            or at.utcoffset() is None
+        ):
+            raise ValidationError("ready retirement time must be timezone-aware")
+        checked_at = at.astimezone(timezone.utc)
+        if type(limit) is not int or not 1 <= limit <= MAX_TESTNET_CHAT_READY_RETIREMENTS:
+            raise ValidationError("ready retirement limit is outside its bound")
+        if _effective_uid() != ready_contract.TESTNET_CHAT_CONTROL_UID:
+            raise PermissionError("chat ready retirement requires UID 452")
+        self._verify_layout()
+        retired: list[str] = []
+        with _publication_lock(
+            self.artifact_directory,
+            self._handoff_directory_acl,
+        ):
+            _count, handoff_ids = self._validate_ready_index()
+            artifact_fd = _open_directory(
+                self.artifact_directory,
+                self._handoff_directory_acl,
+            )
+            ready_fd = _open_directory(
+                self.ready_directory,
+                self._ready_directory_acl,
+            )
+            try:
+                for handoff_id in sorted(handoff_ids):
+                    if len(retired) == limit:
+                        break
+                    artifact_name = ready_contract.testnet_chat_handoff_artifact_name(
+                        handoff_id
+                    )
+                    opened = _open_verified_at(
+                        artifact_fd,
+                        self.artifact_directory,
+                        artifact_name,
+                        expected_mode=ready_contract.TESTNET_CHAT_READY_MARKER_MODE,
+                        expected_size=None,
+                        expected_acl=self._handoff_acl,
+                    )
+                    if opened is None:
+                        raise StorageError(
+                            "chat ready marker lacks its durable handoff artifact"
+                        )
+                    descriptor, raw = opened
+                    try:
+                        handoff = _decode_handoff(raw)
+                    finally:
+                        os.close(descriptor)
+                    if handoff.handoff_id != handoff_id:
+                        raise StorageError("chat ready handoff identity differs")
+                    self._validate_handoff_scope(handoff)
+                    if checked_at < handoff.proposal.expires_at:
+                        continue
+
+                    final_name = ready_contract.testnet_chat_ready_marker_name(
+                        handoff_id
+                    )
+                    pending_name = ready_contract.testnet_chat_ready_pending_name(
+                        handoff_id
+                    )
+                    final = _open_verified_at(
+                        ready_fd,
+                        self.ready_directory,
+                        final_name,
+                        expected_mode=ready_contract.TESTNET_CHAT_READY_MARKER_MODE,
+                        expected_size=0,
+                        expected_acl=(),
+                        allowed_links=frozenset({1, 2}),
+                    )
+                    pending = _open_verified_at(
+                        ready_fd,
+                        self.ready_directory,
+                        pending_name,
+                        expected_mode=ready_contract.TESTNET_CHAT_READY_MARKER_MODE,
+                        expected_size=0,
+                        expected_acl=(),
+                        allowed_links=frozenset({1, 2}),
+                    )
+                    if final is not None:
+                        os.close(final[0])
+                    if pending is not None:
+                        os.close(pending[0])
+                    if final is not None and pending is not None:
+                        _unlink_exact_pending(
+                            ready_fd,
+                            self.ready_directory,
+                            pending_name,
+                            final_name,
+                            expected_mode=ready_contract.TESTNET_CHAT_READY_MARKER_MODE,
+                            expected_acl=(),
+                        )
+                    elif pending is not None:
+                        _remove_incomplete_pending(
+                            ready_fd,
+                            self.ready_directory,
+                            pending_name,
+                            final_name,
+                            expected_acl=(),
+                        )
+
+                    final = _open_verified_at(
+                        ready_fd,
+                        self.ready_directory,
+                        final_name,
+                        expected_mode=ready_contract.TESTNET_CHAT_READY_MARKER_MODE,
+                        expected_size=0,
+                        expected_acl=(),
+                    )
+                    if final is not None:
+                        final_descriptor, final_raw = final
+                        try:
+                            if final_raw:
+                                raise StorageError("expired ready marker is not empty")
+                            opened_identity = _signature(
+                                _descriptor_stat(final_descriptor)
+                            )
+                            named_identity = _signature(
+                                _stat_at(ready_fd, final_name)
+                            )
+                            if opened_identity != named_identity:
+                                raise StorageError(
+                                    "expired ready marker changed before retirement"
+                                )
+                            os.unlink(final_name, dir_fd=ready_fd)
+                        finally:
+                            os.close(final_descriptor)
+                    _fullsync(ready_fd)
+                    retired.append(handoff_id)
+            finally:
+                os.close(ready_fd)
+                os.close(artifact_fd)
+            self._validate_ready_index()
+        return tuple(retired)
+
     def _ensure_artifact(
         self,
         handoff: TestnetChatExecutionHandoff,
@@ -1273,6 +1426,7 @@ class TestnetChatApprovalPublisherCallback:
 
 __all__ = (
     "MAX_TESTNET_CHAT_STARTUP_RECONCILIATIONS",
+    "MAX_TESTNET_CHAT_READY_RETIREMENTS",
     "PublishedTestnetChatApproval",
     "PublishedTestnetChatHandoff",
     "TESTNET_CHAT_HANDOFF_PUBLICATION_HASH_DOMAIN",

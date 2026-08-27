@@ -71,9 +71,21 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def entry_route_binding() -> dict[str, object]:
+    return {
+        "route_mode": "testnet_remote_vpn_exit",
+        "route_expectation_hash": digest("entry-route-expectation"),
+        "route_evidence_hash": digest("entry-route-evidence"),
+        "route_expires_at_ms": int(
+            (NOW + timedelta(days=1)).timestamp() * 1_000
+        ),
+    }
+
+
 def downgrade_execution_schema_v16(connection: sqlite3.Connection) -> None:
     """Remove only v16 evidence objects to exercise guarded v15 migration."""
 
+    connection.execute("DELETE FROM execution_schema_migrations WHERE version = 17")
     present = connection.execute(
         "SELECT 1 FROM execution_schema_migrations WHERE version = 16"
     ).fetchone()
@@ -676,6 +688,7 @@ class ExecutionStoreTestCase(unittest.TestCase):
             worker_id,
             fencing_token,
             pre_send_role_attestation_hash=pre_send.attestation_hash,
+            **entry_route_binding(),
             at=boundary_at,
         )
 
@@ -1609,6 +1622,61 @@ class MigrationAndIdentityTests(ExecutionStoreTestCase):
             }
         self.assertEqual(list(range(1, 14)), versions)
         self.assertNotIn("main_account_address", columns)
+
+    def test_signed_v16_entry_refuses_v17_remote_vpn_migration(self) -> None:
+        ticket, _ = self.admit_one()
+        claim = self.store.claim_next(
+            "dispatcher",
+            at=NOW + timedelta(seconds=1),
+            lease_seconds=10,
+        )
+        assert claim is not None
+        preflight = self.register_preflight(ticket)
+        pre_key = self.record_pre_key_role(
+            preflight,
+            command_id="command-1",
+            worker_id="dispatcher",
+            fencing_token=claim.fencing_token,
+            action_hash=digest("action"),
+            boundary_at=NOW + timedelta(seconds=1, milliseconds=400),
+        )
+        signed = self.make_signed_evidence(
+            preflight,
+            pre_key_role_attestation_hash=pre_key.attestation_hash,
+        )
+        self.store.prepare_attempt(
+            "command-1",
+            "dispatcher",
+            claim.fencing_token,
+            attempt_id="attempt-v16",
+            preflight_hash=preflight.preflight_hash,
+            signed_evidence=signed,
+            nonce=signed.nonce,
+            action_hash=signed.action_hash,
+            wire_hash=signed.wire_hash,
+            at=NOW + timedelta(seconds=2),
+        )
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute(
+                "DELETE FROM execution_schema_migrations WHERE version = 17"
+            )
+
+        with self.assertRaisesRegex(StorageError, "remote-VPN authority boundary"):
+            ExecutionStore(
+                self.path,
+                environment=Environment.TESTNET,
+                account_id="testnet-account",
+                max_reserved_loss="100",
+                max_reserved_notional="2000",
+            )
+        with closing(sqlite3.connect(self.path)) as connection:
+            versions = [
+                int(row[0])
+                for row in connection.execute(
+                    "SELECT version FROM execution_schema_migrations ORDER BY version"
+                )
+            ]
+        self.assertEqual(list(range(1, 17)), versions)
 
 
 class TicketApprovalAdmissionTests(ExecutionStoreTestCase):
@@ -2783,6 +2851,7 @@ class OutboxCrashAndReplayTests(ExecutionStoreTestCase):
             "crashed-worker",
             claim.fencing_token,
             pre_send_role_attestation_hash=pre_send.attestation_hash,
+            **entry_route_binding(),
             at=NOW + timedelta(seconds=2, milliseconds=100),
         )
 
@@ -2860,6 +2929,7 @@ class OutboxCrashAndReplayTests(ExecutionStoreTestCase):
             "dispatcher",
             claim.fencing_token,
             pre_send_role_attestation_hash=pre_send.attestation_hash,
+            **entry_route_binding(),
             at=NOW + timedelta(seconds=2, milliseconds=100),
         )
         self.assertIsNone(
@@ -3017,6 +3087,7 @@ class ResponseAndReconciliationTests(ExecutionStoreTestCase):
             boundary_at=NOW + timedelta(seconds=2, milliseconds=100),
         )
 
+        route = entry_route_binding()
         authority = self.store.require_submission_authority(
             "command-1",
             "attempt-1",
@@ -3024,12 +3095,24 @@ class ResponseAndReconciliationTests(ExecutionStoreTestCase):
             "dispatcher",
             claim.fencing_token,
             pre_send_role_attestation_hash=pre_send.attestation_hash,
+            **route,
             at=NOW + timedelta(seconds=2, milliseconds=100),
         )
 
         self.assertEqual("command-1", authority.command_id)
         self.assertEqual("attempt-1", authority.attempt_id)
         self.assertEqual(123, authority.nonce)
+        self.assertEqual(route["route_mode"], authority.route_mode)
+        self.assertEqual(
+            route["route_expectation_hash"],
+            authority.route_expectation_hash,
+        )
+        self.assertEqual(route["route_evidence_hash"], authority.route_evidence_hash)
+        self.assertEqual(route["route_expires_at_ms"], authority.route_expires_at_ms)
+        self.assertEqual(
+            authority,
+            self.store.get_entry_submission_authority("command-1"),
+        )
         self.assertRegex(authority.authority_hash, r"^[0-9a-f]{64}$")
         with self.assertRaisesRegex(StateConflict, "already consumed"):
             self.store.require_submission_authority(
@@ -3039,6 +3122,7 @@ class ResponseAndReconciliationTests(ExecutionStoreTestCase):
                 "dispatcher",
                 claim.fencing_token,
                 pre_send_role_attestation_hash=pre_send.attestation_hash,
+                **route,
                 at=NOW + timedelta(seconds=2, milliseconds=200),
             )
 

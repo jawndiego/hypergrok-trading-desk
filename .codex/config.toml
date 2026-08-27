@@ -1,0 +1,12 @@
+[mcp_servers.trading_desk_testnet_approval]
+command = "/opt/trading-desk/current/research/.venv/bin/trading-harness-testnet-chat-mcp"
+args = []
+enabled = true
+required = false
+enabled_tools = ["approve_testnet_trade"]
+startup_timeout_sec = 5
+tool_timeout_sec = 5
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.trading_desk_testnet_approval.tools.approve_testnet_trade]
+approval_mode = "prompt"

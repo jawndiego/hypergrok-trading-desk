@@ -11,20 +11,20 @@ The no-argument native runner is compiled for exactly:
 
 - executor reader
   `/opt/trading-desk/libexec/trading-keychain-reader-executor-v1`, SHA-256
-  `42e583ee40d48546a92bf40bf650fa576ec3d86455bf663cc3760b90d050df27`,
+  `8694d14a94ee00a2ac039b7d5cd26c4184e13840aabe1cac2b0d084a629e0ff7`,
   slot `probe-executor`;
 - control reader
   `/opt/trading-desk/libexec/trading-keychain-reader-control-v1`, SHA-256
-  `da10752940f726258f4e2439b657db0c2f3fefcb3c30ef6a1eaa69df3da8e194`,
+  `2ce4ba34366b67b0280302e042ffae67547cb39924353c62f88f5782b9dc52e9`,
   slot `probe-control`.
 
 It has no path, label, slot, UID, keychain, timeout, command, or retry input.
 Each of ten cells forks exactly once. The child receives one exact
 supplementary group, GID and UID; stdin is `/dev/null`, stdout is a bounded
 pipe owned by the root parent, stderr is `/dev/null`, and the exec environment
-is empty. A `/dev/fd` inventory rejects even inherited descriptors above a
-lowered soft limit immediately before fork. The child then closes and re-proves
-closed the exact pipe/null descriptors created after that inventory, before its
+is empty. A `/dev/fd` inventory rejects inherited descriptors above 2 before
+the runner creates its transient pipe and null descriptor. The child then
+closes and re-proves closed those exact transient descriptors before its
 identity drop. The parent blocks signals across each live-child
 window, then reaps the child and zeroes the buffer before restoring its prior
 signal mask. The child starts with an empty signal mask. The parent accepts an
@@ -48,9 +48,9 @@ only these fixed redacted `PASS`/`FAIL` rows and an overall row.
 1. Review `keychain-role-probe-runner.c` and
    `build-keychain-role-probe-runner.sh` from one pinned commit. The reviewed
    source SHA-256 is
-   `3b434f8ccaee6f1bc09ec0171cf4576ded8b96c6c83f4bfa9dbdcfe2a0e99af3`;
+   `4bdaf5ebda40e62fc379d47c95f5477075e2a58f01e2b1f215f6f13c56c682ca`;
    the only eligible artifact SHA-256 is
-   `356e6a01e178571c1ef1985c84a2ce1ca6028850e4ac13081e52f3edbda89076`.
+   `96b3c941dba152402728d825c19a9d586d852b718f4ff06a06bd37b4335658f9`.
 2. Copy only that builder and source to an absolute canonical root-owned,
    non-writable, ACL-free sealed source tree. Through `/usr/bin/env -i`, run
    `--build-release` with a new output under an equally sealed root-owned

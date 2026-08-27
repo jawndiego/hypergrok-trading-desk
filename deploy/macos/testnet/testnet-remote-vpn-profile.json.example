@@ -1,0 +1,42 @@
+{
+  "base": {
+    "dns_ipv4": "1.1.1.1",
+    "guest_configuration_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "ingress_interface": "enp0s2",
+    "local_lab_qualification_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+    "mac_ipv4_peer": "10.77.0.2/32",
+    "mac_ipv6_peer": "fd77:77::2/128",
+    "mac_public_key_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+    "nftables_policy_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+    "router_endpoint": "192.168.106.2:51820",
+    "router_ipv4_network": "10.77.0.0/24",
+    "router_public_key_hash": "5555555555555555555555555555555555555555555555555555555555555555",
+    "wan_interface": "enp0s1"
+  },
+  "helper": {
+    "exit_probe_hostname": "api.ipify.org",
+    "exit_probe_path": "/",
+    "guest_check_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "lima_binary_sha256": "f19a4fca3875e1017a5285672be4a62699c1e55918fb6a7afce86a14199e10d9"
+  },
+  "remote": {
+    "expected_exit_ipv4": "9.9.9.9",
+    "guest_configuration_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+    "guest_nftables_policy_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+    "guest_wg_egress_configuration_hash": "9999999999999999999999999999999999999999999999999999999999999999",
+    "guest_wg_exec_configuration_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "mac_pf_active_rules_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "mac_pf_root_rules_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "mac_physical_interface": "en1",
+    "mac_tunnel_interface": "utun9",
+    "pf_kill_switch_qualification_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "remote_endpoint_ipv4": "8.8.4.4",
+    "remote_endpoint_port": 51820,
+    "remote_peer_public_key_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "remote_qualification_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "tunnel_dns_ipv4": "1.1.1.1",
+    "tunnel_loss_qualification_hash": "1212121212121212121212121212121212121212121212121212121212121212",
+    "wan_interface": "enp0s1"
+  },
+  "schema_version": 1
+}

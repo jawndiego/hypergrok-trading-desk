@@ -3,7 +3,7 @@
   "artifact_kind": "inert-example",
   "plan_only": true,
   "apply_enabled": false,
-  "listener_compiled_enabled": false,
+  "listener_compiled_enabled": true,
   "testnet_only": true,
   "mainnet_authorized": false,
   "credentials_present": false,
@@ -21,6 +21,10 @@
     "generations_parent": "/private/var/db/trading-desk/control-private/chat-approval/broker-generations",
     "handoff_root": "/private/var/db/trading-desk-testnet-chat-handoffs",
     "ready_root": "/private/var/db/trading-desk-testnet-chat-ready",
+    "presentation_root": "/private/var/db/trading-desk-testnet-chat-presentations",
+    "qualification_evidence_root": "/private/var/db/trading-desk-testnet-chat-issuance-evidence",
+    "account_quote_root": "/private/var/db/trading-desk-testnet-chat-account-quotes",
+    "executor_registration_root": "/private/var/db/trading-desk-testnet-chat-executor-registration",
     "control_runtime_root": "/opt/trading-desk/current/control",
     "control_runtime_python": "/opt/trading-desk/current/control/.venv/bin/python",
     "launchd_plan": "/Library/LaunchDaemons/com.jawndiego.trading-desk-testnet-chat-broker.plist"
@@ -74,6 +78,22 @@
       "marker_mode": "0400",
       "marker_acl_entries": 0,
       "hard_entry_cap": 1024
+    },
+    "qualification_and_quote_namespaces": {
+      "owner_uid": 453,
+      "owner_gid": 453,
+      "directory_mode": "0700",
+      "full_source_control_acl": "uid-452 execute/read-file",
+      "quote_projection_research_acl": "uid-450 read,execute/read-file",
+      "file_mode": "0400"
+    },
+    "executor_registration_namespace": {
+      "owner_uid": 451,
+      "owner_gid": 451,
+      "directory_mode": "0700",
+      "directory_acl": "uid-452 execute",
+      "file_mode": "0400",
+      "file_acl": "uid-452 read"
     }
   },
   "service": {
@@ -85,7 +105,10 @@
     "sequential": true,
     "automatic_approval_retry": false,
     "artifact_first_publisher_implemented_offline": true,
-    "ready_consumer_compiled_enabled": false,
+    "same_process_live_issuer_implemented_offline": true,
+    "qualification_collector_compiled_enabled": true,
+    "executor_registration_compiled_enabled": true,
+    "ready_consumer_compiled_enabled": true,
     "run_at_load": false,
     "keep_alive": false,
     "launchd_disabled": true
@@ -96,13 +119,14 @@
     "socket connect behavior before and after reboot",
     "stale-node and replacement probes",
     "broker-generation crash and restart reconciliation",
-    "fixed authenticated account and market collector composition",
-    "same-process active-generation issuer and listener lifecycle",
+    "install the fixed UID-453 seven-read collector and evidence/projection ACLs",
+    "install the UID-451 preregistration receipt command and ACLs",
+    "activate and qualify the implemented same-process active-generation issuer lifecycle",
     "installed read-only proposal presentation ACL and configuration",
     "install and enable the implemented UID-452 artifact-first publisher and ready index",
     "install and enable the implemented cached UID-451 verified reader and consumer loop",
     "handoff and ready namespace ACL and replacement matrices",
-    "reviewed ready-marker archival and garbage collection before the 1024-entry cap",
+    "schedule and qualify implemented expired-ready-marker retirement before the 1024-entry cap",
     "live schema-v14 PRE_KEY and PRE_SEND signer, transport, and UNKNOWN-outcome qualification"
   ]
 }

@@ -31,7 +31,7 @@ class TestnetChatIssuanceProvenancePlanTests(unittest.TestCase):
         cls.plan = json.loads(PLAN_PATH.read_text(encoding="utf-8"))
         cls.markdown = MARKDOWN_PATH.read_text(encoding="utf-8")
 
-    def test_plan_is_inert_and_every_enable_create_network_key_write_flag_is_false(self) -> None:
+    def test_plan_separates_enabled_testnet_source_from_uninstalled_capabilities(self) -> None:
         self.assertEqual(
             "testnet_chat_issuance_provenance_plan.v1",
             self.plan["schema_version"],
@@ -41,11 +41,26 @@ class TestnetChatIssuanceProvenancePlanTests(unittest.TestCase):
         self.assertIs(True, self.plan["testnet_only"])
         self.assertIs(False, self.plan["mainnet_authorized"])
         flags = self.plan["capability_flags"]
-        self.assertTrue(flags)
-        self.assertTrue(all(value is False for value in flags.values()))
+        for field in (
+            "collector_runtime_enabled",
+            "collector_network_enabled",
+            "proposal_issuance_enabled",
+            "presentation_enabled",
+            "broker_listener_enabled",
+            "executor_registration_enabled",
+        ):
+            self.assertIs(True, flags[field], field)
+        for field in (
+            "apply_enabled",
+            "identity_creation_enabled",
+            "installation_enabled",
+            "credential_access_enabled",
+            "key_use_enabled",
+            "venue_write_enabled",
+        ):
+            self.assertIs(False, flags[field], field)
         for key, value in _walk(self.plan):
-            if key.endswith("_enabled") or key in {
-                "apply_enabled",
+            if key in {
                 "created",
                 "creation_authorized",
                 "credential_access",
@@ -87,7 +102,15 @@ class TestnetChatIssuanceProvenancePlanTests(unittest.TestCase):
             collector["fixed_endpoint"],
         )
         self.assertEqual(
-            ["clearinghouseState", "meta", "l2Book"],
+            [
+                "userRole",
+                "userAbstraction",
+                "clearinghouseState",
+                "frontendOpenOrders",
+                "meta",
+                "metaAndAssetCtxs",
+                "l2Book",
+            ],
             collector["allowed_request_families"],
         )
         self.assertTrue(collector["forbidden_endpoint"].endswith("/exchange"))
@@ -123,7 +146,7 @@ class TestnetChatIssuanceProvenancePlanTests(unittest.TestCase):
             <= required
         )
         self.assertEqual(
-            "account_evidence_hash",
+            "account_snapshot_hash",
             evidence["quote_service_required_hash_field"],
         )
         self.assertEqual(
@@ -145,13 +168,13 @@ class TestnetChatIssuanceProvenancePlanTests(unittest.TestCase):
 
         grant = self.plan["grant_provenance"]
         self.assertEqual(
-            "root-attended-preverification-receipt",
+            "executor-preregistration-trusted-grant-receipt",
             grant["current_option"],
         )
         self.assertEqual("public-key-verifiable-grant", grant["future_option"])
         self.assertIs(False, grant["broker_hmac_access"])
         self.assertIs(False, grant["broker_key_access"])
-        self.assertEqual((0, 0), (grant["receipt_owner_uid"], grant["receipt_owner_gid"]))
+        self.assertEqual((451, 451), (grant["receipt_owner_uid"], grant["receipt_owner_gid"]))
         self.assertIs(False, grant["free_trusted_grant_input_allowed"])
 
         registration = self.plan["executor_preregistration"]
@@ -199,7 +222,7 @@ class TestnetChatIssuanceProvenancePlanTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, encoded)
             self.assertNotIn(forbidden, self.markdown)
-        self.assertIn("inert design only", self.markdown)
+        self.assertIn("inert plan only", self.markdown)
         self.assertIn("Mainnet remains absent", self.markdown)
 
 

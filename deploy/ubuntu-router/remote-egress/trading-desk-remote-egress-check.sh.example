@@ -1,0 +1,219 @@
+#!/bin/sh
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+ingress_wg=wg-exec
+egress_wg=wg-egress
+wan_interface=__REVIEWED_WAN_INTERFACE__
+ingress_interface=__REVIEWED_INGRESS_INTERFACE__
+management_source=__REVIEWED_MANAGEMENT_SOURCE_CIDR__
+router_network=__REVIEWED_ROUTER_IPV4_NETWORK__
+mac_peer_address=__REVIEWED_MAC_IPV4_ADDRESS__
+mac_public_key=__REVIEWED_MAC_PUBLIC_KEY__
+router_listen_port=__REVIEWED_ROUTER_LISTEN_PORT__
+egress_address=__REVIEWED_EGRESS_IPV4_INTERFACE__
+egress_endpoint_ip=__REVIEWED_EGRESS_ENDPOINT_IPV4__
+egress_endpoint_port=__REVIEWED_EGRESS_ENDPOINT_PORT__
+egress_public_key=__REVIEWED_EGRESS_PUBLIC_KEY__
+egress_dns=__REVIEWED_EGRESS_DNS_IPV4__
+expected_exit_ip=__REVIEWED_EXPECTED_EXIT_IPV4__
+max_handshake_age=180
+
+[ "$(cat /proc/sys/net/ipv4/ip_forward)" = 1 ]
+[ "$(cat /proc/sys/net/ipv6/conf/all/forwarding)" = 0 ]
+
+for private_key in \
+    /etc/wireguard/trading-desk-router.key \
+    /etc/wireguard/trading-desk-egress.key
+do
+    [ -f "$private_key" ]
+    [ ! -L "$private_key" ]
+    [ "$(stat -c '%u:%g:%a:%h' "$private_key")" = 0:0:600:1 ]
+done
+
+for public_config in \
+    /etc/netplan/50-trading-desk-router.yaml \
+    /etc/wireguard/wg-exec.conf \
+    /etc/wireguard/wg-egress.conf \
+    /etc/nftables.conf \
+    /etc/sysctl.d/70-trading-desk-router.conf \
+    /etc/sysctl.d/71-trading-desk-remote-egress.conf \
+    /etc/systemd/system/wg-quick@wg-egress.service.d/override.conf \
+    /etc/systemd/system/wg-quick@wg-exec.service.d/remote-egress.conf
+do
+    [ -f "$public_config" ]
+    [ ! -L "$public_config" ]
+    [ "$(stat -c '%u:%g:%a:%h' "$public_config")" = 0:0:600:1 ]
+done
+! grep -Eq '^[[:space:]]*PrivateKey[[:space:]]*=' /etc/wireguard/wg-exec.conf
+! grep -Eq '^[[:space:]]*PrivateKey[[:space:]]*=' /etc/wireguard/wg-egress.conf
+
+systemctl is-active --quiet nftables.service
+systemctl is-active --quiet "wg-quick@${ingress_wg}.service"
+systemctl is-active --quiet "wg-quick@${egress_wg}.service"
+systemctl show "wg-quick@${egress_wg}.service" --property=After --value | grep -F 'nftables.service' >/dev/null
+systemctl show "wg-quick@${egress_wg}.service" --property=BindsTo --value | grep -F 'nftables.service' >/dev/null
+systemctl show "wg-quick@${egress_wg}.service" --property=Before --value | grep -F "wg-quick@${ingress_wg}.service" >/dev/null
+systemctl show "wg-quick@${ingress_wg}.service" --property=Requires --value | grep -F "wg-quick@${egress_wg}.service" >/dev/null
+systemctl show "wg-quick@${ingress_wg}.service" --property=BindsTo --value | grep -F "wg-quick@${egress_wg}.service" >/dev/null
+systemctl show "wg-quick@${ingress_wg}.service" --property=After --value | grep -F 'nftables.service' >/dev/null
+ip link show dev "$wan_interface" | grep -E '<[^>]*UP[^>]*>' >/dev/null
+ip -4 route show table main default | grep -F "dev ${wan_interface}" >/dev/null
+[ -z "$(ip -6 route show default)" ]
+[ -z "$(ip -o -6 address show dev "$wan_interface" scope global)" ]
+[ "$(cat /proc/sys/net/ipv4/conf/all/src_valid_mark)" = 1 ]
+
+input_rules=$(nft -nn list chain inet trading_desk_filter input)
+forward_rules=$(nft -nn list chain inet trading_desk_filter forward)
+output_rules=$(nft -nn list chain inet trading_desk_filter output)
+nat_rules=$(nft -nn list chain ip trading_desk_nat postrouting)
+printf '%s\n' "$input_rules" | grep -F 'policy drop' >/dev/null
+printf '%s\n' "$forward_rules" | grep -F 'policy drop' >/dev/null
+printf '%s\n' "$output_rules" | grep -F 'policy drop' >/dev/null
+[ "$(printf '%s\n' "$input_rules" | grep -c ' accept')" = 7 ]
+[ "$(printf '%s\n' "$forward_rules" | grep -c ' accept')" = 5 ]
+[ "$(printf '%s\n' "$output_rules" | grep -c ' accept')" = 9 ]
+printf '%s\n' "$input_rules" | grep -F 'iifname "lo" accept' >/dev/null
+printf '%s\n' "$input_rules" | grep -F 'ct state established,related accept' >/dev/null
+printf '%s\n' "$input_rules" | grep -F 'ip protocol icmp accept' >/dev/null
+printf '%s\n' "$input_rules" | grep -F 'ip6 nexthdr ipv6-icmp accept' >/dev/null
+printf '%s\n' "$input_rules" | grep -F "iifname \"${wan_interface}\" udp sport 67 udp dport 68 accept" >/dev/null
+printf '%s\n' "$input_rules" | grep -F "iifname \"${ingress_interface}\" ip saddr ${management_source} udp dport ${router_listen_port} accept" >/dev/null
+printf '%s\n' "$input_rules" | grep -F "iifname \"${ingress_interface}\" ip saddr ${management_source} tcp dport 22 accept" >/dev/null
+printf '%s\n' "$forward_rules" | grep -F "iifname \"${ingress_wg}\" oifname \"${egress_wg}\" ip saddr ${router_network} ip daddr ${egress_dns} udp dport 53" >/dev/null
+printf '%s\n' "$forward_rules" | grep -F "iifname \"${ingress_wg}\" oifname \"${egress_wg}\" ip saddr ${router_network} ip daddr ${egress_dns} tcp dport 53" >/dev/null
+printf '%s\n' "$forward_rules" | grep -F "iifname \"${ingress_wg}\" oifname \"${egress_wg}\" ip saddr ${router_network} tcp dport 443" >/dev/null
+printf '%s\n' "$forward_rules" | grep -F "iifname \"${ingress_wg}\" oifname \"${egress_wg}\" ip saddr ${router_network} udp dport 123" >/dev/null
+printf '%s\n' "$forward_rules" | grep -F "iifname \"${egress_wg}\" oifname \"${ingress_wg}\" ip daddr ${router_network} ct state established,related accept" >/dev/null
+! printf '%s\n' "$forward_rules" | grep -F "iifname \"${ingress_wg}\" oifname \"${wan_interface}\"" >/dev/null
+printf '%s\n' "$output_rules" | grep -F 'oifname "lo" accept' >/dev/null
+printf '%s\n' "$output_rules" | grep -F "oifname \"${ingress_interface}\" ct state established,related accept" >/dev/null
+printf '%s\n' "$output_rules" | grep -F "oifname \"${egress_wg}\" ct state established,related accept" >/dev/null
+! printf '%s\n' "$output_rules" | grep -E '^[[:space:]]*ct state established,related accept' >/dev/null
+printf '%s\n' "$output_rules" | grep -F "oifname \"${wan_interface}\" udp sport 68 udp dport 67 accept" >/dev/null
+printf '%s\n' "$output_rules" | grep -F "oifname \"${wan_interface}\" ip daddr ${egress_endpoint_ip} udp dport ${egress_endpoint_port} accept" >/dev/null
+printf '%s\n' "$output_rules" | grep -F "oifname \"${egress_wg}\" ip daddr ${egress_dns} udp dport 53" >/dev/null
+printf '%s\n' "$output_rules" | grep -F "oifname \"${egress_wg}\" ip daddr ${egress_dns} tcp dport 53" >/dev/null
+printf '%s\n' "$output_rules" | grep -F "oifname \"${egress_wg}\" tcp dport 443" >/dev/null
+printf '%s\n' "$output_rules" | grep -F "oifname \"${egress_wg}\" udp dport 123" >/dev/null
+! printf '%s\n' "$output_rules" | grep -F "oifname \"${wan_interface}\" tcp dport 443" >/dev/null
+printf '%s\n' "$nat_rules" | grep -F "oifname \"${egress_wg}\" ip saddr ${router_network} masquerade" >/dev/null
+! printf '%s\n' "$nat_rules" | grep -F "oifname \"${wan_interface}\"" >/dev/null
+
+[ "$(wg show "$ingress_wg" listen-port)" = "$router_listen_port" ]
+[ "$(wg show "$ingress_wg" peers)" = "$mac_public_key" ]
+[ "$(wg show "$egress_wg" peers)" = "$egress_public_key" ]
+ip -4 address show dev "$egress_wg" | grep -F "inet ${egress_address}" >/dev/null
+ingress_allowed=$(wg show "$ingress_wg" allowed-ips)
+[ "$(printf '%s\n' "$ingress_allowed" | wc -l | tr -d ' ')" = 1 ]
+printf '%s\n' "$ingress_allowed" | grep -F "$mac_public_key" | grep -F "${mac_peer_address}/32" >/dev/null
+egress_allowed=$(wg show "$egress_wg" allowed-ips)
+[ "$(printf '%s\n' "$egress_allowed" | wc -l | tr -d ' ')" = 1 ]
+printf '%s\n' "$egress_allowed" | grep -F "$egress_public_key" | grep -F '0.0.0.0/0' >/dev/null
+egress_endpoint=$(wg show "$egress_wg" endpoints | awk -v expected="$egress_public_key" '$1 == expected { print $2 }')
+[ "$egress_endpoint" = "${egress_endpoint_ip}:${egress_endpoint_port}" ]
+
+now=$(date +%s)
+latest_handshake_for() {
+    interface=$1
+    peer=$2
+    latest_handshake=$(wg show "$interface" latest-handshakes | awk -v expected="$peer" '$1 == expected { print $2 }')
+    [ -n "$latest_handshake" ]
+    [ "$latest_handshake" -gt 0 ]
+    age=$((now - latest_handshake))
+    [ "$age" -ge 0 ]
+    [ "$age" -le "$max_handshake_age" ]
+    printf '%s\n' "$latest_handshake"
+}
+wg_exec_latest_handshake=$(latest_handshake_for "$ingress_wg" "$mac_public_key")
+wg_egress_latest_handshake=$(latest_handshake_for "$egress_wg" "$egress_public_key")
+
+egress_mark=$(wg show "$egress_wg" fwmark)
+[ "$egress_mark" = 0xca6d ]
+ip -4 rule show | grep -F '11000: from all lookup main suppress_prefixlength 0' >/dev/null
+ip -4 rule show | grep -F '11010: not from all fwmark 0xca6d lookup 51821' >/dev/null
+ip -4 route show table 51821 | grep -F "default dev ${egress_wg}" >/dev/null
+ip -4 route get "$egress_dns" | grep -F "dev ${egress_wg}" >/dev/null
+ip -4 route get "$egress_endpoint_ip" mark "$egress_mark" | grep -F "dev ${wan_interface}" >/dev/null
+
+ingress_transfer=$(wg show "$ingress_wg" transfer | awk -v expected="$mac_public_key" '$1 == expected { print $2 " " $3 }')
+egress_transfer=$(wg show "$egress_wg" transfer | awk -v expected="$egress_public_key" '$1 == expected { print $2 " " $3 }')
+[ -n "$ingress_transfer" ]
+[ -n "$egress_transfer" ]
+wg_exec_rx_bytes=$(printf '%s\n' "$ingress_transfer" | awk '{print $1}')
+wg_exec_tx_bytes=$(printf '%s\n' "$ingress_transfer" | awk '{print $2}')
+wg_egress_rx_bytes=$(printf '%s\n' "$egress_transfer" | awk '{print $1}')
+wg_egress_tx_bytes=$(printf '%s\n' "$egress_transfer" | awk '{print $2}')
+for counter in \
+    "$wg_exec_rx_bytes" \
+    "$wg_exec_tx_bytes" \
+    "$wg_egress_rx_bytes" \
+    "$wg_egress_tx_bytes"
+do
+    case "$counter" in
+        ''|*[!0-9]*) exit 1 ;;
+    esac
+done
+forwarded_https_packets=$(printf '%s\n' "$forward_rules" | grep -F "iifname \"${ingress_wg}\" oifname \"${egress_wg}\" ip saddr ${router_network} tcp dport 443" | awk '{for (index=1; index<=NF; index++) if ($index == "packets") { print $(index+1); exit }}')
+case "$forwarded_https_packets" in
+    ''|*[!0-9]*) exit 1 ;;
+esac
+
+configuration_lines=$(sha256sum \
+    /etc/netplan/50-trading-desk-router.yaml \
+    /etc/wireguard/wg-exec.conf \
+    /etc/wireguard/wg-egress.conf \
+    /etc/nftables.conf \
+    /etc/sysctl.d/70-trading-desk-router.conf \
+    /etc/sysctl.d/71-trading-desk-remote-egress.conf \
+    /etc/systemd/system/wg-quick@wg-egress.service.d/override.conf \
+    /etc/systemd/system/wg-quick@wg-exec.service.d/remote-egress.conf)
+configuration_hash=$(printf '%s\n' "$configuration_lines" | sha256sum | awk '{print $1}')
+guest_wg_exec_configuration_hash=$(sha256sum /etc/wireguard/wg-exec.conf | awk '{print $1}')
+guest_wg_egress_configuration_hash=$(sha256sum /etc/wireguard/wg-egress.conf | awk '{print $1}')
+nftables_policy_hash=$(nft --stateless list ruleset | sha256sum | awk '{print $1}')
+remote_peer_public_key_hash=$(printf '%s' "$egress_public_key" | sha256sum | awk '{print $1}')
+guest_check_sha256=$(sha256sum "$0" | awk '{print $1}')
+
+cat <<EOF
+guest_health_schema_version=testnet_remote_egress_guest_health.v1
+mode=testnet_remote_vpn_exit
+observed_at_epoch_seconds=${now}
+wan_interface=${wan_interface}
+ingress_interface=${ingress_interface}
+ingress_wg_interface=${ingress_wg}
+egress_wg_interface=${egress_wg}
+egress_endpoint_ipv4=${egress_endpoint_ip}
+egress_endpoint_port=${egress_endpoint_port}
+egress_dns_ipv4=${egress_dns}
+expected_exit_ipv4=${expected_exit_ip}
+configuration_hash=${configuration_hash}
+guest_wg_exec_configuration_hash=${guest_wg_exec_configuration_hash}
+guest_wg_egress_configuration_hash=${guest_wg_egress_configuration_hash}
+nftables_policy_hash=${nftables_policy_hash}
+guest_nftables_policy_hash=${nftables_policy_hash}
+remote_peer_public_key_hash=${remote_peer_public_key_hash}
+guest_check_sha256=${guest_check_sha256}
+wg_exec_latest_handshake_at_epoch_seconds=${wg_exec_latest_handshake}
+wg_egress_latest_handshake_at_epoch_seconds=${wg_egress_latest_handshake}
+wg_exec_rx_bytes=${wg_exec_rx_bytes}
+wg_exec_tx_bytes=${wg_exec_tx_bytes}
+wg_egress_rx_bytes=${wg_egress_rx_bytes}
+wg_egress_tx_bytes=${wg_egress_tx_bytes}
+forwarded_https_packets=${forwarded_https_packets}
+ipv4_forwarding_enabled=true
+ipv6_forwarding_enabled=false
+nft_input_default_drop=true
+nft_forward_default_drop=true
+nft_output_default_drop=true
+direct_wan_forward_allowed=false
+direct_wan_https_output_allowed=false
+remote_vpn_exit_configured=true
+vpn_qualified=false
+testnet_only=true
+mainnet_authorized=false
+credential_present=false
+venue_write_attempted=false
+EOF
+printf '%s\n' "router_remote_egress_checks_passed"

@@ -2,7 +2,7 @@
  * One-shot, attended macOS System Keychain provisioner.
  *
  * This program has no caller-selected operation, path, label, account, or
- * trusted application.  Each invocation creates one of four fixed TESTNET
+ * trusted application.  Each invocation creates one of six fixed TESTNET
  * generic-password items, with its initial ACL bound to the matching installed
  * role reader.
  * It has no Keychain search, read, update, delete, export, or list path.
@@ -44,8 +44,8 @@
 #define CONTROL_READER "/opt/trading-desk/libexec/trading-keychain-reader-control-v1"
 #define EXECUTOR_IDENTIFIER "com.jawndiego.trading-desk.keychain-reader.executor.v1"
 #define CONTROL_IDENTIFIER "com.jawndiego.trading-desk.keychain-reader.control.v1"
-#define EXECUTOR_SHA256 "42e583ee40d48546a92bf40bf650fa576ec3d86455bf663cc3760b90d050df27"
-#define CONTROL_SHA256 "da10752940f726258f4e2439b657db0c2f3fefcb3c30ef6a1eaa69df3da8e194"
+#define EXECUTOR_SHA256 "8694d14a94ee00a2ac039b7d5cd26c4184e13840aabe1cac2b0d084a629e0ff7"
+#define CONTROL_SHA256 "2ce4ba34366b67b0280302e042ffae67547cb39924353c62f88f5782b9dc52e9"
 #define SECRET_HEX_LENGTH 64U
 #define RANDOM_LENGTH 32U
 #define INPUT_LENGTH 1024U
@@ -149,10 +149,100 @@ static void secure_zero(void *value, size_t length)
     }
 }
 
-static int fail(void)
+enum failure_stage {
+    FAILURE_ARGUMENTS,
+    FAILURE_SETRLIMIT,
+    FAILURE_MLOCK,
+    FAILURE_IDENTITY,
+    FAILURE_ENVIRONMENT,
+    FAILURE_TERMINAL,
+    FAILURE_SELF_PATH_RESOLUTION,
+    FAILURE_SELF_FILE_TYPE,
+    FAILURE_SELF_FILE_OWNER,
+    FAILURE_SELF_FILE_MODE,
+    FAILURE_SELF_FILE_LINK,
+    FAILURE_SELF_FILE_ACL,
+    FAILURE_SELF_DIRECTORY_CHAIN,
+    FAILURE_SELF_STATIC_CODE,
+    FAILURE_SYSTEM_KEYCHAIN_METADATA,
+    FAILURE_READER,
+    FAILURE_SECRET_INPUT,
+    FAILURE_RANDOM_GENERATION,
+    FAILURE_INTERACTION_DISABLE,
+    FAILURE_KEYCHAIN_OPEN,
+    FAILURE_ITEM_CREATE,
+};
+
+static int fail_stage(enum failure_stage stage)
 {
-    static const char message[] = "keychain provisioner unavailable\n";
-    (void)write(STDERR_FILENO, message, sizeof(message) - 1U);
+    const char *message = "failure_stage=arguments\n";
+    size_t length;
+    switch (stage) {
+    case FAILURE_SETRLIMIT:
+        message = "failure_stage=setrlimit\n";
+        break;
+    case FAILURE_MLOCK:
+        message = "failure_stage=mlock\n";
+        break;
+    case FAILURE_IDENTITY:
+        message = "failure_stage=identity\n";
+        break;
+    case FAILURE_ENVIRONMENT:
+        message = "failure_stage=environment\n";
+        break;
+    case FAILURE_TERMINAL:
+        message = "failure_stage=terminal\n";
+        break;
+    case FAILURE_SELF_PATH_RESOLUTION:
+        message = "failure_stage=self_path_resolution\n";
+        break;
+    case FAILURE_SELF_FILE_TYPE:
+        message = "failure_stage=self_file_type\n";
+        break;
+    case FAILURE_SELF_FILE_OWNER:
+        message = "failure_stage=self_file_owner\n";
+        break;
+    case FAILURE_SELF_FILE_MODE:
+        message = "failure_stage=self_file_mode\n";
+        break;
+    case FAILURE_SELF_FILE_LINK:
+        message = "failure_stage=self_file_link\n";
+        break;
+    case FAILURE_SELF_FILE_ACL:
+        message = "failure_stage=self_file_acl\n";
+        break;
+    case FAILURE_SELF_DIRECTORY_CHAIN:
+        message = "failure_stage=self_directory_chain\n";
+        break;
+    case FAILURE_SELF_STATIC_CODE:
+        message = "failure_stage=self_static_code\n";
+        break;
+    case FAILURE_SYSTEM_KEYCHAIN_METADATA:
+        message = "failure_stage=system_keychain_metadata\n";
+        break;
+    case FAILURE_READER:
+        message = "failure_stage=reader\n";
+        break;
+    case FAILURE_SECRET_INPUT:
+        message = "failure_stage=secret_input\n";
+        break;
+    case FAILURE_RANDOM_GENERATION:
+        message = "failure_stage=random_generation\n";
+        break;
+    case FAILURE_INTERACTION_DISABLE:
+        message = "failure_stage=interaction_disable\n";
+        break;
+    case FAILURE_KEYCHAIN_OPEN:
+        message = "failure_stage=keychain_open\n";
+        break;
+    case FAILURE_ITEM_CREATE:
+        message = "failure_stage=item_create\n";
+        break;
+    case FAILURE_ARGUMENTS:
+        break;
+    }
+    length = strlen(message);
+    (void)write(STDERR_FILENO, message, length);
     return 70;
 }
 
@@ -168,11 +258,16 @@ static int success(void)
 
 static bool has_extended_acl(const char *path)
 {
-    acl_t acl = acl_get_file(path, ACL_TYPE_EXTENDED);
+    acl_t acl;
     acl_entry_t entry;
+    struct stat value;
     int status;
+    errno = 0;
+    acl = acl_get_file(path, ACL_TYPE_EXTENDED);
     if (acl == NULL) {
-        return true;
+        /* Darwin reports an existing ACL-free object as ENOENT. Recheck the
+         * path so a removal race or any other ACL error still fails closed. */
+        return errno != ENOENT || lstat(path, &value) != 0;
     }
     status = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry);
     (void)acl_free(acl);
@@ -328,19 +423,54 @@ cleanup:
     return matches;
 }
 
-static bool secure_self(void)
+static bool secure_self_path_resolution(void)
 {
     char raw_path[PATH_MAX];
     char resolved[PATH_MAX];
     uint32_t size = (uint32_t)sizeof(raw_path);
+
+    return _NSGetExecutablePath(raw_path, &size) == 0 &&
+           realpath(raw_path, resolved) != NULL &&
+           strcmp(resolved, EXPECTED_PATH) == 0;
+}
+
+static bool secure_self_file_type(void)
+{
+    struct stat value;
+    return lstat(EXPECTED_PATH, &value) == 0 && S_ISREG(value.st_mode);
+}
+
+static bool secure_self_file_owner(void)
+{
+    struct stat value;
+    return lstat(EXPECTED_PATH, &value) == 0 &&
+           value.st_uid == 0 && value.st_gid == 0;
+}
+
+static bool secure_self_file_mode(void)
+{
+    struct stat value;
+    return lstat(EXPECTED_PATH, &value) == 0 &&
+           (value.st_mode & 07777U) == 0500;
+}
+
+static bool secure_self_file_link(void)
+{
+    struct stat value;
+    return lstat(EXPECTED_PATH, &value) == 0 && value.st_nlink == 1;
+}
+
+static bool secure_self_file_acl(void)
+{
+    return !has_extended_acl(EXPECTED_PATH);
+}
+
+static bool secure_self_directory_chain(void)
+{
     const char *const ancestors[] = {"/", "/private", "/private/var", "/private/var/root"};
     size_t index;
 
-    if (_NSGetExecutablePath(raw_path, &size) != 0 ||
-        realpath(raw_path, resolved) == NULL || strcmp(resolved, EXPECTED_PATH) != 0 ||
-        !secure_regular_file(EXPECTED_PATH, (uid_t)0, (gid_t)0, (mode_t)0500) ||
-        !secure_directory(PROVISIONING_DIRECTORY, (mode_t)0700) ||
-        !signed_code_matches(EXPECTED_PATH, EXPECTED_IDENTIFIER)) {
+    if (!secure_directory(PROVISIONING_DIRECTORY, (mode_t)0700)) {
         return false;
     }
     for (index = 0U; index < sizeof(ancestors) / sizeof(ancestors[0]); ++index) {
@@ -349,6 +479,11 @@ static bool secure_self(void)
         }
     }
     return true;
+}
+
+static bool secure_self_static_code(void)
+{
+    return signed_code_matches(EXPECTED_PATH, EXPECTED_IDENTIFIER);
 }
 
 static bool secure_system_keychain(void)
@@ -636,35 +771,96 @@ int main(int argc, char **argv)
     const struct credential_slot *slot = NULL;
     bool locked = false;
     int result = 70;
+    enum failure_stage failure = FAILURE_ARGUMENTS;
 
     (void)umask(077);
     secure_zero(&state, sizeof(state));
-    if (setrlimit(RLIMIT_CORE, &no_core) != 0 || mlock(&state, sizeof(state)) != 0) {
-        return fail();
+    if (setrlimit(RLIMIT_CORE, &no_core) != 0) {
+        return fail_stage(FAILURE_SETRLIMIT);
+    }
+    if (mlock(&state, sizeof(state)) != 0) {
+        return fail_stage(FAILURE_MLOCK);
     }
     locked = true;
     if (argc != 2 || argv == NULL || argv[0] == NULL || argv[1] == NULL ||
-        (slot = find_slot(argv[1])) == NULL || !exact_root_identity() ||
-        !empty_environment() || !fixed_terminal_descriptors() || !secure_self() ||
-        !secure_system_keychain() || !secure_reader(slot, &state)) {
+        (slot = find_slot(argv[1])) == NULL) {
+        goto cleanup;
+    }
+    failure = FAILURE_IDENTITY;
+    if (!exact_root_identity()) {
+        goto cleanup;
+    }
+    failure = FAILURE_ENVIRONMENT;
+    if (!empty_environment()) {
+        goto cleanup;
+    }
+    failure = FAILURE_TERMINAL;
+    if (!fixed_terminal_descriptors()) {
+        goto cleanup;
+    }
+    failure = FAILURE_SELF_PATH_RESOLUTION;
+    if (!secure_self_path_resolution()) {
+        goto cleanup;
+    }
+    failure = FAILURE_SELF_FILE_TYPE;
+    if (!secure_self_file_type()) {
+        goto cleanup;
+    }
+    failure = FAILURE_SELF_FILE_OWNER;
+    if (!secure_self_file_owner()) {
+        goto cleanup;
+    }
+    failure = FAILURE_SELF_FILE_MODE;
+    if (!secure_self_file_mode()) {
+        goto cleanup;
+    }
+    failure = FAILURE_SELF_FILE_LINK;
+    if (!secure_self_file_link()) {
+        goto cleanup;
+    }
+    failure = FAILURE_SELF_FILE_ACL;
+    if (!secure_self_file_acl()) {
+        goto cleanup;
+    }
+    failure = FAILURE_SELF_DIRECTORY_CHAIN;
+    if (!secure_self_directory_chain()) {
+        goto cleanup;
+    }
+    failure = FAILURE_SELF_STATIC_CODE;
+    if (!secure_self_static_code()) {
+        goto cleanup;
+    }
+    failure = FAILURE_SYSTEM_KEYCHAIN_METADATA;
+    if (!secure_system_keychain()) {
+        goto cleanup;
+    }
+    failure = FAILURE_READER;
+    if (!secure_reader(slot, &state)) {
         goto cleanup;
     }
     if (slot->supplied_by_operator) {
+        failure = FAILURE_SECRET_INPUT;
         if (!read_confirmed_signer(&state)) {
             goto cleanup;
         }
-    } else if (!generate_hex_secret(&state)) {
-        goto cleanup;
+    } else {
+        failure = FAILURE_RANDOM_GENERATION;
+        if (!generate_hex_secret(&state)) {
+            goto cleanup;
+        }
     }
 
+    failure = FAILURE_INTERACTION_DISABLE;
     status = SecKeychainSetUserInteractionAllowed(false);
     if (status != errSecSuccess) {
         goto cleanup;
     }
+    failure = FAILURE_KEYCHAIN_OPEN;
     status = SecKeychainOpen(SYSTEM_KEYCHAIN, &keychain);
     if (status != errSecSuccess || keychain == NULL) {
         goto cleanup;
     }
+    failure = FAILURE_ITEM_CREATE;
     if (!create_item(keychain, slot, state.secret)) {
         goto cleanup;
     }
@@ -679,7 +875,7 @@ cleanup:
         (void)munlock(&state, sizeof(state));
     }
     if (result != 0) {
-        result = fail();
+        result = fail_stage(failure);
     }
     return result;
 }

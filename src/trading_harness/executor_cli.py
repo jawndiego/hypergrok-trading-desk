@@ -26,6 +26,7 @@ from .execution_grant import (
     infrastructure_grant_confirmation,
 )
 from .executor_config import ExecutorConfig, load_executor_config
+from .executor_state_binding import verified_state_database_trust
 from .execution_store import ExecutionStore
 from .domain import Environment
 from .executor_service import (
@@ -48,6 +49,10 @@ from .planning import RiskSizingPolicy, risk_ticket_from_dict
 from .staging_inbox import StagingState, TradeStagingInbox, TrustedQuoteDecision
 from .testnet_chat_delivery import testnet_chat_execution_scope_from_config
 from .testnet_control import AttendedTestnetControlPlane
+from .testnet_remote_vpn_health_artifacts import (
+    build_installed_testnet_remote_vpn_promotion_guard,
+)
+from . import testnet_remote_vpn_health as remote_vpn_health_module
 
 
 Clock = Callable[[], datetime]
@@ -97,6 +102,36 @@ def _secret_provider(config, purpose: str) -> MacOSKeychainHexSecretProvider:
             keychain_path=config.keychain_path,
         )
     )
+
+
+def _wallet_provider(config: ExecutorConfig) -> MacOSKeychainCredentialProvider:
+    return MacOSKeychainCredentialProvider(
+        KeychainCredentialConfig(
+            service=config.credential.service,
+            account=config.credential.account,
+            expected_signer_address=config.api_wallet_address,
+            timeout_seconds=config.credential.timeout_seconds,
+            keychain_path=config.credential.keychain_path,
+        )
+    )
+
+
+def _available_status(provider: object, *, identity_verified: bool = False) -> dict[str, object]:
+    status_reader = getattr(provider, "status", None)
+    if not callable(status_reader):
+        raise TypeError("credential provider lacks a redacted status surface")
+    status = status_reader().as_dict()
+    for field in (
+        "credential_loaded",
+        "secret_exposed",
+        "provisioning_supported",
+        "write_supported",
+    ):
+        status.pop(field, None)
+    status["available"] = True
+    if identity_verified:
+        status["identity_matches_config"] = True
+    return status
 
 
 def _inbox(config: ExecutorConfig, *, clock: Clock = _clock) -> TradeStagingInbox:
@@ -217,6 +252,70 @@ def _dry_run(config_path: Path) -> int:
         return 0
     except Exception as error:
         return _failure("dry-run", error)
+
+
+def _check_executor_credentials(config_path: Path) -> int:
+    """Read and validate only the two executor-owned Keychain slots."""
+
+    try:
+        config = _load(config_path)
+        signer = _wallet_provider(config)
+        signer.check_available()
+        recovery = _secret_provider(config.recovery_credential, "recovery_hmac")
+        recovery.check_available()
+        _json(
+            {
+                "schema_version": "testnet_executor_credential_check.v1",
+                "role": "executor",
+                "config_hash": config.config_hash,
+                "slots": {
+                    "signer": _available_status(signer, identity_verified=True),
+                    "recovery": _available_status(recovery),
+                },
+                "credential_values_returned_to_operator": False,
+                "network_accessed": False,
+                "venue_write_attempted": False,
+                "mainnet_authorized": False,
+                "ready": True,
+            }
+        )
+        return 0
+    except Exception as error:
+        return _failure("check-executor-credentials", error)
+
+
+def _check_control_credentials(config_path: Path) -> int:
+    """Read and validate only the two control-owned HMAC slots."""
+
+    try:
+        config = _load(config_path)
+        providers = {
+            "approval": _secret_provider(
+                config.approval_credential, "approval_hmac"
+            ),
+            "grant": _secret_provider(config.grant_credential, "grant_hmac"),
+        }
+        for provider in providers.values():
+            provider.check_available()
+        _json(
+            {
+                "schema_version": "testnet_control_credential_check.v1",
+                "role": "control",
+                "config_hash": config.config_hash,
+                "slots": {
+                    name: _available_status(provider)
+                    for name, provider in providers.items()
+                },
+                "credential_values_returned_to_operator": False,
+                "network_accessed": False,
+                "venue_write_attempted": False,
+                "mainnet_authorized": False,
+                "ready": True,
+            }
+        )
+        return 0
+    except Exception as error:
+        return _failure("check-control-credentials", error)
 
 
 def _acknowledge_halt(
@@ -434,6 +533,100 @@ def _authorize_stage(
         return _failure("authorize-stage", error)
 
 
+def _prepare_chat_stage(
+    config_path: Path,
+    grant_path: Path,
+    document_id: str,
+    *,
+    clock: Clock = _clock,
+) -> int:
+    """Verify and preregister one chat stage without creating authority."""
+
+    try:
+        config = _load(config_path)
+        for path, label in (
+            (config.paths.staging_database, "staging"),
+            (config.paths.execution_database, "executor"),
+        ):
+            _require_state_file(config, path, label=label)
+        view, payload, ticket = _ticket_view(config, document_id, clock=clock)
+        now = clock()
+        signed_grant = load_signed_infrastructure_grant(grant_path)
+        expected_issuer = f"{config.node_id}-grant-authority"
+        expected_key_id = config.grant_credential.account
+        expected_audience = f"{config.node_id}-learning-profile"
+        if (
+            signed_grant.issuer_id != expected_issuer
+            or signed_grant.key_id != expected_key_id
+            or signed_grant.audience != expected_audience
+        ):
+            raise StateConflict("signed grant targets another configured authority")
+        grant_secret = _secret_provider(
+            config.grant_credential,
+            "grant_hmac",
+        ).load_secret()
+        authority = TestnetInfrastructureGrantAuthority(
+            grant_secret,
+            issuer_id=expected_issuer,
+            key_id=expected_key_id,
+            audience=expected_audience,
+        )
+        trusted_grant = authority.verify(signed_grant, at=now)
+        if payload.get("infrastructure_grant_hash") != trusted_grant.grant_hash:
+            raise StateConflict("staged ticket differs from authenticated grant")
+        with verified_state_database_trust(
+            config,
+            config.paths.execution_database,
+            require_named_acl=True,
+        ):
+            store = ExecutionStore(
+                config.paths.execution_database,
+                environment=Environment.TESTNET,
+                account_id=config.account_id,
+                max_reserved_loss=config.max_reserved_loss,
+                max_reserved_notional=config.max_reserved_notional,
+                chat_scope=testnet_chat_execution_scope_from_config(config),
+                must_exist=True,
+            )
+            store.register_infrastructure_grant(trusted_grant, at=now)
+            store.register_ticket(
+                ticket,
+                infrastructure_grant_hash=trusted_grant.grant_hash,
+                stored_at=now,
+            )
+            if (
+                store.get_infrastructure_grant(trusted_grant.grant_hash)
+                != trusted_grant
+                or risk_ticket_from_dict(store.get_ticket_payload(ticket.ticket_hash))
+                != ticket
+            ):
+                raise StateConflict("chat preregistration did not round-trip exact inputs")
+            store_identity_hash = store.get_identity_hash()
+        _json(
+            {
+                "schema_version": "testnet_chat_stage_preregistration.v1",
+                "document_id": view.document.document_id,
+                "document_hash": view.document.document_hash,
+                "ticket_id": ticket.ticket_id,
+                "ticket_hash": ticket.ticket_hash,
+                "plan_hash": ticket.plan.plan_hash if ticket.plan is not None else None,
+                "infrastructure_grant_hash": trusted_grant.grant_hash,
+                "execution_store_identity_hash": store_identity_hash,
+                "executor_receipt_required": True,
+                "approval_created": False,
+                "risk_reserved": False,
+                "command_created": False,
+                "signer_loaded": False,
+                "venue_write_attempted": False,
+                "testnet_only": True,
+                "mainnet_authorized": False,
+            }
+        )
+        return 0
+    except Exception as error:
+        return _failure("prepare-chat-stage", error)
+
+
 def _secure_new_artifact(path: Path, document: dict[str, object]) -> None:
     if not path.is_absolute() or path == Path(path.anchor):
         raise ValidationError("grant output path must be a non-root absolute path")
@@ -551,16 +744,13 @@ def _run(
 ) -> int:
     try:
         config = _load(config_path)
+        if not remote_vpn_health_module.REMOTE_VPN_SUBMISSION_GATE_ENABLED:
+            raise StateConflict("remote VPN submission gate is compiled off")
         state = open_testnet_executor_state(config)
-        wallet = MacOSKeychainCredentialProvider(
-            KeychainCredentialConfig(
-                service=config.credential.service,
-                account=config.credential.account,
-                expected_signer_address=config.api_wallet_address,
-                timeout_seconds=config.credential.timeout_seconds,
-                keychain_path=config.credential.keychain_path,
-            )
-        ).load_wallet()
+        route_health_gate = build_installed_testnet_remote_vpn_promotion_guard(
+            config.config_hash
+        )
+        wallet = _wallet_provider(config).load_wallet()
         recovery_secret = _secret_provider(
             config.recovery_credential, "recovery_hmac"
         ).load_secret()
@@ -572,6 +762,7 @@ def _run(
             recovery_secret=recovery_secret,
             instance_id=selected_instance,
             worker_id=selected_worker,
+            route_health_gate=route_health_gate,
         )
         stop_event = threading.Event()
 
@@ -626,6 +817,14 @@ def build_parser() -> argparse.ArgumentParser:
             "dry-run",
             "inspect the next lane without credentials, network, or runtime transition",
         ),
+        (
+            "check-executor-credentials",
+            "verify signer identity and recovery Keychain access without network I/O",
+        ),
+        (
+            "check-control-credentials",
+            "verify approval and grant Keychain access without network I/O",
+        ),
     ):
         selected = commands.add_parser(name, help=help_text)
         selected.add_argument("--config", type=_absolute_path, required=True)
@@ -642,6 +841,17 @@ def build_parser() -> argparse.ArgumentParser:
     authorize.add_argument("--grant", type=_absolute_path, required=True)
     authorize.add_argument("--document-id", required=True)
     authorize.add_argument("--approver-id", required=True)
+
+    prepare_chat = commands.add_parser(
+        "prepare-chat-stage",
+        help=(
+            "verify a signed TESTNET grant and preregister one staged ticket "
+            "without approval or reservation"
+        ),
+    )
+    prepare_chat.add_argument("--config", type=_absolute_path, required=True)
+    prepare_chat.add_argument("--grant", type=_absolute_path, required=True)
+    prepare_chat.add_argument("--document-id", required=True)
 
     acknowledge = commands.add_parser(
         "acknowledge-halt",
@@ -682,6 +892,10 @@ def _dispatch(arguments: argparse.Namespace) -> int:
         return _status(arguments.config)
     if arguments.command == "dry-run":
         return _dry_run(arguments.config)
+    if arguments.command == "check-executor-credentials":
+        return _check_executor_credentials(arguments.config)
+    if arguments.command == "check-control-credentials":
+        return _check_control_credentials(arguments.config)
     if arguments.command == "show-stage":
         return _show_stage(arguments.config, arguments.document_id)
     if arguments.command == "acknowledge-halt":
@@ -696,6 +910,12 @@ def _dispatch(arguments: argparse.Namespace) -> int:
             arguments.grant,
             arguments.document_id,
             arguments.approver_id,
+        )
+    if arguments.command == "prepare-chat-stage":
+        return _prepare_chat_stage(
+            arguments.config,
+            arguments.grant,
+            arguments.document_id,
         )
     if arguments.command == "issue-grant":
         return _issue_grant(
@@ -718,7 +938,14 @@ def _require_command_identity(arguments: argparse.Namespace) -> None:
         return
     config = _load(arguments.config)
     control_commands = frozenset(
-        {"show-stage", "authorize-stage", "acknowledge-halt", "issue-grant"}
+        {
+            "show-stage",
+            "authorize-stage",
+            "prepare-chat-stage",
+            "acknowledge-halt",
+            "issue-grant",
+            "check-control-credentials",
+        }
     )
     if arguments.command in control_commands:
         expected_uid = config.control_uid

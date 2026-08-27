@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+if [ "${1-}" != "--plan" ] || [ "$#" -ne 1 ]; then
+    printf '%s\n' 'remote_egress_test_apply_disabled' >&2
+    exit 64
+fi
+
+cat <<'EOF'
+schema_version=testnet_remote_egress_test_plan.v1
+mode=testnet_remote_vpn_exit
+apply_enabled=false
+test_execution_enabled=false
+venue_write_enabled=false
+mainnet_authorized=false
+expected_exit_ipv4=__REVIEWED_EXPECTED_EXIT_IPV4__
+guest_check_command=sudo /usr/local/libexec/trading-desk-remote-egress-check
+activation_order=From the VM console: install and validate the replacement nftables policy first, apply sysctl, daemon-reload, start wg-egress, run its handshake check, then start wg-exec; never expose wg-exec before nftables and wg-egress.
+boot_order=wg-exec requires and binds to both nftables and wg-egress; wg-egress binds to nftables and starts before wg-exec.
+mac_ipv4_route_command=/sbin/route -n get -inet default
+mac_ipv6_route_command=/sbin/route -n get -inet6 default
+read_only_testnet_info_command=/usr/bin/curl --fail --silent --show-error --max-time 3 --proto =https --tlsv1.2 --header 'Content-Type: application/json' --data '{"type":"meta"}' https://api.hyperliquid-testnet.xyz/info
+exit_ip_observation_command=/usr/bin/curl --fail --silent --show-error --max-time 3 --proto =https --tlsv1.2 https://api.ipify.org
+tunnel_loss_test=Stop wg-quick@wg-egress from the VM console; DNS, TESTNET HTTPS and arbitrary IPv4 must fail while the physical-WAN WireGuard endpoint remains the only non-DHCP output exception.
+firewall_loss_test=Stop nftables from the VM console only after a console recovery plan exists; this is an expected qualification failure and must never be automated remotely.
+host_bypass_test=Stop wg-exec and record whether macOS restores a physical default route; until a separately reviewed Mac kill switch exists, this profile does not prevent host bypass.
+success_condition=The observed public IPv4 exactly matches the reviewed exit IPv4; both WireGuard handshakes and counters advance; no DNS, IPv6, QUIC, DoT or direct-WAN fallback succeeds during attended leak tests.
+remote_vpn_exit_profile_emitted=true
+remote_vpn_exit_configured=false
+host_direct_bypass_prevented=false
+trusted_route_health_collector_configured=false
+route_health_evidence_durably_bound=false
+vpn_qualified=false
+EOF

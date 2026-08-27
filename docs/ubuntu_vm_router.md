@@ -353,20 +353,70 @@ final runtime submission guard before authority/send unless a trusted reader
 returns exact active evidence. Each reader is bracketed by service-clock
 samples; rollback or expiry during the read fails, and the final sample must
 leave the full two-second PRE_SEND TTL before authority. Failure voids a
-proven-unsent entry and never selects a direct route. Recovery remains independent. The repository has no
-trusted collector, durable expectation loader or binding of the evidence hash
-into dispatch preflight/attempt/submission authority, so the test-injected
-reader is not a commissioning path.
+proven-unsent entry and never selects a direct route. Recovery remains
+independent. The repository now has fixed local/remote root-owned caches, a
+continuous fixed remote sample/probe collector, runnable hash-pinned helpers
+and route-bound submission authority. No helper, schedule, PF/tunnel or
+commissioned artifact is installed, so the collector path remains unavailable
+by default.
 A route-only preparation denial can release only the current claim and requeue
 that same command while its ticket and all three legs remain active and no
 attempt/authority exists. Before preview, credential-free maintenance
 normalizes expired claims and atomically terminalizes queued work at the
 earliest ticket/leg expiry, releasing its proven-unsent reservation. Thus a
 permanent outage cannot strand the account's active-command slot.
-A future production reader must load already-collected local evidence within a
-strict bound. It must not run SSH, route tools, DNS, TLS or the `/info` probe
-while the final runtime submission lock is held; a separate least-privilege
-collector owns the two observations and atomic evidence publication.
+`build_installed_testnet_route_health_gate()` is the production composition
+hook. It loads only already-collected local evidence within a strict byte and
+filesystem bound. It does not run SSH, route tools, DNS, TLS or the `/info`
+probe while the final runtime submission lock is held; the separate collector
+owns those observations and atomic evidence publication.
+
+### Fixed route-health artifact and collector boundary
+
+The local-mode expectation and short-lived cache have no configurable path:
+
+```text
+/private/var/db/trading-desk-testnet-route-health/<executor-config-hash>/expectation.json
+/private/var/db/trading-desk-testnet-route-health/<executor-config-hash>/evidence.json
+```
+
+Both directory levels must be root:wheel mode `0755` and ACL-free. Both files
+must be root:wheel mode `0444`, single-link, ACL-free regular files no larger
+than 128 KiB. The reader opens through a verified directory descriptor with
+`O_NOFOLLOW`, checks stable metadata around one bounded read, requires exact
+canonical schemas, and re-verifies the config/manifest/topology bindings. The
+root publisher writes a new file, fully syncs it, atomically replaces the cache,
+fully syncs the parent, and reads the result back. The executor receives only
+that cached document.
+
+`trading-harness-route-health-collector --collect` uses the fixed executor
+config and makes exactly three helper calls without retries: sample, read-only
+probe, sample. The helpers must be root:wheel mode `0555`, single-link and
+ACL-free at these fixed paths:
+
+```text
+/usr/local/libexec/trading-desk-testnet-route-sample
+/usr/local/libexec/trading-desk-testnet-route-probe
+```
+
+Each helper receives no argument, stdin, credential environment or secret. The
+sample helper has three seconds and must emit one canonical
+`testnet_route_health_sample.v1` document combining current Mac default-route
+and guest-check observations. The probe helper has six seconds and must emit
+one canonical `testnet_route_health_probe_receipt.v1` for the fixed TESTNET
+`POST /info {"type":"meta"}` request plus the retained negative-path
+qualification/public-IP comparison. Output is bounded to 128 KiB. Clock
+rollback, stale observations, changed topology, a non-advancing HTTPS/WireGuard
+counter, wrong request hash, insufficient headroom before publication, or any
+helper failure produces no publication and no retry. Headroom is checked again
+after the atomic write; a cache that became too old during storage is left as
+non-authoritative history and the executor gate rejects it.
+
+Those two helper executables are contracts, not installed implementations.
+The Mac-to-guest observation transport and retained local qualification receipt
+must be selected and reviewed before they can be sealed. No expectation,
+evidence file, helper, launchd job, ACL, network setting or credential is
+installed by this repository change.
 
 If the WireGuard route remains selected but blackholes after the final check,
 one failed/unknown attempt is still possible. If macOS removes that route,
@@ -403,34 +453,75 @@ key on its owning machine; render and verify the router bundle; install it from
 the VM console; activate the Mac tunnel; then execute and retain the rendered
 local test plan. This qualifies the local failure/routing lab only.
 
-A real remote VPN exit is a separate topology: it needs a second VM-to-remote
-WireGuard peer, default-drop VM output restricted to that peer and tunnel,
-tunnel-only DNS/NTP, and NAT only onto the remote interface. The repository has
-none of those artifacts. A macOS PF/Network Extension kill switch also remains
-absent, so even that future remote peer would not by itself prevent host route
-bypass.
+## Remote TESTNET VPN egress overlay — renderable, not applied
 
-The future remote-exit extension must be a new reviewed schema/mode, never an
-environment toggle or live edit of `local_nat_lab`. It must bind a fixed remote
-gateway public key and endpoint IP/UDP port, generate the VM-side private key
-only inside the guest, and add a distinct `wg-egress` interface. VM output must
-default-drop except the outer handshake to that fixed endpoint plus established
-traffic; forwarded DNS, NTP and HTTPS must exit only `wg-egress`, and NAT must
-apply only from `wg-exec` to `wg-egress`. Loss of the remote peer must blackhole,
-not fall back to the VM WAN. A separate macOS PF/Network Extension or physical
-router must then prove that the Mac cannot reach TESTNET, DNS, IPv4 or IPv6
-outside `wg-exec`. Provider account setup, endpoint selection, static-IP terms,
-jurisdiction and live leak/failure tests remain operator decisions outside this
-credential-free repository slice.
+The repository now has a separate `testnet_remote_vpn_exit` public-data overlay
+under `deploy/ubuntu-router/remote-egress`, rendered by
+`scripts/render_ubuntu_remote_egress.py`. It composes with one exact hashed
+`local_nat_lab` bundle and does not mutate that mode in place. The overlay adds
+`wg-egress`, replaces the guest firewall with default-drop output/forward
+policies, permits the physical WAN only for DHCP and the fixed outer WireGuard
+endpoint, forwards DNS/NTP/HTTPS only from `wg-exec` to `wg-egress`, and NATs
+only onto `wg-egress`. It emits no direct-WAN fallback: loss of the remote peer
+blackholes client traffic.
+
+The operator must obtain five public values from a WireGuard-capable provider:
+the provider-assigned tunnel IPv4 interface, fixed endpoint IPv4 and UDP port,
+remote peer public key, tunnel DNS IPv4, and expected exit IPv4. A hostname or
+rotating endpoint is deliberately unsupported. The spec also repeats the
+reviewed VM interface names, Mac peer public key and local topology, and binds
+the exact base-router manifest hash. Public-key encoding cannot establish that
+a value was derived from a public rather than private key, so provenance is an
+attended operator check.
+
+With populated public values and an already rendered base bundle, render and
+verify without credentials or network mutation:
+
+```sh
+python3 scripts/render_ubuntu_remote_egress.py \
+  --render \
+  --base-router-bundle /absolute/local-router-bundle \
+  --spec /absolute/remote-egress-spec.json \
+  --output /absolute/remote-egress-bundle
+
+python3 scripts/render_ubuntu_remote_egress.py \
+  --verify \
+  --base-router-bundle /absolute/local-router-bundle \
+  --bundle /absolute/remote-egress-bundle \
+  --expected-manifest-sha256 REVIEWED_64_HEX_DIGEST
+```
+
+The output contains the public `wg-egress.conf`, complete replacement
+`nftables.conf`, fixed policy-routing/sysctl values, systemd drop-ins that make
+`wg-exec` require nftables plus `wg-egress`, a guest checker and a print-only
+failure/leak test plan. Its fixed table 51821, fwmark 51821 and rule priorities
+11000/11010 must be absent before installation. The rendered plan requires the
+replacement firewall to be installed and validated from the VM console before
+either tunnel is exposed. It does not install anything, create
+`/etc/wireguard/trading-desk-egress.key`, start a service, contact the provider,
+or change routes. The private key must later be
+generated inside the guest and supplied to `wg` through that fixed root-only
+file; it must never enter the spec, repository, environment, argv or chat.
+
+A separate render-only macOS PF anchor for executor UID 451 plus resolver UID
+65, typed root-owned remote cache, fixed sample/probe helpers, continuous
+collector, artifact installer and route-bound sender now exist. TESTNET source
+gates are promoted, but missing root artifacts fail closed. Nothing has loaded
+the PF anchor or started the helpers, so active host/DNS bypass prevention is
+absent. Live provider handshake,
+expected-exit-IP, DNS/IPv6/DoT/QUIC, tunnel-loss and reboot tests remain
+attended commissioning steps. Until those pass, the rendered manifests
+truthfully report `remote_vpn_exit_configured=false` and `vpn_qualified=false`.
 
 ## First TESTNET transaction boundary
 
 The local router can carry read-only TESTNET traffic after its local checks. It
 may carry attended functional transactions only after the separate
 commissioning gaps close, and it never qualifies always-on egress isolation.
-The default-unavailable route gate further blocks normal entry until a trusted
-collector and reviewed expectation are installed, but its evidence is not yet
-durably bound to the command and it cannot prevent macOS route fallback.
+The default-unavailable route gate blocks normal entry until the fixed collector
+and reviewed expectation are installed. Normal and qualification submission
+authorities durably bind the exact remote evidence and recheck it after
+authority; installed PF remains necessary to prevent macOS route fallback.
 The first harness order write remains blocked by
 `docs/testnet_commissioning.md`. The qualification-only GTC/cancel durable core
 plus dormant signer/sender/result transitions and a role-bound terminal CLI
@@ -438,9 +529,11 @@ exist offline, but submission authority, a complete live lifecycle worker and
 live integration remain absent. Do not substitute the armed three-leg bracket
 as an easier first write.
 
-After the local lab is stable, preserve the Mac-to-VM `wg-exec` interface and
-add a separately reviewed VM-to-remote-gateway tunnel. That later design can
-provide a static exit IP without moving the signer out of macOS.
+After the local lab is stable and the provider values are reviewed, preserve
+the Mac-to-VM `wg-exec` interface and commission the separately rendered
+VM-to-remote `wg-egress` overlay. It can provide the reviewed exit IP without
+moving the signer out of macOS, but only after the PF, collector and failure
+tests above are active.
 
 ## References
 

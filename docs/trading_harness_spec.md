@@ -157,6 +157,15 @@ references. Dynamic plan CLOIDs are trusted only from the exact durable
 three-leg plan; flatten CLOIDs are domain-separated derivatives of the exact
 incident and fresh position snapshot and are rechecked by the live signer.
 
+Credential commissioning has two explicit, role-scoped, redacted checks.
+`check-executor-credentials` runs only as the configured executor UID, proves
+that the API-wallet key derives the configured API-wallet address, and checks
+the recovery slot. `check-control-credentials` runs only as the configured
+control UID and checks the approval and grant slots. Neither command opens
+state, performs network I/O, calls a venue, accepts a secret/path/slot argument,
+or returns a credential value to the operator. The fixed native readers remain
+the only Keychain access path.
+
 ### 2.5 Config-bound filesystem identities
 
 Executor config schema v3 contains three distinct, positive, non-root numeric
@@ -285,6 +294,18 @@ credential provisioning. A local VM is not a VPN until it connects to a
 second remote peer; no documentation or status may call `local_nat_lab`
 VPN-qualified.
 
+The separate `testnet_remote_vpn_exit` overlay MUST bind one exact rendered
+`local_nat_lab` manifest and a literal remote peer public key, fixed endpoint
+IPv4/UDP port, provider-assigned tunnel IPv4, tunnel DNS and expected exit
+IPv4. It MUST add a distinct `wg-egress`, fixed mark/table/rule priorities and
+default-drop VM output. Physical-WAN output may contain only DHCP and the
+outer WireGuard datagrams to that fixed endpoint. Forwarded DNS, NTP and HTTPS
+MUST leave only through `wg-egress`; NAT MUST target only `wg-egress`. No
+direct-WAN forwarding or HTTPS output rule may exist. `wg-exec` MUST require
+both nftables and `wg-egress` at boot. Rendering MUST remain credential-free,
+apply-disabled and unqualified until installed state, both handshakes, expected
+exit and leak/failure/reboot evidence pass.
+
 Normal TESTNET entry MUST additionally hold a fresh route-health capability.
 The schema-v1 evidence contract binds the exact executor config, retained
 router/VM manifest and local-lab qualification hashes, public-peer hashes,
@@ -314,13 +335,32 @@ Before every preview, route-independent maintenance MUST normalize expired
 claims and terminalize the sole queued command at the earliest ticket or
 three-leg expiry, releasing its proven-unsent reservation. Expired work MUST
 NOT be claimed or deferred again.
-The current evidence is not durably bound into the preflight, attempt or
-submission authority, and no trusted live collector or durable expectation
-loader exists; those remain promotion gates.
-A production final-guard reader MUST be a bounded local cached-evidence read;
-it MUST NOT invoke SSH, route tools, DNS, TLS or `/info` while holding the
-runtime submission lock. A separate least-privilege collector owns observation
-and atomic publication.
+The local-lab evidence is not submission authority. The promoted remote mode
+MUST persist route mode, expectation hash, evidence hash and expiry in the
+normal and qualification one-shot submission authority and re-read the same
+cache after authority. A loss after authority MUST persist UNKNOWN without an
+HTTP call. A fixed config-hash namespace admits only root-owned,
+ACL-free mode-`0444` expectation/evidence files below a root-owned ACL-free
+mode-`0755` directory. The reader MUST use a verified directory descriptor,
+`O_NOFOLLOW`, a 128-KiB cap, stable metadata and exact canonical decoding. The
+publisher MUST full-sync a new file, atomically replace the cache, full-sync
+the parent and read the result back. The production gate factory may read only
+that cache while holding the runtime submission lock; it MUST NOT invoke SSH,
+route tools, DNS, TLS or `/info` there.
+
+The remote root collector MUST run single-flight, execute sample/probe/sample
+without an in-cycle retry, enforce hash-pinned no-argument helper paths,
+three/six/three-second and monotonic whole-span bounds, refuse timestamp
+regression, and retain at least two seconds of headroom around atomic
+publication. The sample helper binds both Mac defaults, scoped DNS, complete PF
+root/anchor order, guest configuration and label-specific counters. The probe
+MUST run as exact UID/GID 451, bind resolved IPv4 destinations and `utun`
+routes, validate TLS/SNI, issue only fixed read-only TESTNET `/info`, verify one
+reviewed exit observer and prove a forced-physical TCP 443 denial. Missing,
+stale, noncanonical or non-advancing observations produce no publication. The
+helper/collector/install implementations exist but remain uninstalled; no live
+evidence exists. Resolver UID 65 is PF-confined host-wide during the attended
+TESTNET profile. `local_nat_lab` MUST NOT be reused to claim VPN qualification.
 
 If route loss occurs after durable authority consumption, the single permitted
 send may fail with an unknown outcome. That outcome MUST remain reserved and
@@ -359,10 +399,10 @@ attended full-residual close and causally ordered terminal-flat reservation
 release. Each send authority commits the exact current PRE_SEND role hash and
 expiry and reloads the complete PRE_KEY-to-attempt-to-PRE_SEND chain. A pause
 past the two-second role fence after point of no return skips HTTP and records
-UNKNOWN without retry. These offline paths grant no venue capability: qualification
-submission authority remains compiled off. The qualification sender can only
-obtain that exact durable authority internally; if a future reviewed build
-promotes it, the sender posts the frozen wire once to the compiled TESTNET
+UNKNOWN without retry. The promoted TESTNET qualification sender can obtain
+that exact durable authority only after binding fresh fixed-cache remote-VPN/PF
+evidence, then rechecks the same evidence before posting frozen wire once to the
+compiled TESTNET
 `/exchange` URL from Hyperliquid's official
 [API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api) and
 [exchange endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint)
@@ -444,6 +484,13 @@ checked immediately before and after key use. Every normal transport outcome
 must name the exact durable submission authority and PRE_SEND attestation and
 must satisfy causal time ordering. Nonempty legacy signed, attempted or outcome
 state cannot auto-migrate across this boundary.
+The promoted TESTNET sender additionally requires the persisted config/account
+scope and exact remote-VPN guard at its own boundary. Its authority hash covers
+route mode, expectation, evidence and expiry; the post-authority cache check
+uses the actual recorded send timestamp. Recovery remains route-independent.
+Schema v17 adds no columns; it is the guarded promotion boundary and refuses
+nonempty legacy normal/qualification signed, attempted, authority or outcome
+state whose historical route evidence cannot be reconstructed.
 
 Schema v15 makes the portable handoff non-authoritative on its own. One
 immutable chat scope is derived from executor config and durably binds TESTNET
@@ -469,8 +516,22 @@ marker. The broker callback does approval first and reports later publication
 ambiguity as `UNKNOWN`; bounded active-record repair runs before listener
 activation. A cached UID-451 consumer may scan only nonurgent idle/ready ticks,
 treats the marker as notification only, and asks the store to authenticate the
-v16 artifact. Both gates remain false; exact ACL/runtime installation,
-ready-marker archival/GC before 1,024 entries, and live qualification remain.
+v16 artifact. The control publisher can retire only expired, exactly verified
+notification markers while retaining every immutable handoff. Both TESTNET
+source gates are enabled; exact ACL/runtime installation, qualification of that
+bounded retirement, and live qualification remain.
+
+The offline live-issuance adapter uses the existing exact seven-read TESTNET
+qualification artifact as the full account/market provenance source. It
+rechecks the API-wallet role mapping and source hashes, anchors freshness to
+the venue observations, recompiles the account-risk hash from executor config,
+and stores the result create-only under UID 453 for UID-452 reads. Before a
+proposal is displayed, UID 451 can register the exact trusted grant, ticket and
+plan and publish a create-only receipt binding its verified execution-store
+identity. The receipt is not approval or execution authority. The same-process
+issuer accepts only staging ID, exact active broker-session object and time,
+then requires both sources. Collector, preregistration and live-issuance gates
+are enabled, but none of their paths or lifecycle wiring is installed.
 
 Reconciliation is restart-idempotent rather than order-status retrying: an
 existing query row and its hash-bound retained snapshot are hydrated from
@@ -726,9 +787,11 @@ Required controls:
   proposal lane recognizes only the exact proposal-ID command and records
   `human_message_attested=false`; its durable CAS and local peer/session
   anti-replay boundary, artifact-first handoff publisher/ID-only ready index,
-  bounded startup repair, dormant cached consumer, verified reader and atomic
-  execution admission exist offline with false gates. Authenticated account/
-  market collectors and grant provenance, same-process active-session issuance,
+  bounded startup repair, cached consumer, verified reader and atomic execution
+  admission have enabled TESTNET source gates. The qualification-
+  artifact account/market adapter, executor preregistration/grant receipt and
+  same-process active-session issuer are also source-enabled; their
+  installed collector trigger and broker lifecycle wiring,
   exact ACL/runtime installation and live use remain uncommissioned.
 - Approval tokens are signed, audience-bound, expiring, single-use, and protected against replay and cross-environment use.
 - Services use mutually authenticated identities and least-privilege authorization.
@@ -934,22 +997,20 @@ caller-selected account/address/audience inputs are invalid. The immutable
 scope and artifact/source hashes are persisted with the authorization, and
 schema v16 adds the complete canonical delivery evidence for restart
 validation.
-Source publication and bounded consumption exist behind false gates, while
-their cross-UID paths/ACLs and runtimes remain uninstalled;
+Source publication and bounded consumption gates are enabled, while their
+cross-UID paths/ACLs and runtimes remain uninstalled;
 exactly-once authority belongs to the execution transaction. The one-shot
 sender preserves `UNKNOWN` without blind retry.
 
 The control-only issuer accepts only a staging-document ID, exact active broker
-session and time. Its exact evidence reader is pinned to the configured staging
-database, reloads that store's verified chain, and resolves fixed typed account
-and canonical TESTNET market evidence; callers cannot substitute a view, ticket,
-plan, economics, address or snapshot per issuance call. It derives all proposal
-economics, addresses, hashes, session binding and expiry before atomically
-storing `PENDING`. Typed/self-consistent account and market values and a grant
-hash are not authenticated provenance: production requires fixed collector/
-store adapters plus a separately preverified grant receipt before issuance.
-The checked-in UID-453 collector/grant/executor-receipt plan is inert and
-authorizes no identity, network, ACL, store or proposal operation.
+session and time. Its live adapter reloads the UID-453-owned seven-read
+qualification source, independently recompiles the staged account hash and
+fresh market binding, and requires a UID-451 preregistration receipt containing
+the exact trusted grant, ticket, plan, config/account binding and execution-
+store identity. Callers cannot substitute those values. The broker constructs
+the issuer only inside its active listener generation; old-generation pending
+proposals remain immutable and are skipped until expiry. Source gates are true;
+fixed deployment paths remain uninstalled.
 Schema
 v2 preserves the original schema-v1 checksum and adds a unique immutable
 staging-document binding; nonempty v1 state cannot auto-migrate. Presentation is
@@ -960,15 +1021,10 @@ The UID-450 research
 service may verify and return that sanitized artifact through the existing
 `get_trade_stage` tool, but has no control-database or publication capability.
 Named ACLs and runtime configuration remain uncommissioned.
-The artifact also binds the broker-generation ID. Issuance accepts only the
-exact in-memory broker session, so production must run it in the active
-listener-owning process and stop issuance before listener teardown; a decoded
-historical generation receipt or caller-supplied session hash is insufficient.
-The staging chain is store-backed, but current account/market bindings are
-typed and self-consistent rather than authenticated collector provenance.
-Presentation remains blocked until fixed reviewed collector/store adapters
-supply them. Fresh executor preflight prevents this limitation from bypassing
-capital checks, but cannot prevent misleading issuance-time UX.
+The artifact also binds the broker-generation ID. A decoded historical
+generation receipt or caller-supplied session hash is insufficient. Fixed
+identity/ACL/runtime installation and live qualification, rather than missing
+source adapters, now block presentation promotion.
 
 Display schema v3 labels account/market hashes as issuance-time evidence and
 requires exact hash binding on idempotent retries. The human-readable proposal

@@ -44,9 +44,9 @@ closed.
    hardened signature and authoritative deterministic output digest. The
    `--build-development` mode is untrusted test output and is forbidden here.
    This reviewed source is
-   `7c874a6ac231ab72012337550b17359ed75d875cf500e91c21c0758986b51d26`;
+   `fc102c93fe21ce8d32236ad28d558b952521dcd4870d42fe0c1734fe7562d089`;
    its only eligible provisioner artifact is
-   `8ecaad4c2fb3f2e9d84b4e535177fa41a9a84310e4495588575082de40cd28de`.
+   `3a834ab130bd89525ad386b186f8c86d5fd744d7aa5e9fc2a31572f125dfbcb3`.
 3. Accept only the authoritative provisioner artifact SHA-256 printed by the
    sealed release builder; any other output is substitution, regardless of a
    reused ad-hoc identifier. Record the source commit, provisioner SHA-256,
@@ -70,7 +70,7 @@ closed.
    replacing a production record. Follow the separately reviewed
    [nonprinting probe runner plan](KEYCHAIN_ROLE_PROBE_PLAN.md), accepting only
    runner artifact SHA-256
-   `356e6a01e178571c1ef1985c84a2ce1ca6028850e4ac13081e52f3edbda89076`.
+   `96b3c941dba152402728d825c19a9d586d852b718f4ff06a06bd37b4335658f9`.
    Require its complete intended-UID, root, research, desktop and cross-role
    matrix. Reboot and repeat the complete matrix, then remove its ephemeral
    executable path.

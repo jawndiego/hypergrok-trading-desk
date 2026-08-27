@@ -40,25 +40,21 @@
   renderer, nftables/WireGuard checks and an explicit TESTNET commissioning gap
   register. The local VM is network-only, preserves the host public IP and is
   not represented as VPN or mainnet qualification.
-- Added a credential-free two-sample TESTNET route-health evidence model bound
-  to reviewed config/manifests/topology, stable Mac routes, guest policy,
-  handshake and advancing WireGuard/HTTPS counters. Normal entry now defaults
-  this gate unavailable and rechecks it before account/market preparation and
-  immediately before submission authority. Before/after clock samples reject
-  slow-reader expiry or rollback, and the final evidence must retain the full
-  two-second PRE_SEND TTL. Exact route-only preflight failures requeue the same
-  active proven-unsent claim without releasing authority/risk; independent
-  pre-preview maintenance normalizes expired claims and terminalizes queued
-  risk at the earliest ticket/leg expiry. No collector, durable command
-  binding, PF kill switch or remote VPN exit is claimed.
+- Added local and remote two-sample TESTNET route-health models, fixed
+  root-owned caches, continuous bounded collectors, sealed observation helpers,
+  a default-drop Ubuntu `wg-egress` overlay, and a UID-451/UID-65 macOS PF
+  policy. Normal and qualification sends bind exact remote-VPN evidence into
+  durable one-shot authority and recheck it immediately before HTTP; loss after
+  authority becomes `UNKNOWN` without a send or retry. Missing live artifacts
+  still fail closed; provider, VM, WireGuard and PF commissioning remain.
 - Added a separately namespaced schema-v12 TESTNET qualification core for
   retained account/agent evidence, a fixed minimum GTC canary, bound cancel,
   full-residual attended close, atomic reservation, per-step single-use
   authority and crash normalization. Added the pinned SDK signer/recovery
   adapter, dormant one-shot sender, bearer-sensitive envelope receipts,
   pre-key/pre-send role fences, a full bounded foreground lifecycle and one
-  fresh same-CLOID cancel successor. Submission remains compiled off and live
-  qualification has not run.
+  fresh same-CLOID cancel successor. TESTNET submission is promoted only behind
+  the exact installed remote-VPN guard; live qualification has not run.
 - Added TESTNET chat proposal v2 with 192-bit short-lived IDs and exact
   staging/ticket/plan/grant/economics/account/policy/snapshot/session binding;
   a separate durable single-use approval CAS; a bounded mutually peer-checked
@@ -77,10 +73,10 @@
   complete canonical source-evidence document for restart validation.
   Added the UID-452 artifact-first publisher, empty ID-only ready index,
   broker callback with bounded active startup repair, and a cached UID-451
-  consumer restricted to nonurgent idle/ready ticks. All gates remain false;
-  listener/ACL/runtime installation, authenticated account/market/grant
-  provenance, same-process active-session issuance, marker archival/GC and
-  live qualification remain disconnected.
+  consumer restricted to nonurgent idle/ready ticks. Added exact seven-read
+  issuance provenance, executor preregistration, same-session broker issuance,
+  fair scanning and bounded marker retirement. TESTNET source gates are
+  enabled; missing identities/paths/ACLs fail before listener or network I/O.
 - Added credential-free, plan-gated macOS APFS quota, final-path pre/post-init
   ACL, exact offline install and storage-headroom guard artifacts. No machine
   mutation or service activation is implied.
@@ -89,6 +85,9 @@
   attended provisioner, and a nonprinting pre/post-reboot UID probe matrix.
   Real provisioning remains gated on the rebuilt exact release pack and live
   sacrificial probe evidence.
+- Added a foreground-only macOS TESTNET commissioner for UIDs 450–454, public
+  config rendering, exact two-phase ACLs, chat-store initialization and durable
+  receipts, avoiding APFS quotas and launchd for the first attended canary.
 - Added a deterministic Lima 2.2/VZ VM-plan renderer pinned to socket_vmnet
   1.2.2 and a dated Ubuntu 24.04 ARM64 image. It models one default usernet WAN
   plus one host-only ingress NIC. Offline host attestations, the signed image

@@ -698,7 +698,10 @@ class TestnetChatReadyConsumerTests(unittest.TestCase):
         self.store.admit_chat_handoff.assert_not_called()
 
 
-class TestnetChatReadyDormantGateTests(unittest.TestCase):
+class TestnetChatReadyGateTests(unittest.TestCase):
+    def test_testnet_ready_consumer_source_gate_is_enabled(self) -> None:
+        self.assertIs(True, consumer_module.TESTNET_CHAT_READY_CONSUMER_ENABLED)
+
     def test_disabled_gate_performs_no_consumer_construction_or_io(self) -> None:
         store = object()
         with (

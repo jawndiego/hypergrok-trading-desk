@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import timedelta
 from decimal import Decimal
 import os
@@ -8,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from trading_harness.account_risk import AccountRiskLimits, compile_account_risk_snapshot
 from trading_harness.errors import ValidationError
 from trading_harness.execution_grant import (
     TestnetInfrastructureGrantAuthority,
@@ -131,6 +133,47 @@ class ConfiguredLearningToolServiceTests(unittest.TestCase):
             transport=FixtureTransport(clearing=clearing, orders=[]),
             clock=lambda: AT,
         )
+        self.account = compile_account_risk_snapshot(
+            self.venue,
+            symbol="ETH",
+            limits=AccountRiskLimits(
+                account_id=self.config.account_id,
+                main_account_address=self.config.main_account_address,
+                environment=self.config.environment,
+                daily_loss_limit=self.config.daily_loss_limit,
+                aggregate_open_risk_limit=self.config.max_reserved_loss,
+                max_notional=self.config.max_reserved_notional,
+                leverage=self.config.max_leverage,
+            ),
+            daily_loss_used=Decimal("0"),
+            open_risk_used=Decimal("0"),
+        )
+
+    @contextmanager
+    def _chat_profile(self):
+        with (
+            patch(
+                "trading_harness.learning_tool_service."
+                "TestnetChatAccountQuoteProjectionReader.__init__",
+                return_value=None,
+            ),
+            patch(
+                "trading_harness.learning_tool_service."
+                "TestnetChatAccountQuoteProjectionReader.__call__",
+                return_value=self.account,
+            ) as account_read,
+            patch(
+                "trading_harness.learning_tool_service."
+                "TestnetChatProposalPresentationReader.__init__",
+                return_value=None,
+            ),
+            patch(
+                "trading_harness.learning_tool_service."
+                "TestnetChatProposalPresentationReader.load",
+                return_value=None,
+            ) as presentation_read,
+        ):
+            yield account_read, presentation_read
 
     def _research_ownership(
         self,
@@ -153,13 +196,13 @@ class ConfiguredLearningToolServiceTests(unittest.TestCase):
         )
 
     def test_agent_stage_returns_real_non_authoritative_ticket_and_learning_cycle(self) -> None:
-        with self._research_ownership():
+        with self._research_ownership(), self._chat_profile() as readers:
+            account_read, presentation_read = readers
             service = build_testnet_learning_tool_service(
                 config=self.config,
                 research_database=self.research_path,
                 signed_grant=self.grant,
                 clock=lambda: AT,
-                account_reader=lambda _address, _network: self.venue,
                 policy=self.policy,
             )
             status = service.get_harness_status()
@@ -168,9 +211,15 @@ class ConfiguredLearningToolServiceTests(unittest.TestCase):
             stage = service.stage_trade_candidate(
                 "eth", self.analysis["analysis_hash"], "configured-stage-0001"
             )
+            refreshed = service.get_trade_stage(stage["document"]["document_id"])
             ticket = stage["document"]["ticket_payload"]
             review = service.get_learning_review(
                 "trade-" + ticket["risk_ticket"]["ticket_hash"][:32]
+            )
+            account_read.assert_called_once_with("ETH", AT)
+            presentation_read.assert_called_once_with(
+                stage["document"]["document_id"],
+                stage["document"]["document_hash"],
             )
 
         self.assertEqual("staged", stage["state"])
@@ -185,6 +234,11 @@ class ConfiguredLearningToolServiceTests(unittest.TestCase):
         self.assertFalse(ticket["mainnet_authorized"])
         self.assertTrue(ticket["grant_authentication_deferred_to_control"])
         self.assertTrue(ticket["daily_loss_deferred_to_executor"])
+        self.assertEqual(
+            self.account.artifact_hash,
+            ticket["risk_ticket"]["account_snapshot_hash"],
+        )
+        self.assertIsNone(refreshed["testnet_chat_proposal"])
         self.assertFalse(self.config.paths.daily_loss_database.exists())
         self.assertEqual("buy", review["decision"])
         self.assertFalse(review["close_outcome_recorded"])
@@ -272,6 +326,7 @@ class ConfiguredLearningToolServiceTests(unittest.TestCase):
 
         with (
             self._research_ownership(),
+            self._chat_profile(),
             patch(
                 "trading_harness.learning_tool_service._shared_state_path",
                 side_effect=check_then_delete,

@@ -22,7 +22,12 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from .canonical import canonical_json, domain_hash
-from .errors import HarnessError, ValidationError
+from .errors import (
+    AdmissionDenied,
+    EntrySubmissionRevoked,
+    HarnessError,
+    ValidationError,
+)
 from .execution_store import (
     EntrySubmissionAuthority,
     ExecutionStore,
@@ -37,6 +42,11 @@ from .hyperliquid_signer import (
 )
 from .hyperliquid_recovery import RecoveryKind
 from .hyperliquid_wire import HyperliquidNetwork
+from .testnet_remote_vpn_health import (
+    REMOTE_VPN_MODE,
+    TestnetRemoteVpnHealthEvidence,
+    TestnetRemoteVpnPromotionGuard,
+)
 
 
 Clock: TypeAlias = Callable[[], datetime]
@@ -423,12 +433,23 @@ class SubmissionAttempt:
 
 
 def _utc_ms(clock: Clock) -> int:
+    return _datetime_ms(_utc_datetime(clock))
+
+
+def _utc_datetime(clock: Clock) -> datetime:
     try:
         value = clock()
     except Exception as error:
         raise ValidationError(f"submission clock failed: {type(error).__name__}") from error
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValidationError("submission clock must return a timezone-aware datetime")
+    utc = value.astimezone(timezone.utc)
+    if utc < _EPOCH:
+        raise ValidationError("submission clock predates the Unix epoch")
+    return utc
+
+
+def _datetime_ms(value: datetime) -> int:
     utc = value.astimezone(timezone.utc)
     delta = utc - _EPOCH
     result = (
@@ -619,6 +640,7 @@ def submit_signed_action(
     worker_id: str | None = None,
     fencing_token: int | None = None,
     pre_send_role_attestation_hash: str | None = None,
+    remote_vpn_guard: TestnetRemoteVpnPromotionGuard | None = None,
     clock: Clock = lambda: datetime.now(timezone.utc),
 ) -> SubmissionAttempt:
     """Send exactly once and preserve every uncertain result as ``unknown``."""
@@ -637,7 +659,8 @@ def submit_signed_action(
         signed.verify_integrity()
     except SignerOutputError as error:
         raise HyperliquidSubmissionError("signed artifact integrity check failed") from error
-    attempted_at_ms = _utc_ms(clock)
+    route_read_started_at = _utc_datetime(clock)
+    attempted_at_ms = _datetime_ms(route_read_started_at)
     if attempted_at_ms >= signed.expires_after_ms:
         raise HyperliquidSubmissionError("signed action expired before local submission")
     if (
@@ -655,6 +678,8 @@ def submit_signed_action(
         "pre_send_role_attestation_hash": None,
     }
     if isinstance(signed, SignedActionEnvelope):
+        from . import testnet_remote_vpn_health as remote_vpn_health_module
+
         if (
             type(store) is not ExecutionStore
             or not isinstance(command_id, str)
@@ -675,6 +700,14 @@ def submit_signed_action(
             raise HyperliquidSubmissionError(
                 "protected submission requires exact durable authority arguments"
             )
+        if not remote_vpn_health_module.REMOTE_VPN_SUBMISSION_GATE_ENABLED:
+            raise HyperliquidSubmissionError(
+                "protected submission remote VPN gate is compiled off"
+            )
+        if type(remote_vpn_guard) is not TestnetRemoteVpnPromotionGuard:
+            raise EntrySubmissionRevoked(
+                "protected submission requires the exact remote VPN guard"
+            )
         if (
             signed.network is not HyperliquidNetwork.TESTNET
             or store.environment is not signed.network.environment
@@ -683,6 +716,50 @@ def submit_signed_action(
             raise HyperliquidSubmissionError(
                 "protected submission store scope is not exact testnet"
             )
+        try:
+            persisted_scope = store.get_chat_scope()
+        except Exception as error:
+            raise HyperliquidSubmissionError(
+                "protected submission store lacks its persisted executor config"
+            ) from error
+        if (
+            persisted_scope.account_id != signed.account_id
+            or persisted_scope.main_account_address != signed.main_account_address
+            or persisted_scope.api_wallet_address != signed.signer_address
+            or remote_vpn_guard.executor_config_hash != persisted_scope.config_hash
+        ):
+            raise HyperliquidSubmissionError(
+                "remote VPN guard differs from persisted executor config"
+            )
+        try:
+            route_evidence = remote_vpn_guard.require_qualified(
+                at=route_read_started_at
+            )
+            authority_requested_at = _utc_datetime(clock)
+            remote_vpn_guard.verify_after_read(
+                route_evidence,
+                started_at=route_read_started_at,
+                completed_at=authority_requested_at,
+                minimum_remaining_ms=2_000,
+            )
+        except Exception as error:
+            raise EntrySubmissionRevoked(
+                "fresh remote VPN evidence is unavailable before submission"
+            ) from error
+        if type(route_evidence) is not TestnetRemoteVpnHealthEvidence:
+            raise HyperliquidSubmissionError("remote VPN evidence type differs")
+        if remote_vpn_guard.expectation is None:
+            raise HyperliquidSubmissionError("remote VPN expectation is unavailable")
+        attempted_at_ms = _datetime_ms(authority_requested_at)
+        if (
+            authority_requested_at < route_read_started_at
+            or attempted_at_ms >= signed.expires_after_ms
+            or attempted_at_ms >= signed.preflight_expires_at_ms
+        ):
+            raise HyperliquidSubmissionError(
+                "signed action expired during remote VPN read"
+            )
+        route_expires_at_ms = _datetime_ms(route_evidence.expires_at)
         local_signed_evidence = signed.execution_store_evidence(command_id)
         if local_signed_evidence.evidence_hash != signed_evidence_hash:
             raise HyperliquidSubmissionError(
@@ -698,7 +775,13 @@ def submit_signed_action(
             pre_send_role_attestation_hash=(
                 pre_send_role_attestation_hash
             ),
-            at=_EPOCH + timedelta(milliseconds=attempted_at_ms),
+            route_mode=REMOTE_VPN_MODE,
+            route_expectation_hash=(
+                remote_vpn_guard.expectation.expectation_hash
+            ),
+            route_evidence_hash=route_evidence.evidence_hash,
+            route_expires_at_ms=route_expires_at_ms,
+            at=authority_requested_at,
         )
         if not isinstance(authority, EntrySubmissionAuthority):
             raise HyperliquidSubmissionError(
@@ -717,8 +800,14 @@ def submit_signed_action(
             or authority.fencing_token != fencing_token
             or authority.pre_send_role_attestation_hash
             != pre_send_role_attestation_hash
+            or authority.route_mode != REMOTE_VPN_MODE
+            or authority.route_expectation_hash
+            != remote_vpn_guard.expectation.expectation_hash
+            or authority.route_evidence_hash != route_evidence.evidence_hash
+            or authority.route_expires_at_ms != route_expires_at_ms
             or attempted_at_ms < authority_issued_ms
             or attempted_at_ms >= authority.pre_send_role_expires_at_ms
+            or attempted_at_ms >= authority.route_expires_at_ms
             or attempted_at_ms >= authority_lease_ms
         ):
             raise HyperliquidSubmissionError(
@@ -735,6 +824,10 @@ def submit_signed_action(
             ),
         }
     else:
+        if remote_vpn_guard is not None:
+            raise HyperliquidSubmissionError(
+                "recovery submission is route-independent"
+            )
         if pre_send_role_attestation_hash is not None:
             raise HyperliquidSubmissionError(
                 "recovery submission cannot accept an entry role attestation"
@@ -831,14 +924,48 @@ def submit_signed_action(
     if isinstance(signed, SignedActionEnvelope):
         skip_detail: str | None = None
         try:
-            send_at_ms = _utc_ms(clock)
+            route_recheck_started_at = _utc_datetime(clock)
         except Exception:
             send_at_ms = attempted_at_ms
             skip_detail = "clock_invalid_after_authority"
+        if skip_detail is None:
+            try:
+                assert type(remote_vpn_guard) is TestnetRemoteVpnPromotionGuard
+                current_route_evidence = remote_vpn_guard.require_qualified(
+                    at=route_recheck_started_at
+                )
+                send_at = _utc_datetime(clock)
+                remote_vpn_guard.verify_after_read(
+                    current_route_evidence,
+                    started_at=route_recheck_started_at,
+                    completed_at=send_at,
+                    minimum_remaining_ms=0,
+                )
+                send_at_ms = _datetime_ms(send_at)
+                if (
+                    current_route_evidence.evidence_hash
+                    != route_evidence.evidence_hash
+                    or current_route_evidence.expectation_hash
+                    != route_evidence.expectation_hash
+                    or current_route_evidence.expires_at != route_evidence.expires_at
+                ):
+                    skip_detail = "remote_vpn_lost_after_authority"
+            except AdmissionDenied as error:
+                send_at_ms = attempted_at_ms
+                skip_detail = (
+                    "clock_invalid_after_authority"
+                    if error.code == "REMOTE_VPN_HEALTH_CLOCK_ROLLBACK"
+                    else "remote_vpn_lost_after_authority"
+                )
+            except Exception:
+                send_at_ms = attempted_at_ms
+                skip_detail = "remote_vpn_lost_after_authority"
         if skip_detail is None and (
             send_at_ms < attempted_at_ms or send_at_ms < authority_issued_ms
         ):
             skip_detail = "clock_invalid_after_authority"
+        elif skip_detail is None and send_at_ms >= authority.route_expires_at_ms:
+            skip_detail = "remote_vpn_lost_after_authority"
         elif skip_detail is None and (
             send_at_ms >= signed.expires_after_ms
             or send_at_ms >= authority_lease_ms
@@ -860,6 +987,10 @@ def submit_signed_action(
                 response_hash=None,
                 detail_code=skip_detail,
             )
+        # Persist the second, post-authority cache-read boundary as the actual
+        # local send time.  The earlier timestamp exists only to issue and bind
+        # authority; it must not masquerade as the later network boundary.
+        attempted_at_ms = send_at_ms
 
     # One call, deliberately no loop and no retry adapter.
     try:

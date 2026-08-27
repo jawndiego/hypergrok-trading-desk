@@ -47,6 +47,7 @@ from .testnet_entry_role_attestation import (
     EntryRoleAttestationStage,
     TestnetEntryRoleAttestation,
 )
+from .testnet_remote_vpn_health import TestnetRemoteVpnPromotionGuard
 
 
 Clock = Callable[[], datetime]
@@ -71,6 +72,10 @@ _TRANSIENT_ROUTE_HEALTH_DENIAL_CODES = frozenset(
         "ROUTE_HEALTH_INVALID",
         "ROUTE_HEALTH_CLOCK_ROLLBACK",
         "ROUTE_HEALTH_HEADROOM",
+        "REMOTE_VPN_HEALTH_UNAVAILABLE",
+        "REMOTE_VPN_HEALTH_INVALID",
+        "REMOTE_VPN_HEALTH_CLOCK_ROLLBACK",
+        "REMOTE_VPN_HEALTH_HEADROOM",
     }
 )
 
@@ -211,6 +216,7 @@ class ExecutionDispatcher:
         clock: Clock = _clock,
         lease_seconds: int = 15,
         submission_guard: SubmissionGuard | None = None,
+        remote_vpn_guard: TestnetRemoteVpnPromotionGuard | None = None,
     ) -> None:
         if not isinstance(store, ExecutionStore):
             raise TypeError("store must be ExecutionStore")
@@ -232,7 +238,12 @@ class ExecutionDispatcher:
         self.lease_seconds = lease_seconds
         if submission_guard is not None and not callable(submission_guard):
             raise TypeError("submission_guard must be callable or None")
+        if remote_vpn_guard is not None and type(
+            remote_vpn_guard
+        ) is not TestnetRemoteVpnPromotionGuard:
+            raise TypeError("remote_vpn_guard must be exact or None")
         self.submission_guard = submission_guard
+        self.remote_vpn_guard = remote_vpn_guard
 
     def _now(self) -> datetime:
         try:
@@ -491,6 +502,7 @@ class ExecutionDispatcher:
                     pre_send_role_attestation_hash=(
                         pre_send_role.attestation_hash
                     ),
+                    remote_vpn_guard=self.remote_vpn_guard,
                     clock=self.clock,
                 )
         except EntrySubmissionRevoked:

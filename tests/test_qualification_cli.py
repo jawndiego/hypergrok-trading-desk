@@ -43,6 +43,10 @@ from trading_harness.qualification_signer import (
     freeze_signed_qualification_envelope,
 )
 from trading_harness.qualification_store import QualificationSigningAuthority
+from trading_harness import testnet_remote_vpn_health as remote_vpn_module
+from trading_harness.testnet_remote_vpn_health import (
+    TestnetRemoteVpnPromotionGuard,
+)
 from trading_harness.testnet_qualification import (
     QualificationAttemptPhase,
     QualificationTransportOutcome,
@@ -74,6 +78,11 @@ from tests.test_testnet_qualification import (
     retained,
     status_response,
 )
+from tests.test_testnet_remote_vpn_health import (
+    remote_evidence,
+    remote_expectation,
+)
+from tests.test_testnet_route_health import route_expectation
 
 
 class FakeAdmissionStore:
@@ -167,6 +176,22 @@ class QualificationCliTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
         self.config = parse_executor_config(config_text(self.root), environ={})
+        self.base_route_expectation = route_expectation(
+            self.config.config_hash
+        )
+        self.remote_vpn_expectation = remote_expectation(
+            self.base_route_expectation
+        )
+        self.remote_vpn_evidence = remote_evidence(
+            self.remote_vpn_expectation,
+            at=at(1_000),
+        )
+        self.remote_vpn_guard = TestnetRemoteVpnPromotionGuard(
+            executor_config_hash=self.config.config_hash,
+            base_expectation=self.base_route_expectation,
+            expectation=self.remote_vpn_expectation,
+            reader=lambda: self.remote_vpn_evidence,
+        )
         self.review = self.root / "control-review"
         self.review.mkdir(mode=0o700)
         self.review.chmod(0o700)
@@ -500,7 +525,22 @@ class QualificationCliTests(unittest.TestCase):
             mock.patch("trading_harness.qualification_cli._wallet"),
             mock.patch("trading_harness.qualification_cli.submit_qualification_once"),
         )
-        with forbidden[0] as config_load, forbidden[1] as state, forbidden[2] as key, forbidden[3] as send:
+        with (
+            mock.patch.object(
+                cli_module.qualification_store_module,
+                "QUALIFICATION_SUBMISSION_ENABLED",
+                False,
+            ),
+            mock.patch.object(
+                remote_vpn_module,
+                "REMOTE_VPN_SUBMISSION_GATE_ENABLED",
+                False,
+            ),
+            forbidden[0] as config_load,
+            forbidden[1] as state,
+            forbidden[2] as key,
+            forbidden[3] as send,
+        ):
             with redirect_stderr(stderr):
                 first = main(
                     [
@@ -584,6 +624,11 @@ class QualificationCliTests(unittest.TestCase):
                 "QUALIFICATION_SUBMISSION_ENABLED",
                 True,
             ),
+            mock.patch.object(
+                remote_vpn_module,
+                "REMOTE_VPN_SUBMISSION_GATE_ENABLED",
+                True,
+            ),
             mock.patch(
                 "trading_harness.qualification_cli.load_executor_config",
                 return_value=self.config,
@@ -593,6 +638,10 @@ class QualificationCliTests(unittest.TestCase):
                 "trading_harness.qualification_cli._qualification_store",
                 return_value=store,
             ),
+            mock.patch(
+                "trading_harness.qualification_cli.build_installed_testnet_remote_vpn_promotion_guard",
+                return_value=self.remote_vpn_guard,
+            ) as guard_factory,
             mock.patch("trading_harness.qualification_cli.prepare") as prepare_phase,
             mock.patch(
                 "trading_harness.qualification_cli.sign",
@@ -626,6 +675,8 @@ class QualificationCliTests(unittest.TestCase):
         self.assertEqual(sign_phase.call_args.kwargs["worker_id"], worker)
         self.assertEqual(len(sends), 1)
         self.assertEqual(sends[0]["worker_id"], worker)
+        self.assertIs(sends[0]["remote_vpn_guard"], self.remote_vpn_guard)
+        guard_factory.assert_called_once_with(self.config.config_hash)
         self.assertEqual(sleeps, [QUALIFICATION_QUEUE_POLL_SECONDS])
         self.assertLess(QUALIFICATION_QUEUE_POLL_SECONDS, 0.25)
 
@@ -722,6 +773,11 @@ class QualificationCliTests(unittest.TestCase):
                 "QUALIFICATION_SUBMISSION_ENABLED",
                 True,
             ),
+            mock.patch.object(
+                remote_vpn_module,
+                "REMOTE_VPN_SUBMISSION_GATE_ENABLED",
+                True,
+            ),
             mock.patch(
                 "trading_harness.qualification_cli.load_executor_config",
                 return_value=self.config,
@@ -762,6 +818,7 @@ class QualificationCliTests(unittest.TestCase):
                 artifact_store=artifacts,  # type: ignore[arg-type]
                 sender=send_once,
                 cancel_reauthorization_store=cancel_store,  # type: ignore[arg-type]
+                remote_vpn_guard=self.remote_vpn_guard,
             )
 
         self.assertEqual(sends, ["place", "cancel"])
@@ -831,6 +888,11 @@ class QualificationCliTests(unittest.TestCase):
                 "QUALIFICATION_SUBMISSION_ENABLED",
                 True,
             ),
+            mock.patch.object(
+                remote_vpn_module,
+                "REMOTE_VPN_SUBMISSION_GATE_ENABLED",
+                True,
+            ),
             mock.patch(
                 "trading_harness.qualification_cli.load_executor_config",
                 return_value=self.config,
@@ -864,6 +926,7 @@ class QualificationCliTests(unittest.TestCase):
                     artifact_store=artifacts,  # type: ignore[arg-type]
                     sender=send_once,
                     cancel_reauthorization_store=cancel_store,  # type: ignore[arg-type]
+                    remote_vpn_guard=self.remote_vpn_guard,
                 )
         self.assertEqual(sends, ["place"])
         self.assertFalse(store.halted)

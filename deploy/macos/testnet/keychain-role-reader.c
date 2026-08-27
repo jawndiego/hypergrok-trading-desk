@@ -3,7 +3,7 @@
  *
  * Build this source twice with exactly one of TRADING_HELPER_EXECUTOR or
  * TRADING_HELPER_CONTROL.  The resulting hardened Mach-O is the application
- * trusted by the four generic-password items.  It never provisions, updates,
+ * trusted by the six generic-password items.  It never provisions, updates,
  * deletes, lists, or selects arbitrary Keychain records.
  */
 
@@ -76,11 +76,14 @@ static int fail(const char *message)
 
 static bool has_extended_acl(const char *path)
 {
-    acl_t acl = acl_get_file(path, ACL_TYPE_EXTENDED);
+    acl_t acl;
     acl_entry_t entry;
+    struct stat value;
     int status;
+    errno = 0;
+    acl = acl_get_file(path, ACL_TYPE_EXTENDED);
     if (acl == NULL) {
-        return true;
+        return errno != ENOENT || lstat(path, &value) != 0;
     }
     status = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry);
     (void)acl_free(acl);

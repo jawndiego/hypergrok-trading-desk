@@ -10,6 +10,7 @@ import unittest
 from tests.test_execution_store import (
     NOW,
     digest,
+    entry_route_binding,
     make_approval,
     make_infrastructure_grant,
     make_ticket,
@@ -191,6 +192,7 @@ class EntryRoleStoreTests(unittest.TestCase):
             WORKER,
             self.claim.fencing_token,
             pre_send_role_attestation_hash=pre_send.attestation_hash,
+            **entry_route_binding(),
             at=NOW + timedelta(seconds=1, milliseconds=180),
         )
 
@@ -366,6 +368,7 @@ class EntryRoleStoreTests(unittest.TestCase):
                 WORKER,
                 self.claim.fencing_token,
                 pre_send_role_attestation_hash=digest("missing"),
+                **entry_route_binding(),
                 at=NOW + timedelta(seconds=1, milliseconds=180),
             )
         pre_send = self.role(
@@ -386,6 +389,7 @@ class EntryRoleStoreTests(unittest.TestCase):
                 WORKER,
                 self.claim.fencing_token,
                 pre_send_role_attestation_hash=digest("wrong"),
+                **entry_route_binding(),
                 at=NOW + timedelta(seconds=1, milliseconds=180),
             )
         with self.assertRaisesRegex(StateConflict, "expired"):
@@ -396,6 +400,7 @@ class EntryRoleStoreTests(unittest.TestCase):
                 WORKER,
                 self.claim.fencing_token,
                 pre_send_role_attestation_hash=pre_send.attestation_hash,
+                **entry_route_binding(),
                 at=datetime.fromtimestamp(
                     pre_send.expires_at_ms / 1_000,
                     tz=NOW.tzinfo,

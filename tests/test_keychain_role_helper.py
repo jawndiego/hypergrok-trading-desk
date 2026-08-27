@@ -28,17 +28,21 @@ DEPLOY = ROOT / "deploy" / "macos" / "testnet"
 SOURCE = DEPLOY / "keychain-role-reader.c"
 BUILD = DEPLOY / "build-keychain-role-readers.sh"
 EXPECTED_SOURCE_SHA256 = (
-    "a5a526b9c8817f98843489f9c42593d887a411377014dedac4f8b20aa839c7f1"
+    "4727f666c4c107fedda46a20ec536e479a72714d49adaebff25ec5d3d60494d5"
 )
 EXPECTED_EXECUTOR_SHA256 = (
-    "42e583ee40d48546a92bf40bf650fa576ec3d86455bf663cc3760b90d050df27"
+    "8694d14a94ee00a2ac039b7d5cd26c4184e13840aabe1cac2b0d084a629e0ff7"
 )
 EXPECTED_CONTROL_SHA256 = (
-    "da10752940f726258f4e2439b657db0c2f3fefcb3c30ef6a1eaa69df3da8e194"
+    "2ce4ba34366b67b0280302e042ffae67547cb39924353c62f88f5782b9dc52e9"
 )
 
 
 class NativeRoleReaderContractTests(unittest.TestCase):
+    def test_acl_free_darwin_enoent_is_not_treated_as_a_named_acl(self) -> None:
+        text = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("errno != ENOENT || lstat(path, &value) != 0", text)
+
     def test_source_is_read_only_role_compiled_and_system_keychain_fixed(self) -> None:
         text = SOURCE.read_text(encoding="utf-8")
         for required in (

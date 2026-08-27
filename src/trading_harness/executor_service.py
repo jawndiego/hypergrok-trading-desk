@@ -12,13 +12,14 @@ not depend on that gate.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import stat
 import re
+import sys
 from typing import Any
 
 from .account_risk import AccountRiskLimits
@@ -38,6 +39,7 @@ from .execution_work_scanner import ExecutionWorkScanner
 from .executor_config import ExecutorConfig
 from .executor_state_binding import (
     state_file_size_limit as _state_file_size_limit,
+    verified_state_database_trust,
     verify_state_database_binding as _verify_state_database_binding,
     verify_state_bindings as _verify_state_bindings,
     write_state_database_binding as _write_state_database_binding,
@@ -101,6 +103,11 @@ from .testnet_route_health import (
     TestnetRouteHealthGate,
     TestnetRouteReadinessReport,
 )
+from . import testnet_remote_vpn_health as _remote_vpn_health
+from .testnet_remote_vpn_health import (
+    TestnetRemoteVpnPromotionGuard,
+    TestnetRemoteVpnPromotionReport,
+)
 
 
 Clock = Callable[[], datetime]
@@ -139,7 +146,7 @@ def _consume_testnet_chat_ready_if_enabled(
     _testnet_chat_ready_consumer.TestnetChatReadyConsumer | None,
     _testnet_chat_ready_consumer.TestnetChatReadyConsumerResult | None,
 ]:
-    """Cross the ready-index boundary only after the literal dormant gate."""
+    """Cross the ready-index boundary only after the literal TESTNET gate."""
 
     if not _testnet_chat_ready_consumer.TESTNET_CHAT_READY_CONSUMER_ENABLED:
         return cached_consumer, None
@@ -185,6 +192,34 @@ def _shared_state_files(config: ExecutorConfig) -> tuple[Path, ...]:
         config.paths.learning_database,
         config.paths.staging_database,
     )
+
+
+def _state_acl_verification_required() -> bool:
+    """Require the commissioned named-ACL contract on the Darwin executor."""
+
+    return sys.platform == "darwin"
+
+
+@contextmanager
+def _verified_state_open_boundary(
+    config: ExecutorConfig,
+    databases: tuple[Path, ...],
+):
+    """Pin and verify every selected state inode across path-based opens."""
+
+    if not _state_acl_verification_required():
+        yield
+        return
+    with ExitStack() as stack:
+        for database in databases:
+            stack.enter_context(
+                verified_state_database_trust(
+                    config,
+                    database,
+                    require_named_acl=True,
+                )
+            )
+        yield
 
 
 def _state_database_policies(
@@ -436,23 +471,25 @@ def _open_shared_learning_state(
     *,
     clock: Clock,
 ) -> LearningLedger:
-    for database in _shared_state_files(config):
+    shared = _shared_state_files(config)
+    for database in shared:
         _validate_state_database_layout(config, database, existing=True)
         _verify_state_database_binding(config, database)
-    learning = LearningLedger(
-        config.paths.learning_database,
-        clock=clock,
-        must_exist=True,
-    )
-    TradeStagingInbox(
-        config.paths.staging_database,
-        quote_callback=lambda _request: TrustedQuoteDecision.blocked(
-            block_code="trusted_quote_profile_not_loaded"
-        ),
-        clock=clock,
-        must_exist=True,
-    )
-    for database in _shared_state_files(config):
+    with _verified_state_open_boundary(config, shared):
+        learning = LearningLedger(
+            config.paths.learning_database,
+            clock=clock,
+            must_exist=True,
+        )
+        TradeStagingInbox(
+            config.paths.staging_database,
+            quote_callback=lambda _request: TrustedQuoteDecision.blocked(
+                block_code="trusted_quote_profile_not_loaded"
+            ),
+            clock=clock,
+            must_exist=True,
+        )
+    for database in shared:
         _validate_state_database_layout(config, database, existing=True)
         _verify_state_database_binding(config, database)
     return learning
@@ -496,12 +533,14 @@ def open_testnet_executor_state(
     _validate_state_layout(config, existing=True, include_shared=False)
     for database in _core_state_files(config):
         _verify_state_database_binding(config, database)
-    state = _compose_testnet_executor_state(
-        config,
-        clock=clock,
-        must_exist=True,
-        include_shared=False,
-    )
+    core = _core_state_files(config)
+    with _verified_state_open_boundary(config, core):
+        state = _compose_testnet_executor_state(
+            config,
+            clock=clock,
+            must_exist=True,
+            include_shared=False,
+        )
     try:
         learning = _open_shared_learning_state(config, clock=clock)
     except Exception:
@@ -524,7 +563,7 @@ class ActiveExecutorCycle:
     learning_sync: ExecutionLearningSyncReport | None
     learning_sync_failed: bool
     learning_sync_skipped_for_priority: bool
-    route_health: TestnetRouteReadinessReport | None
+    route_health: TestnetRouteReadinessReport | TestnetRemoteVpnPromotionReport | None
     route_health_required: bool
     route_health_failed: bool
     route_health_skipped_for_priority: bool
@@ -573,7 +612,7 @@ class ActiveTestnetExecutorService:
     handlers: TestnetExecutorHandlerSet
     loss_synchronizer: HyperliquidDailyLossSynchronizer
     learning_projector: ExecutionLearningProjector | _UnavailableLearningProjector
-    route_health_gate: TestnetRouteHealthGate
+    route_health_gate: TestnetRouteHealthGate | TestnetRemoteVpnPromotionGuard
     runtime: ExecutorRuntime
     clock: Clock
     _last_loss_sync_at: datetime | None = field(default=None, init=False)
@@ -619,9 +658,9 @@ class ActiveTestnetExecutorService:
         )
         skipped = preview.step in urgent_steps
         if preview.step in {RuntimeStep.GATE_READY, RuntimeStep.IDLE}:
-            # The helper's literal false gate still precedes consumer
-            # construction and all ready-path I/O.  If promoted later, marker
-            # work cannot preempt reconciliation, protection, safety, recovery,
+            # The helper's literal gate precedes consumer construction and all
+            # ready-path I/O. Fixed path/ACL checks gate installed operation;
+            # marker work cannot preempt reconciliation, protection, safety, recovery,
             # an existing entry, or a blocked gate.
             self._chat_ready_consumer, _ = _consume_testnet_chat_ready_if_enabled(
                 self.state.execution_store,
@@ -648,7 +687,9 @@ class ActiveTestnetExecutorService:
                 learning_report = self.learning_projector.synchronize()
             except Exception:
                 learning_failed = True
-        route_health: TestnetRouteReadinessReport | None = None
+        route_health: (
+            TestnetRouteReadinessReport | TestnetRemoteVpnPromotionReport | None
+        ) = None
         route_health_failed = False
         route_health_skipped = skipped
         if entry_requires_refresh and not skipped:
@@ -667,43 +708,98 @@ class ActiveTestnetExecutorService:
                     minimum_remaining_ms=ENTRY_ROLE_ATTESTATION_TTL_MS,
                 )
             except AdmissionDenied as error:
-                route_health = TestnetRouteReadinessReport(
-                    ready=False,
-                    checked_at=route_checked_at,
-                    reason_code=error.message,
-                    expectation_hash=(
-                        None
-                        if self.route_health_gate.expectation is None
-                        else self.route_health_gate.expectation.expectation_hash
-                    ),
-                    evidence_hash=None,
-                    evidence_expires_at=None,
-                )
+                if type(self.route_health_gate) is TestnetRemoteVpnPromotionGuard:
+                    route_health = TestnetRemoteVpnPromotionReport(
+                        qualified=False,
+                        checked_at=route_checked_at,
+                        reason_code=error.message,
+                        base_route_expectation_hash=(
+                            None
+                            if self.route_health_gate.base_expectation is None
+                            else self.route_health_gate.base_expectation.expectation_hash
+                        ),
+                        expectation_hash=(
+                            None
+                            if self.route_health_gate.expectation is None
+                            else self.route_health_gate.expectation.expectation_hash
+                        ),
+                        evidence_hash=None,
+                        evidence_expires_at=None,
+                    )
+                else:
+                    route_health = TestnetRouteReadinessReport(
+                        ready=False,
+                        checked_at=route_checked_at,
+                        reason_code=error.message,
+                        expectation_hash=(
+                            None
+                            if self.route_health_gate.expectation is None
+                            else self.route_health_gate.expectation.expectation_hash
+                        ),
+                        evidence_hash=None,
+                        evidence_expires_at=None,
+                    )
             except ValidationError:
-                route_health = TestnetRouteReadinessReport(
-                    ready=False,
-                    checked_at=route_checked_at,
-                    reason_code="route_health_service_clock_invalid",
-                    expectation_hash=(
-                        None
-                        if self.route_health_gate.expectation is None
-                        else self.route_health_gate.expectation.expectation_hash
-                    ),
-                    evidence_hash=None,
-                    evidence_expires_at=None,
-                )
+                if type(self.route_health_gate) is TestnetRemoteVpnPromotionGuard:
+                    route_health = TestnetRemoteVpnPromotionReport(
+                        qualified=False,
+                        checked_at=route_checked_at,
+                        reason_code="route_health_service_clock_invalid",
+                        base_route_expectation_hash=(
+                            None
+                            if self.route_health_gate.base_expectation is None
+                            else self.route_health_gate.base_expectation.expectation_hash
+                        ),
+                        expectation_hash=(
+                            None
+                            if self.route_health_gate.expectation is None
+                            else self.route_health_gate.expectation.expectation_hash
+                        ),
+                        evidence_hash=None,
+                        evidence_expires_at=None,
+                    )
+                else:
+                    route_health = TestnetRouteReadinessReport(
+                        ready=False,
+                        checked_at=route_checked_at,
+                        reason_code="route_health_service_clock_invalid",
+                        expectation_hash=(
+                            None
+                            if self.route_health_gate.expectation is None
+                            else self.route_health_gate.expectation.expectation_hash
+                        ),
+                        evidence_hash=None,
+                        evidence_expires_at=None,
+                    )
             else:
                 route_expectation = self.route_health_gate.expectation
                 assert route_expectation is not None
-                route_health = TestnetRouteReadinessReport(
-                    ready=True,
-                    checked_at=route_read_completed_at,
-                    reason_code="ready",
-                    expectation_hash=route_expectation.expectation_hash,
-                    evidence_hash=route_evidence.evidence_hash,
-                    evidence_expires_at=route_evidence.expires_at,
-                )
-            route_health_failed = not route_health.ready
+                if type(self.route_health_gate) is TestnetRemoteVpnPromotionGuard:
+                    base_expectation = self.route_health_gate.base_expectation
+                    assert base_expectation is not None
+                    route_health = TestnetRemoteVpnPromotionReport(
+                        qualified=True,
+                        checked_at=route_read_completed_at,
+                        reason_code="qualified",
+                        base_route_expectation_hash=base_expectation.expectation_hash,
+                        expectation_hash=route_expectation.expectation_hash,
+                        evidence_hash=route_evidence.evidence_hash,
+                        evidence_expires_at=route_evidence.expires_at,
+                    )
+                else:
+                    route_health = TestnetRouteReadinessReport(
+                        ready=True,
+                        checked_at=route_read_completed_at,
+                        reason_code="ready",
+                        expectation_hash=route_expectation.expectation_hash,
+                        evidence_hash=route_evidence.evidence_hash,
+                        evidence_expires_at=route_evidence.expires_at,
+                    )
+            route_health_failed = not (
+                route_health.qualified
+                if type(route_health) is TestnetRemoteVpnPromotionReport
+                else route_health.ready
+            )
         runtime_step = self.runtime.tick(
             entry_refresh_permitted=(
                 report is not None
@@ -712,7 +808,11 @@ class ActiveTestnetExecutorService:
                 and learning_report is not None
                 and not learning_failed
                 and route_health is not None
-                and route_health.ready
+                and (
+                    route_health.qualified
+                    if type(route_health) is TestnetRemoteVpnPromotionReport
+                    else route_health.ready
+                )
             )
         )
         post_step_urgent = (
@@ -754,7 +854,7 @@ def build_active_testnet_executor_service(
     market_reader: MarketReader | None = None,
     info_transport: InfoTransport = post_public_info,
     sign_l1_action: SignL1Action | None = None,
-    route_health_gate: TestnetRouteHealthGate | None = None,
+    route_health_gate: TestnetRouteHealthGate | TestnetRemoteVpnPromotionGuard | None = None,
 ) -> ActiveTestnetExecutorService:
     """Compose the real one-shot TESTNET write path behind the local runtime."""
 
@@ -776,10 +876,18 @@ def build_active_testnet_executor_service(
             config.config_hash
         )
     else:
-        if type(route_health_gate) is not TestnetRouteHealthGate:
+        if type(route_health_gate) not in {
+            TestnetRouteHealthGate,
+            TestnetRemoteVpnPromotionGuard,
+        }:
             raise TypeError(
-                "route_health_gate must be exact TestnetRouteHealthGate or None"
+                "route_health_gate must be an exact reviewed TESTNET gate or None"
             )
+        if (
+            type(route_health_gate) is TestnetRemoteVpnPromotionGuard
+            and not _remote_vpn_health.REMOTE_VPN_SUBMISSION_GATE_ENABLED
+        ):
+            raise ValidationError("remote VPN submission gate is compiled off")
         if route_health_gate.executor_config_hash != config.config_hash:
             raise ValidationError("route-health gate config differs from executor")
         selected_route_health_gate = route_health_gate
@@ -954,6 +1062,11 @@ def build_active_testnet_executor_service(
         role_attestor=entry_role_attestor,
         clock=clock,
         lease_seconds=120,
+        remote_vpn_guard=(
+            selected_route_health_gate
+            if type(selected_route_health_gate) is TestnetRemoteVpnPromotionGuard
+            else None
+        ),
     )
     recovery_dispatcher = RecoveryExecutionDispatcher(
         state.execution_store,

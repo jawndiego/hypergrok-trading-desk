@@ -1,0 +1,17 @@
+[Interface]
+Address = __REVIEWED_EGRESS_IPV4_INTERFACE__
+Table = off
+PostUp = /usr/bin/wg set %i private-key /etc/wireguard/trading-desk-egress.key
+PostUp = /usr/bin/wg set %i fwmark 51821
+PostUp = /usr/sbin/ip -4 route add default dev %i table 51821
+PostUp = /usr/sbin/ip -4 rule add priority 11000 table main suppress_prefixlength 0
+PostUp = /usr/sbin/ip -4 rule add priority 11010 not fwmark 51821 table 51821
+PreDown = /usr/sbin/ip -4 rule del priority 11010 not fwmark 51821 table 51821
+PreDown = /usr/sbin/ip -4 rule del priority 11000 table main suppress_prefixlength 0
+PreDown = /usr/sbin/ip -4 route del default dev %i table 51821
+
+[Peer]
+PublicKey = __REVIEWED_EGRESS_PUBLIC_KEY__
+AllowedIPs = 0.0.0.0/0
+Endpoint = __REVIEWED_EGRESS_ENDPOINT__
+PersistentKeepalive = 25

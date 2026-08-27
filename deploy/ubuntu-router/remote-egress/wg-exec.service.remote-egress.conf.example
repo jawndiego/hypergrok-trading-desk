@@ -1,0 +1,4 @@
+[Unit]
+Requires=nftables.service wg-quick@wg-egress.service
+BindsTo=nftables.service wg-quick@wg-egress.service
+After=nftables.service wg-quick@wg-egress.service

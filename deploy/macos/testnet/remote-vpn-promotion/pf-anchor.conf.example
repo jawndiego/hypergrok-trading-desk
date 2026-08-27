@@ -1,0 +1,15 @@
+# Schema: trading-desk.testnet-executor-pf-anchor.v1
+# This anchor affects only UID 451. It is rendered public configuration; the
+# renderer never loads it. HTTPS for UID 451 and DNS for the reviewed macOS
+# resolver UID 65 are allowed only on the reviewed wg-exec utun interface.
+# Every other TCP/UDP path for either identity is blocked, including IPv6.
+
+pass out quick on __MAC_TUNNEL_INTERFACE__ inet proto udp from __MAC_TUNNEL_IPV4__ to __TUNNEL_DNS_IPV4__ port 53 user 451 keep state label "td_testnet_dns_udp"
+pass out quick on __MAC_TUNNEL_INTERFACE__ inet proto tcp from __MAC_TUNNEL_IPV4__ to __TUNNEL_DNS_IPV4__ port 53 user 451 flags S/SA keep state label "td_testnet_dns_tcp"
+pass out quick on __MAC_TUNNEL_INTERFACE__ inet proto tcp from __MAC_TUNNEL_IPV4__ to any port 443 user 451 flags S/SA keep state label "td_testnet_https"
+block return out log quick inet proto { tcp udp } from any to any user 451 label "td_testnet_block_ipv4"
+block drop out log quick inet6 proto { tcp udp } from any to any user 451 label "td_testnet_block_ipv6"
+pass out quick on __MAC_TUNNEL_INTERFACE__ inet proto udp from any to __TUNNEL_DNS_IPV4__ port 53 user 65 keep state label "td_testnet_resolver_dns_udp"
+pass out quick on __MAC_TUNNEL_INTERFACE__ inet proto tcp from any to __TUNNEL_DNS_IPV4__ port 53 user 65 flags S/SA keep state label "td_testnet_resolver_dns_tcp"
+block return out log quick inet proto { tcp udp } from any to any user 65 label "td_testnet_resolver_block_ipv4"
+block drop out log quick inet6 proto { tcp udp } from any to any user 65 label "td_testnet_resolver_block_ipv6"

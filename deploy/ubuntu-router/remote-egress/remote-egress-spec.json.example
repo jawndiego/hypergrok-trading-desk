@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "mode": "testnet_remote_vpn_exit",
+  "base_router_manifest_sha256": "__REVIEWED_BASE_ROUTER_MANIFEST_SHA256__",
+  "wan_interface": "__REVIEWED_WAN_INTERFACE__",
+  "ingress_interface": "__REVIEWED_INGRESS_INTERFACE__",
+  "management_source_cidr": "192.168.106.1/32",
+  "router_listen_port": 51820,
+  "router_ipv4_network": "10.77.0.0/24",
+  "mac_ipv4_peer": "10.77.0.2/32",
+  "mac_public_key": "__REVIEWED_MAC_PUBLIC_KEY__",
+  "egress_interface": "wg-egress",
+  "egress_ipv4_interface": "__PROVIDER_ASSIGNED_EGRESS_IPV4_INTERFACE__",
+  "egress_endpoint_ipv4": "__PROVIDER_FIXED_ENDPOINT_IPV4__",
+  "egress_endpoint_port": 51820,
+  "egress_public_key": "__PROVIDER_EGRESS_PUBLIC_KEY__",
+  "egress_dns_ipv4": "__PROVIDER_TUNNEL_DNS_IPV4__",
+  "expected_exit_ipv4": "__PROVIDER_EXPECTED_EXIT_IPV4__"
+}

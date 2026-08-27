@@ -112,8 +112,13 @@ _TRANSIENT_ROUTE_HEALTH_DENIAL_CODES = frozenset(
         "ROUTE_HEALTH_INVALID",
         "ROUTE_HEALTH_CLOCK_ROLLBACK",
         "ROUTE_HEALTH_HEADROOM",
+        "REMOTE_VPN_HEALTH_UNAVAILABLE",
+        "REMOTE_VPN_HEALTH_INVALID",
+        "REMOTE_VPN_HEALTH_CLOCK_ROLLBACK",
+        "REMOTE_VPN_HEALTH_HEADROOM",
     }
 )
+_REMOTE_VPN_MODE = "testnet_remote_vpn_exit"
 
 
 def _file_signature(file_stat: os.stat_result) -> tuple[int, ...]:
@@ -1968,6 +1973,12 @@ _SCHEMA_V16 = _Migration(
     ),
 )
 
+_SCHEMA_V17 = _Migration(
+    17,
+    "remote_vpn_bound_submission_authority",
+    (),
+)
+
 _MIGRATIONS = (
     _SCHEMA_V1,
     _SCHEMA_V2,
@@ -1985,8 +1996,9 @@ _MIGRATIONS = (
     _SCHEMA_V14,
     _SCHEMA_V15,
     _SCHEMA_V16,
+    _SCHEMA_V17,
 )
-EXECUTION_SCHEMA_VERSION = 16
+EXECUTION_SCHEMA_VERSION = 17
 
 
 def _execution_schema_objects(
@@ -2682,6 +2694,10 @@ class EntrySubmissionAuthority:
     fencing_token: int
     pre_send_role_attestation_hash: str
     pre_send_role_expires_at_ms: int
+    route_mode: str
+    route_expectation_hash: str
+    route_evidence_hash: str
+    route_expires_at_ms: int
     issued_at: datetime
     lease_expires_at: datetime
     authority_hash: str
@@ -2698,6 +2714,8 @@ class EntrySubmissionAuthority:
             "action_hash",
             "wire_hash",
             "pre_send_role_attestation_hash",
+            "route_expectation_hash",
+            "route_evidence_hash",
             "authority_hash",
         ):
             object.__setattr__(
@@ -2711,6 +2729,9 @@ class EntrySubmissionAuthority:
             self.pre_send_role_expires_at_ms,
             field="pre_send_role_expires_at_ms",
         )
+        if self.route_mode != _REMOTE_VPN_MODE:
+            raise ValidationError("entry submission authority route mode is invalid")
+        _nonnegative_int(self.route_expires_at_ms, field="route_expires_at_ms")
         issued = _utc(self.issued_at, field="issued_at")
         lease = _utc(self.lease_expires_at, field="lease_expires_at")
         if not issued < lease:
@@ -2718,6 +2739,10 @@ class EntrySubmissionAuthority:
         if int(issued.timestamp() * 1_000) >= self.pre_send_role_expires_at_ms:
             raise ValidationError(
                 "entry submission authority outlives its PRE_SEND role fence"
+            )
+        if int(issued.timestamp() * 1_000) >= self.route_expires_at_ms:
+            raise ValidationError(
+                "entry submission authority outlives its remote VPN evidence"
             )
         object.__setattr__(self, "issued_at", issued)
         object.__setattr__(self, "lease_expires_at", lease)
@@ -2736,6 +2761,10 @@ class EntrySubmissionAuthority:
                 self.pre_send_role_attestation_hash
             ),
             "pre_send_role_expires_at_ms": self.pre_send_role_expires_at_ms,
+            "route_mode": self.route_mode,
+            "route_expectation_hash": self.route_expectation_hash,
+            "route_evidence_hash": self.route_evidence_hash,
+            "route_expires_at_ms": self.route_expires_at_ms,
             "issued_at": _time_text(self.issued_at, field="issued_at"),
             "lease_expires_at": _time_text(
                 self.lease_expires_at,
@@ -3776,6 +3805,28 @@ class ExecutionStore:
                             "cannot migrate nonempty schema-v15 chat state across "
                             "the canonical delivery-evidence boundary"
                         )
+                if migration.version == 17 and seen:
+                    legacy_route_authority_state = any(
+                        connection.execute(
+                            f"SELECT 1 FROM {table} LIMIT 1"
+                        ).fetchone()
+                        is not None
+                        for table in (
+                            "execution_signed_envelopes",
+                            "execution_attempts",
+                            "execution_submission_authorities",
+                            "execution_transport_outcomes",
+                            "execution_qualification_signed_evidence",
+                            "execution_qualification_attempts",
+                            "execution_qualification_submission_authorities",
+                            "execution_qualification_transport_evidence",
+                        )
+                    )
+                    if legacy_route_authority_state:
+                        raise StorageError(
+                            "cannot migrate signed, attempted, authority, or outcome "
+                            "state across the remote-VPN authority boundary"
+                        )
                 for statement in migration.statements:
                     connection.execute(statement)
                 connection.execute(
@@ -4424,6 +4475,26 @@ class ExecutionStore:
             previous = event.event_hash
         return True
 
+    def get_identity_hash(self) -> str:
+        """Return the verified immutable execution-store identity digest.
+
+        This read-only value lets a separately published preregistration
+        receipt identify the exact store that accepted a ticket without
+        exposing that database to the control process.
+        """
+
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM execution_store_identity WHERE singleton = 1"
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            raise StorageError("execution database identity is missing")
+        self._verify_identity_row(row)
+        return _stored_hash(row["record_hash"], field="identity record_hash")
+
     # -- exact plans, tickets, and approvals --------------------------
 
     @staticmethod
@@ -4962,6 +5033,75 @@ class ExecutionStore:
         if not isinstance(payload, dict):
             raise StorageError("persisted ticket payload is not an object")
         return payload
+
+    def get_ticket_infrastructure_grant_hash(self, ticket_hash: str) -> str:
+        """Return the verified grant binding for one registered ticket."""
+
+        checked = _hash(ticket_hash, field="ticket_hash")
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM execution_tickets WHERE ticket_hash = ?", (checked,)
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is None:
+            raise RecordNotFound("execution ticket is not registered")
+        self._verify_ticket_row(row)
+        return _stored_hash(
+            row["infrastructure_grant_hash"],
+            field="infrastructure_grant_hash",
+        )
+
+    def get_ticket_preregistration_snapshot(
+        self,
+        ticket_hash: str,
+    ) -> Mapping[str, Any]:
+        """Read ticket, grant binding and store identity in one DB snapshot."""
+
+        checked = _hash(ticket_hash, field="ticket_hash")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN")
+            row = connection.execute(
+                "SELECT * FROM execution_tickets WHERE ticket_hash = ?", (checked,)
+            ).fetchone()
+            identity = connection.execute(
+                "SELECT * FROM execution_store_identity WHERE singleton = 1"
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound("execution ticket is not registered")
+            if identity is None:
+                raise StorageError("execution database identity is missing")
+            self._verify_ticket_row(row)
+            self._verify_identity_row(identity)
+            payload = json.loads(str(row["payload_json"]))
+            if not isinstance(payload, dict):
+                raise StorageError("persisted ticket payload is not an object")
+            result: Mapping[str, Any] = {
+                "ticket_payload": payload,
+                "infrastructure_grant_hash": _stored_hash(
+                    row["infrastructure_grant_hash"],
+                    field="infrastructure_grant_hash",
+                ),
+                "state": _stored_text(
+                    row["state"], field="ticket state", maximum=32
+                ),
+                "registered_at": _parse_time(
+                    row["registered_at"], field="ticket registered_at"
+                ),
+                "execution_store_identity_hash": _stored_hash(
+                    identity["record_hash"], field="identity record_hash"
+                ),
+            }
+            connection.commit()
+            return result
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def get_plan_payload(self, plan_hash: str) -> Mapping[str, Any]:
         checked = _hash(plan_hash, field="plan_hash")
@@ -9514,6 +9654,10 @@ class ExecutionStore:
         fencing_token: int,
         *,
         pre_send_role_attestation_hash: str,
+        route_mode: str,
+        route_expectation_hash: str,
+        route_evidence_hash: str,
+        route_expires_at_ms: int,
         at: datetime,
     ) -> EntrySubmissionAuthority:
         """Consume the sole durable pre-send authority for a protected entry."""
@@ -9529,7 +9673,23 @@ class ExecutionStore:
             pre_send_role_attestation_hash,
             field="pre_send_role_attestation_hash",
         )
+        if route_mode != _REMOTE_VPN_MODE:
+            raise ValidationError("entry route mode is not remote TESTNET VPN")
+        checked_route_expectation = _hash(
+            route_expectation_hash,
+            field="route_expectation_hash",
+        )
+        checked_route_evidence = _hash(
+            route_evidence_hash,
+            field="route_evidence_hash",
+        )
+        _nonnegative_int(route_expires_at_ms, field="route_expires_at_ms")
         checked_at = _utc(at, field="at")
+        if route_expires_at_ms <= _milliseconds(
+            checked_at,
+            field="entry submission authority time",
+        ):
+            raise StateConflict("entry remote VPN evidence expired")
         with self._transaction() as connection:
             outbox, _ = self._require_claim_locked(
                 connection,
@@ -9623,6 +9783,10 @@ class ExecutionStore:
                 "fencing_token": token,
                 "pre_send_role_attestation_hash": checked_pre_send_role,
                 "pre_send_role_expires_at_ms": pre_send_role.expires_at_ms,
+                "route_mode": route_mode,
+                "route_expectation_hash": checked_route_expectation,
+                "route_evidence_hash": checked_route_evidence,
+                "route_expires_at_ms": route_expires_at_ms,
                 "issued_at": checked_at,
                 "lease_expires_at": outbox.lease_expires_at,
             }
@@ -9674,6 +9838,10 @@ class ExecutionStore:
                     "authority_hash": authority_hash,
                     "pre_send_role_attestation_hash": checked_pre_send_role,
                     "pre_send_role_expires_at_ms": pre_send_role.expires_at_ms,
+                    "route_mode": route_mode,
+                    "route_expectation_hash": checked_route_expectation,
+                    "route_evidence_hash": checked_route_evidence,
+                    "route_expires_at_ms": route_expires_at_ms,
                     "retry_allowed": False,
                 },
             )
@@ -9688,6 +9856,10 @@ class ExecutionStore:
                 fencing_token=token,
                 pre_send_role_attestation_hash=checked_pre_send_role,
                 pre_send_role_expires_at_ms=pre_send_role.expires_at_ms,
+                route_mode=route_mode,
+                route_expectation_hash=checked_route_expectation,
+                route_evidence_hash=checked_route_evidence,
+                route_expires_at_ms=route_expires_at_ms,
                 issued_at=checked_at,
                 lease_expires_at=outbox.lease_expires_at,
                 authority_hash=authority_hash,
@@ -9726,6 +9898,10 @@ class ExecutionStore:
                 pre_send_role_expires_at_ms=int(
                     row["pre_send_role_expires_at_ms"]
                 ),
+                route_mode=str(payload["route_mode"]),
+                route_expectation_hash=str(payload["route_expectation_hash"]),
+                route_evidence_hash=str(payload["route_evidence_hash"]),
+                route_expires_at_ms=int(payload["route_expires_at_ms"]),
                 issued_at=_parse_time(
                     row["issued_at"],
                     field="entry submission authority issued_at",
@@ -9861,6 +10037,7 @@ class ExecutionStore:
             or evidence.attempted_at_ms >= signed.expires_after_ms
             or evidence.attempted_at_ms
             >= authority.pre_send_role_expires_at_ms
+            or evidence.attempted_at_ms >= authority.route_expires_at_ms
             or attempted_at >= authority.lease_expires_at
             or recorded < attempted_at
             or recorded < attempt.updated_at

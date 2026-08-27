@@ -1,15 +1,18 @@
 # TESTNET chat issuance-provenance plan
 
-Status: **inert design only**. This document and its JSON companion do not
-authorize creating an identity, installing a runtime, changing an ACL, opening
-a network connection, provisioning a credential, issuing a proposal, starting
-the broker, or touching a venue.
+Status: **inert plan only for deployment**. Enabled TESTNET source implements
+the fixed evidence/projection stores, executor preregistration receipt and
+same-process broker issuance composition. This document and its JSON companion
+do not authorize creating an identity, installing a runtime, changing an ACL,
+opening a network connection, provisioning a credential, issuing a proposal,
+starting the broker, or touching a venue.
 
-The current proposal issuer can revalidate internally consistent account,
-market, and grant objects, but their constructor origin is not yet
-authoritative. A persistence layer that accepted those same free objects would
-only preserve a forgery. Promotion therefore requires provenance-producing
-boundaries before a durable evidence store is implemented.
+The live-composition adapter does not accept free account, market, grant or
+registration objects. It reuses the exact seven-read TESTNET qualification
+artifact, recompiles the account hash, publishes a sanitized quote projection,
+and requires an executor-owned receipt before display. Promotion still
+requires installing and qualifying those provenance-producing identities and
+paths.
 
 ## Proposed collector identity
 
@@ -22,13 +25,14 @@ The collector has no login, home directory, shared group, credential, signer,
 execution database, control-database write, or venue-write capability. Its
 future network policy permits fixed TESTNET `POST` reads only to
 `https://api.hyperliquid-testnet.xyz/info`, restricted to the reviewed
-`clearinghouseState`, `meta`, and `l2Book` request families. The exchange path
-is forbidden. Endpoints, environment, account, and arbitrary request types are
-not runtime inputs.
+seven-read sequence: `userRole`, `userAbstraction`, `meta`,
+`clearinghouseState`, `frontendOpenOrders`, `metaAndAssetCtxs`, and `l2Book`.
+The exchange path is forbidden. Endpoints, environment, account, and arbitrary
+request types are not runtime inputs.
 
 ## Account evidence shared by quote and issuer
 
-The collector must create an immutable full-source account artifact containing
+The offline collector adapter creates an immutable full-source artifact containing
 the canonical Hyperliquid account snapshot, venue snapshot hash, exact risk
 limits and limits hash, symbol, local budget inputs, derived account-risk
 snapshot, collector generation, source request evidence, and timestamps. The
@@ -38,16 +42,19 @@ hash also depends on source values that object does not carry.
 
 Full source artifacts are UID/GID-453-owned, mode 0400 files beneath a
 UID/GID-453 mode-0700 namespace. Only control UID 452 receives search on the
-directory and read on the file. A separate sanitized quote projection binds
-the exact full-source hash and may be read by research UID 450 and control UID
-452. Both the quote service and broker must consume the same
-`account_evidence_hash`; the staged ticket records that hash, and the broker
+directory and read on the file. A separate implemented sanitized quote projection binds
+the exact full-source hash and may be read only by research UID 450. Both the
+quote service and broker consume the same `account_snapshot_hash`; the staged
+ticket records that hash, and the broker
 reloads the full source and recomputes it before issuance. Neither side may
 supply an account object directly.
 
-Publication is hidden-inode, create-exclusive, full-synchronized,
-ACL-verified, and no-replace. Final file and parent durability must be proven
-again during crash recovery. Automatic overwrite or deletion is prohibited.
+Publication is create-exclusive, full-synchronized, ACL-verified and
+no-replace. An exact existing artifact is idempotent; a crash-left partial
+final poisons that name closed for operator review rather than being replaced.
+Automatic overwrite or full-source deletion is prohibited. The collector
+removes only fully verified quote projections after their five-second
+observation lifetime, before enforcing the bounded quote index.
 
 ## Fresh issuance market evidence
 
@@ -61,29 +68,31 @@ never a market-evidence source.
 ## Grant provenance without a broker secret
 
 The existing infrastructure grant is HMAC-authenticated, so the broker cannot
-turn its portable bytes into a trusted grant without receiving a secret. The
-near-term design uses a separate attended, sealed verifier to create a
-root-owned immutable receipt after authenticating the signed grant. The
-receipt binds the signed artifact hash, complete trusted scope, config and
-policy hashes, verifier code and generation, verification time, and grant
-expiry. Control UID 452 receives read only; it never receives the HMAC or key
-reader.
+turn portable bytes into a trusted grant without receiving a secret. The
+implemented near-term path makes executor UID 451 register the already-trusted
+grant and exact ticket/plan in the execution store, then publish an immutable
+receipt binding that store identity and complete scope. Control UID 452
+receives read only; it never receives the HMAC or key reader.
 
-A future public-key grant format may replace the attended receipt. The broker
-would hold only the public verification material. Neither option is enabled by
-this plan, and no key material appears in the machine-readable artifact.
+A future public-key grant format may replace this receipt path. The broker
+would hold only the public verification material. No key material appears in
+the machine-readable artifact.
 
 ## Executor preregistration before display
 
-Before the proposal is shown, executor UID 451 must have durably registered the
+Before the proposal is shown, executor UID 451 durably registers the
 exact ticket, protected plan, trusted infrastructure grant, account binding,
 and policy scope. It then creates an immutable, sanitized receipt for control
 UID 452. The receipt binds the execution-store identity hash and all ticket,
 plan, grant, policy, account, registration-time, and expiry fields. It conveys
 no execution authority and grants the broker no execution-database access.
 
-The control issuer must load and verify this receipt before it creates either a
+The implemented control issuer loads and verifies this receipt before it creates either a
 proposal or presentation. A caller cannot supply the receipt object.
+The control-UID `prepare-chat-stage` command first authenticates the signed
+grant through the configured grant slot and registers only the exact
+grant/ticket/plan. UID 451 then publishes the receipt from those existing store
+records; neither command creates approval, reservation or command state.
 
 ## Same-process active-session issuance
 
@@ -92,15 +101,15 @@ listener generation. The issuer receives the exact live
 `TestnetChatBrokerSession` object, never a caller-provided session hash or
 decoded receipt. Issuance stops before that listener closes.
 
-For one staging ID, the issuer reloads the verified account evidence, fresh
-market evidence, preverified grant receipt, and executor preregistration
+For one staging ID, the implemented issuer reloads the verified account
+evidence, fresh market evidence, and executor preregistration/grant
 receipt by canonical hash or ID. Only after every scope, economics, freshness,
 expiry, and active-session check succeeds may it atomically store `PENDING` and
 publish the sanitized proposal display.
 
 ## Store boundary and stop line
 
-The future issuance-evidence store must not expose a free-payload write method.
+The issuance-evidence store exposes no free-payload write method.
 Writes require an OS-authenticated collector or attended-verifier capability;
 reads accept canonical IDs and hashes only. The broker cannot insert account,
 market, grant, or preregistration values on behalf of a caller.
@@ -110,11 +119,10 @@ Promotion remains blocked on all of the following:
 - creation and commissioning of UID/GID 453;
 - a sealed info-only collector runtime and fixed outbound policy;
 - exact collector, quote-projection, grant-receipt, and executor-receipt ACLs;
-- durable full-source account and market evidence stores;
-- the attended grant-verification receipt pipeline or reviewed public-key
-  replacement;
-- the executor preregistration receipt pipeline;
-- same-process active-session issuer composition; and
+- creation of the fixed evidence, quote-projection and executor-receipt roots;
+- composition of authenticated grant verification with executor registration;
+- installation of the source-enabled fixed collector and registration commands;
+- installation of the source-enabled broker and same-process issuer lifecycle; and
 - live negative ACL, crash, freshness, replay, and reboot proofs.
 
 Mainnet remains absent. No step in this plan authorizes an apply operation.

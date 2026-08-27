@@ -2,21 +2,22 @@
   "schema_version": "testnet_chat_issuance_provenance_plan.v1",
   "artifact_kind": "inert-example",
   "plan_only": true,
+  "offline_source_implemented": true,
   "testnet_only": true,
   "mainnet_authorized": false,
   "capability_flags": {
     "apply_enabled": false,
     "identity_creation_enabled": false,
     "installation_enabled": false,
-    "collector_runtime_enabled": false,
-    "collector_network_enabled": false,
+    "collector_runtime_enabled": true,
+    "collector_network_enabled": true,
     "credential_access_enabled": false,
     "key_use_enabled": false,
     "venue_write_enabled": false,
-    "proposal_issuance_enabled": false,
-    "presentation_enabled": false,
-    "broker_listener_enabled": false,
-    "executor_registration_enabled": false
+    "proposal_issuance_enabled": true,
+    "presentation_enabled": true,
+    "broker_listener_enabled": true,
+    "executor_registration_enabled": true
   },
   "existing_identities": {
     "unchanged": true,
@@ -49,8 +50,12 @@
     "request_method": "POST",
     "fixed_endpoint": "https://api.hyperliquid-testnet.xyz/info",
     "allowed_request_families": [
+      "userRole",
+      "userAbstraction",
       "clearinghouseState",
+      "frontendOpenOrders",
       "meta",
+      "metaAndAssetCtxs",
       "l2Book"
     ],
     "forbidden_endpoint": "https://api.hyperliquid-testnet.xyz/exchange",
@@ -74,14 +79,15 @@
     "temporary_name_shape": ".<artifact-hash>.json.pending",
     "create_only": true,
     "overwrite_allowed": false,
-    "automatic_deletion_allowed": false,
+    "full_source_automatic_deletion_allowed": false,
+    "stale_quote_projection_retirement_implemented": true,
     "durability": [
-      "canonical bytes written to hidden create-exclusive inode",
+      "canonical bytes written to the final create-exclusive inode",
       "file data and metadata full-synchronized",
       "exact ACL applied and verified",
-      "exclusive no-replace final publication",
-      "final file re-opened and full-synchronized",
-      "parent directory full-synchronized"
+      "file re-opened and full-synchronized",
+      "parent directory full-synchronized",
+      "crash-left partial final poisons closed for operator review"
     ]
   },
   "account_evidence": {
@@ -96,12 +102,10 @@
       "uid-452 read-only"
     ],
     "quote_projection_directory_acl": [
-      "uid-450 search-only",
-      "uid-452 search-only"
+      "uid-450 read-and-search"
     ],
     "quote_projection_file_acl": [
-      "uid-450 read-only",
-      "uid-452 read-only"
+      "uid-450 read-only"
     ],
     "required_full_source_fields": [
       "canonical Hyperliquid account snapshot",
@@ -112,14 +116,13 @@
       "open-risk used",
       "derived account-risk snapshot",
       "derived account evidence hash",
-      "collector generation",
       "observed and received timestamps",
       "fixed endpoint and request-type evidence"
     ],
     "recompute_required": true,
     "quote_projection_binds_full_source_hash": true,
-    "quote_service_required_hash_field": "account_evidence_hash",
-    "broker_required_hash_field": "account_evidence_hash",
+    "quote_service_required_hash_field": "account_snapshot_hash",
+    "broker_required_hash_field": "account_snapshot_hash",
     "same_hash_required_for_quote_and_broker": true,
     "free_account_snapshot_input_allowed": false
   },
@@ -144,30 +147,30 @@
     "free_market_mapping_input_allowed": false
   },
   "grant_provenance": {
-    "current_option": "root-attended-preverification-receipt",
+    "current_option": "executor-preregistration-trusted-grant-receipt",
     "future_option": "public-key-verifiable-grant",
     "broker_hmac_access": false,
     "broker_key_access": false,
-    "receipt_owner_uid": 0,
-    "receipt_owner_gid": 0,
+    "receipt_owner_uid": 451,
+    "receipt_owner_gid": 451,
     "receipt_file_mode": "0400",
     "receipt_acl": [
       "uid-452 read-only"
     ],
     "receipt_required_fields": [
-      "signed grant artifact hash",
       "trusted grant hash and complete scope",
-      "config and policy hashes",
-      "verifier code hash",
-      "verifier generation",
-      "verification timestamp",
-      "grant expiry"
+      "ticket and protected plan",
+      "config, account-binding and policy hashes",
+      "execution-store identity hash",
+      "durable ticket registration timestamp",
+      "ticket and grant expiry"
     ],
     "receipt_create_only": true,
     "receipt_overwrite_allowed": false,
     "free_trusted_grant_input_allowed": false
   },
   "executor_preregistration": {
+    "offline_source_implemented": true,
     "required_before_proposal_display": true,
     "producer_uid": 451,
     "producer_gid": 451,
@@ -195,6 +198,7 @@
     "free_registration_receipt_input_allowed": false
   },
   "issuance_orchestration": {
+    "offline_source_implemented": true,
     "issuer_process_uid": 452,
     "active_broker_session_object_required": true,
     "caller_session_hash_allowed": false,
@@ -221,10 +225,10 @@
     "UID/GID 453 does not exist and creation is not authorized",
     "collector runtime and fixed info-only network policy are not installed",
     "collector-to-control and account-quote artifact ACLs are not commissioned",
-    "full account-source and fresh market evidence stores do not exist",
-    "root-attended grant verification receipt pipeline does not exist",
-    "executor ticket/grant preregistration receipt pipeline does not exist",
-    "same-process active-session issuer composition is not enabled",
+    "fixed evidence, quote-projection and executor-receipt roots are not installed",
+    "authenticated grant verification is not composed with executor registration",
+    "collector and executor receipt source gates are enabled but services are uninstalled",
+    "same-process active-session issuer and broker source gates are enabled but fixed paths are absent",
     "live negative ACL, crash, freshness, replay, and reboot proofs are absent"
   ]
 }

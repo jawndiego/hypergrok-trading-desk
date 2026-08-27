@@ -1,0 +1,57 @@
+#!/usr/sbin/nft -f
+
+# Dedicated TESTNET router VM only. This replaces the VM's complete ruleset.
+# Physical-WAN output is limited to DHCP and the pinned WireGuard endpoint.
+flush ruleset
+
+table inet trading_desk_filter {
+    chain prerouting_observe {
+        type filter hook prerouting priority filter; policy accept;
+        iifname "wg-exec" meta nfproto ipv6 counter
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iifname "lo" accept
+        ct state invalid drop
+        ct state established,related accept
+        ip protocol icmp accept
+        ip6 nexthdr ipv6-icmp accept
+        iifname "__REVIEWED_WAN_INTERFACE__" udp sport 67 udp dport 68 accept
+        iifname "__REVIEWED_INGRESS_INTERFACE__" ip saddr __REVIEWED_MANAGEMENT_SOURCE_CIDR__ udp dport __REVIEWED_ROUTER_LISTEN_PORT__ accept
+        iifname "__REVIEWED_INGRESS_INTERFACE__" ip saddr __REVIEWED_MANAGEMENT_SOURCE_CIDR__ tcp dport 22 accept
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        ct state invalid drop
+        iifname "wg-exec" oifname "wg-egress" ip saddr __REVIEWED_ROUTER_IPV4_NETWORK__ ip daddr __REVIEWED_EGRESS_DNS_IPV4__ udp dport 53 ct state new,established accept
+        iifname "wg-exec" oifname "wg-egress" ip saddr __REVIEWED_ROUTER_IPV4_NETWORK__ ip daddr __REVIEWED_EGRESS_DNS_IPV4__ tcp dport 53 ct state new,established accept
+        iifname "wg-exec" oifname "wg-egress" ip saddr __REVIEWED_ROUTER_IPV4_NETWORK__ tcp dport 443 ct state new,established counter accept
+        iifname "wg-exec" oifname "wg-egress" ip saddr __REVIEWED_ROUTER_IPV4_NETWORK__ udp dport 123 ct state new,established accept
+        iifname "wg-egress" oifname "wg-exec" ip daddr __REVIEWED_ROUTER_IPV4_NETWORK__ ct state established,related accept
+        iifname "wg-exec" counter drop
+        iifname "wg-egress" counter drop
+    }
+
+    chain output {
+        type filter hook output priority filter; policy drop;
+        oifname "lo" accept
+        ct state invalid drop
+        oifname "__REVIEWED_INGRESS_INTERFACE__" ct state established,related accept
+        oifname "wg-egress" ct state established,related accept
+        oifname "__REVIEWED_WAN_INTERFACE__" udp sport 68 udp dport 67 accept
+        oifname "__REVIEWED_WAN_INTERFACE__" ip daddr __REVIEWED_EGRESS_ENDPOINT_IPV4__ udp dport __REVIEWED_EGRESS_ENDPOINT_PORT__ accept
+        oifname "wg-egress" ip daddr __REVIEWED_EGRESS_DNS_IPV4__ udp dport 53 ct state new,established accept
+        oifname "wg-egress" ip daddr __REVIEWED_EGRESS_DNS_IPV4__ tcp dport 53 ct state new,established accept
+        oifname "wg-egress" tcp dport 443 ct state new,established counter accept
+        oifname "wg-egress" udp dport 123 ct state new,established accept
+    }
+}
+
+table ip trading_desk_nat {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "wg-egress" ip saddr __REVIEWED_ROUTER_IPV4_NETWORK__ masquerade
+    }
+}

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
@@ -25,6 +25,7 @@ from trading_harness.executor_config import parse_executor_config
 from trading_harness.executor_runtime import RuntimeStep
 from trading_harness.execution_learning_sync import LearningProjectionError
 from trading_harness.executor_state_binding import MAX_SHARED_STATE_FILE_BYTES
+import trading_harness.executor_state_binding as state_binding_module
 from trading_harness.executor_runtime_store import ExecutorRuntimeStore
 from trading_harness.executor_service import (
     _validate_state_layout,
@@ -41,6 +42,10 @@ from trading_harness.nonce import PersistentNonceAllocator
 from trading_harness.planning import RiskSizingPolicy
 from trading_harness.staging_inbox import TradeStagingInbox
 from trading_harness.testnet_route_health import TestnetRouteHealthGate
+from trading_harness.testnet_remote_vpn_health import (
+    TestnetRemoteVpnPromotionGuard,
+    TestnetRemoteVpnPromotionReport,
+)
 from tests.test_account_risk import flat_clearing
 from tests.test_hyperliquid_account import ACCOUNT, FixtureTransport
 from tests.test_execution_store import (
@@ -55,6 +60,7 @@ from tests.test_testnet_route_health import (
     route_expectation,
     route_gate,
 )
+from tests.test_testnet_remote_vpn_health import remote_evidence, remote_expectation
 
 
 class FakeWallet:
@@ -91,7 +97,7 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name).absolute()
+        self.root = Path(temporary.name).resolve()
         self.policy = RiskSizingPolicy(
             version="service-test-v1",
             entry_slippage_bps=Decimal("0"),
@@ -137,6 +143,19 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
         self.addCleanup(euid_patch.stop)
         self.addCleanup(lstat_patch.stop)
         self.addCleanup(stat_patch.stop)
+        chat_gate_patch = patch(
+            "trading_harness.executor_chat_ready_consumer."
+            "TESTNET_CHAT_READY_CONSUMER_ENABLED",
+            False,
+        )
+        chat_gate_patch.start()
+        self.addCleanup(chat_gate_patch.stop)
+        state_acl_patch = patch(
+            "trading_harness.executor_service._state_acl_verification_required",
+            return_value=False,
+        )
+        state_acl_patch.start()
+        self.addCleanup(state_acl_patch.stop)
         clearing = flat_clearing()
         clearing["time"] = int((AT - timedelta(milliseconds=500)).timestamp() * 1000)
         self.snapshot = fetch_account_snapshot(
@@ -402,6 +421,120 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
             self.config.config_hash,
             reopened.runtime_store.read().config_hash,
         )
+
+    def test_reopen_rejects_extra_core_state_named_acls(self) -> None:
+        initialize_testnet_executor_state(self.config, clock=lambda: AT)
+        databases = self._main_state_files()
+
+        def main_acl(_config, database: Path) -> frozenset[str]:
+            return frozenset({f"main:{database.name}"})
+
+        def parent_acl(_config, database: Path) -> frozenset[str]:
+            return frozenset({f"parent:{database.parent.name}"})
+
+        def sidecar_acl(_config, database: Path) -> frozenset[str]:
+            return frozenset({f"sidecar:{database.name}"})
+
+        def expected_acl(path: Path) -> frozenset[str]:
+            selected = Path(path)
+            for database in databases:
+                if selected == database:
+                    return main_acl(self.config, database)
+                if selected == database.parent:
+                    return parent_acl(self.config, database)
+                if selected in {
+                    Path(str(database) + suffix)
+                    for suffix in ("-wal", "-shm", "-journal")
+                }:
+                    return sidecar_acl(self.config, database)
+            return frozenset()
+
+        def descriptor_stat(descriptor: int):
+            return _StatProxy(
+                os.fstat(descriptor),
+                {"st_uid": self.config.executor_uid},
+            )
+
+        @contextmanager
+        def acl_environment(
+            target: Path | None = None,
+            unexpected: str | None = None,
+        ):
+            def named_acl(path: Path) -> tuple[str, ...]:
+                values = expected_acl(Path(path))
+                if Path(path) == target and unexpected is not None:
+                    values = values | {unexpected}
+                return tuple(sorted(values))
+
+            with ExitStack() as stack:
+                stack.enter_context(
+                    patch(
+                        "trading_harness.executor_service."
+                        "_state_acl_verification_required",
+                        return_value=True,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(state_binding_module.sys, "platform", "darwin")
+                )
+                stack.enter_context(
+                    patch.object(
+                        state_binding_module,
+                        "expected_state_database_acl",
+                        side_effect=main_acl,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        state_binding_module,
+                        "expected_state_parent_acl",
+                        side_effect=parent_acl,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        state_binding_module,
+                        "expected_state_sidecar_acl",
+                        side_effect=sidecar_acl,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        state_binding_module,
+                        "_descriptor_stat",
+                        side_effect=descriptor_stat,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        state_binding_module,
+                        "_named_acl",
+                        side_effect=named_acl,
+                    )
+                )
+                yield
+
+        with acl_environment():
+            reopened = open_testnet_executor_state(self.config, clock=lambda: AT)
+        self.assertIsNotNone(reopened.learning)
+
+        targets = (
+            (
+                self.config.paths.execution_database,
+                "user:jawndiego allow read,write",
+            ),
+            (
+                self.config.paths.nonce_database.parent,
+                "user:trading-research allow search",
+            ),
+        )
+        for target, unexpected in targets:
+            with (
+                self.subTest(target=target),
+                acl_environment(target, unexpected),
+                self.assertRaisesRegex(ValidationError, "named ACL differs"),
+            ):
+                open_testnet_executor_state(self.config, clock=lambda: AT)
 
     def test_reopen_uses_existing_only_mode_for_every_store(self) -> None:
         initialize_testnet_executor_state(self.config, clock=lambda: AT)
@@ -706,6 +839,9 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
         state = initialize_testnet_executor_state(self.config, clock=lambda: AT)
 
         def build(*, configured: bool):
+            base = route_expectation(self.config.config_hash)
+            remote = remote_expectation(base)
+            evidence = remote_evidence(remote, at=AT)
             return build_active_testnet_executor_service(
                 state=state,
                 wallet=FakeWallet(self.config.api_wallet_address),
@@ -722,7 +858,12 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
                 market_reader=lambda _symbol, _network: {},
                 info_transport=EmptyLossTransport(),
                 route_health_gate=(
-                    route_gate(self.config.config_hash, at=AT)
+                    TestnetRemoteVpnPromotionGuard(
+                        executor_config_hash=self.config.config_hash,
+                        base_expectation=base,
+                        expectation=remote,
+                        reader=lambda: evidence,
+                    )
                     if configured
                     else None
                 ),
@@ -765,7 +906,14 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
                 self.assertTrue(cycle.route_health_required)
                 self.assertEqual(configured, not cycle.route_health_failed)
                 assert cycle.route_health is not None
-                self.assertEqual(configured, cycle.route_health.ready)
+                if configured:
+                    self.assertIsInstance(
+                        cycle.route_health,
+                        TestnetRemoteVpnPromotionReport,
+                    )
+                    self.assertTrue(cycle.route_health.qualified)
+                else:
+                    self.assertFalse(cycle.route_health.ready)
                 self.assertFalse(
                     cycle.route_health.as_dict()["venue_writes_authorized"]
                 )

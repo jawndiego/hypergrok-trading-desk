@@ -96,11 +96,10 @@ _STEP_STATES = frozenset(
     }
 )
 
-# Schema, an offline envelope/verifier contract, and result transitions exist,
-# but no pinned production verifier, signer, or transport consumer exists.
-# This constant is deliberately not configurable: environment variables, CLI
-# arguments, or caller-provided objects cannot enable a half-built live path.
-QUALIFICATION_SUBMISSION_ENABLED = False
+# The narrow attended TESTNET canary is promoted only with the independently
+# compiled remote-VPN gate and its exact persisted route binding. This remains
+# a source constant: no environment, config, CLI, or caller flag can widen it.
+QUALIFICATION_SUBMISSION_ENABLED = True
 
 
 def _utc(value: object, field: str) -> datetime:
@@ -544,6 +543,10 @@ class QualificationSubmissionAuthority:
     lease_expires_at: datetime
     pre_send_attestation_hash: str
     pre_send_expires_at_ms: int
+    route_mode: str
+    route_expectation_hash: str
+    route_evidence_hash: str
+    route_expires_at_ms: int
     authority_hash: str
 
     def verify_integrity(self) -> None:
@@ -556,9 +559,13 @@ class QualificationSubmissionAuthority:
             "action_hash",
             "wire_hash",
             "pre_send_attestation_hash",
+            "route_expectation_hash",
+            "route_evidence_hash",
             "authority_hash",
         ):
             _hash(getattr(self, field), field)
+        if self.route_mode != "testnet_remote_vpn_exit":
+            raise ValidationError("submission authority route mode is invalid")
         _identifier(self.worker_id, "worker_id")
         if type(self.nonce) is not int or self.nonce < 0:
             raise ValidationError("nonce must be a nonnegative integer")
@@ -569,8 +576,11 @@ class QualificationSubmissionAuthority:
         if (
             type(self.pre_send_expires_at_ms) is not int
             or self.pre_send_expires_at_ms < 0
+            or type(self.route_expires_at_ms) is not int
+            or self.route_expires_at_ms < 0
             or not issued < lease
             or _milliseconds(issued) >= self.pre_send_expires_at_ms
+            or _milliseconds(issued) >= self.route_expires_at_ms
         ):
             raise ValidationError("submission authority expiry is invalid")
 
@@ -578,12 +588,22 @@ class QualificationSubmissionAuthority:
 class QualificationStore:
     """Exact schema-v12 qualification state over one execution database."""
 
-    def __init__(self, execution_store: ExecutionStore) -> None:
+    def __init__(
+        self,
+        execution_store: ExecutionStore,
+        *,
+        executor_config_hash: str | None = None,
+    ) -> None:
         if type(execution_store) is not ExecutionStore:
             raise TypeError("execution_store must be exact ExecutionStore")
         if execution_store.environment is not Environment.TESTNET:
             raise ValidationError("qualification store is TESTNET-only")
         self.execution_store = execution_store
+        self.executor_config_hash = (
+            None
+            if executor_config_hash is None
+            else _hash(executor_config_hash, "executor_config_hash")
+        )
 
     @staticmethod
     def _role_attestation_record(
@@ -1587,8 +1607,27 @@ class QualificationStore:
         )
         if not isinstance(payload, dict):
             raise StorageError("qualification submission authority is not an object")
+        try:
+            route_mode = payload["route_mode"]
+            if route_mode != "testnet_remote_vpn_exit":
+                raise ValidationError("route mode differs")
+            route_expectation_hash = _hash(
+                payload["route_expectation_hash"],
+                "route_expectation_hash",
+            )
+            route_evidence_hash = _hash(
+                payload["route_evidence_hash"],
+                "route_evidence_hash",
+            )
+            route_expires_at_ms = payload["route_expires_at_ms"]
+            if type(route_expires_at_ms) is not int or route_expires_at_ms < 0:
+                raise ValidationError("route expiry differs")
+        except (KeyError, TypeError, ValidationError) as error:
+            raise StorageError(
+                "qualification submission authority route binding is invalid"
+            ) from error
         expected = {
-            "schema_version": "testnet_qualification_submission_authority.v1",
+            "schema_version": "testnet_qualification_submission_authority.v2",
             "command_id": attempt.command_id,
             "phase": attempt.phase.value,
             "attempt_id": attempt.attempt_id,
@@ -1602,12 +1641,16 @@ class QualificationStore:
             "lease_expires_at": str(row["lease_expires_at"]),
             "pre_send_attestation_hash": row["pre_send_attestation_hash"],
             "pre_send_expires_at_ms": int(row["pre_send_expires_at_ms"]),
+            "route_mode": route_mode,
+            "route_expectation_hash": route_expectation_hash,
+            "route_evidence_hash": route_evidence_hash,
+            "route_expires_at_ms": route_expires_at_ms,
             "environment": "testnet",
         }
         if payload != expected:
             raise StorageError("qualification submission authority fields differ")
         authority_hash = domain_hash(
-            "trading-harness/qualification-submission-authority/v1",
+            "trading-harness/qualification-submission-authority/v2",
             payload,
         )
         if (
@@ -1728,6 +1771,10 @@ class QualificationStore:
                 row["pre_send_attestation_hash"]
             ),
             pre_send_expires_at_ms=int(row["pre_send_expires_at_ms"]),
+            route_mode=route_mode,
+            route_expectation_hash=route_expectation_hash,
+            route_evidence_hash=route_evidence_hash,
+            route_expires_at_ms=route_expires_at_ms,
             authority_hash=authority_hash,
         )
         result.verify_integrity()
@@ -3411,22 +3458,33 @@ class QualificationStore:
         *,
         worker_id: str,
         fencing_token: int,
+        route_mode: str,
+        route_expectation_hash: str,
+        route_evidence_hash: str,
+        route_expires_at_ms: int,
         at: datetime,
     ) -> QualificationSubmissionAuthority:
-        """Validate the complete boundary, then fail because sending is disabled.
-
-        Digest-only evidence is not an authenticated signer binding.  Until a
-        separately reviewed signer envelope exists, this method never inserts
-        a submission authority and never transitions an attempt to ``sending``.
-        Stored evidence is still fully verified first so corruption cannot be
-        hidden behind the disabled-feature error.
-        """
+        """Validate and bind the exact remote-VPN capability at point of no return."""
 
         checked_command = _identifier(command_id, "command_id")
         checked_attempt = _identifier(attempt_id, "attempt_id")
         checked_signed = _hash(signed_evidence_hash, "signed_evidence_hash")
         checked_worker = _identifier(worker_id, "worker_id")
+        if route_mode != "testnet_remote_vpn_exit":
+            raise ValidationError("qualification route mode is not remote TESTNET VPN")
+        checked_route_expectation = _hash(
+            route_expectation_hash,
+            "route_expectation_hash",
+        )
+        checked_route_evidence = _hash(
+            route_evidence_hash,
+            "route_evidence_hash",
+        )
+        if type(route_expires_at_ms) is not int or route_expires_at_ms < 0:
+            raise ValidationError("route_expires_at_ms must be nonnegative")
         checked_at = _utc(at, "at")
+        if route_expires_at_ms <= _milliseconds(checked_at):
+            raise StateConflict("qualification remote VPN evidence expired")
         with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
             command, outbox, step = self._require_claim_locked(
                 connection,
@@ -3566,7 +3624,7 @@ class QualificationStore:
                     "sender and complete post-send workflow are promoted"
                 )
             payload = {
-                "schema_version": "testnet_qualification_submission_authority.v1",
+                "schema_version": "testnet_qualification_submission_authority.v2",
                 "command_id": checked_command,
                 "phase": step.phase.value,
                 "attempt_id": checked_attempt,
@@ -3580,10 +3638,14 @@ class QualificationStore:
                 "lease_expires_at": _time(outbox.lease_expires_at),
                 "pre_send_attestation_hash": pre_send.attestation_hash,
                 "pre_send_expires_at_ms": pre_send.expires_at_ms,
+                "route_mode": route_mode,
+                "route_expectation_hash": checked_route_expectation,
+                "route_evidence_hash": checked_route_evidence,
+                "route_expires_at_ms": route_expires_at_ms,
                 "environment": "testnet",
             }
             authority_hash = domain_hash(
-                "trading-harness/qualification-submission-authority/v1",
+                "trading-harness/qualification-submission-authority/v2",
                 payload,
             )
             payload_json, content_hash = _payload(payload)
@@ -3668,6 +3730,10 @@ class QualificationStore:
                 lease_expires_at=outbox.lease_expires_at,
                 pre_send_attestation_hash=pre_send.attestation_hash,
                 pre_send_expires_at_ms=pre_send.expires_at_ms,
+                route_mode=route_mode,
+                route_expectation_hash=checked_route_expectation,
+                route_evidence_hash=checked_route_evidence,
+                route_expires_at_ms=route_expires_at_ms,
                 authority_hash=authority_hash,
             )
             result.verify_integrity()

@@ -97,6 +97,18 @@ def provider(
 
 
 class SuccessfulLoadTests(unittest.TestCase):
+    def test_availability_check_verifies_identity_without_returning_wallet(self) -> None:
+        result = BoundedCommandResult(
+            0,
+            bytearray(PRIVATE_KEY.encode()),
+            bytearray(),
+        )
+        selected = provider(FakeRunner(result))
+
+        self.assertIsNone(selected.check_available())
+
+        self.assertTrue(all(value == 0 for value in result.stdout))
+
     def test_uses_exact_argv_and_returns_only_verified_wallet(self) -> None:
         result = BoundedCommandResult(
             0,

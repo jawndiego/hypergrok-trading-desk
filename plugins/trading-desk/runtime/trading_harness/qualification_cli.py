@@ -7,9 +7,10 @@ key, or reusable token.  Control-role commands collect/verify public evidence
 and mint one attended HMAC permit from ``/dev/tty``.  Executor-role commands
 claim, sign, and reconcile only the typed action already stored durably.
 
-Submission remains compiled off.  ``run`` checks that gate before loading the
-config, inspecting state, opening Keychain, constructing a signer, or touching
-the network.
+Submission is promoted only for the route-bound attended TESTNET canary.
+``run`` checks both source gates before loading config, state, Keychain or
+network, then requires fixed root-owned remote-VPN evidence before authority
+and again immediately before HTTP.
 """
 
 from __future__ import annotations
@@ -81,6 +82,11 @@ from .qualification_role_attestation import (
 from . import qualification_store as qualification_store_module
 from .qualification_store import QualificationStore
 from .qualification_transport import submit_qualification_once
+from . import testnet_remote_vpn_health as remote_vpn_health_module
+from .testnet_remote_vpn_health import TestnetRemoteVpnPromotionGuard
+from .testnet_remote_vpn_health_artifacts import (
+    build_installed_testnet_remote_vpn_promotion_guard,
+)
 from .qualification_websocket import (
     QualificationWebSocketClient,
     QualificationWebSocketMonitor,
@@ -311,7 +317,8 @@ def _qualification_store(config: ExecutorConfig) -> QualificationStore:
             max_reserved_notional=config.max_reserved_notional,
             chat_scope=testnet_chat_execution_scope_from_config(config),
             must_exist=True,
-        )
+        ),
+        executor_config_hash=config.config_hash,
     )
 
 
@@ -1354,6 +1361,7 @@ def send_cancel_reauthorization_once(
     store: QualificationStore | None = None,
     artifact_store: QualificationEnvelopeArtifactStore | None = None,
     sender: Callable[..., object] = submit_qualification_once,
+    remote_vpn_guard: TestnetRemoteVpnPromotionGuard | None = None,
 ) -> dict[str, object]:
     selected = _qualification_store(config) if store is None else store
     lane = CancelReauthorizationStore(selected)
@@ -1398,6 +1406,7 @@ def send_cancel_reauthorization_once(
         signed_evidence_hash=evidence.evidence_hash,
         worker_id=worker_id,
         fencing_token=record.fencing_token,
+        remote_vpn_guard=remote_vpn_guard,
         clock=clock,
     )
     return {
@@ -1498,6 +1507,7 @@ def run(
     artifact_store: QualificationEnvelopeArtifactStore | None = None,
     sender: Callable[..., object] = submit_qualification_once,
     cancel_reauthorization_store: CancelReauthorizationStore | None = None,
+    remote_vpn_guard: TestnetRemoteVpnPromotionGuard | None = None,
 ) -> dict[str, object]:
     """Drive one authorized canary through its full bounded TESTNET lifecycle."""
 
@@ -1506,9 +1516,21 @@ def run(
     # network indirectly through startup helpers.
     if not qualification_store_module.QUALIFICATION_SUBMISSION_ENABLED:
         raise StateConflict("qualification submission is compiled off")
+    if not remote_vpn_health_module.REMOTE_VPN_SUBMISSION_GATE_ENABLED:
+        raise StateConflict("remote VPN submission gate is compiled off")
     config = load_executor_config(config_path)
     _require_role(config, "executor")
     store = _qualification_store(config)
+    selected_remote_vpn_guard = (
+        build_installed_testnet_remote_vpn_promotion_guard(config.config_hash)
+        if remote_vpn_guard is None
+        else remote_vpn_guard
+    )
+    if (
+        type(selected_remote_vpn_guard) is not TestnetRemoteVpnPromotionGuard
+        or selected_remote_vpn_guard.executor_config_hash != config.config_hash
+    ):
+        raise ValidationError("remote VPN guard differs from executor config")
     cancel_store = (
         CancelReauthorizationStore(store)
         if cancel_reauthorization_store is None
@@ -1664,6 +1686,7 @@ def run(
             signed_evidence_hash=evidence.evidence_hash,
             worker_id=worker_id,
             fencing_token=outbox.fencing_token,
+            remote_vpn_guard=selected_remote_vpn_guard,
             clock=clock,
         )
         phase_results.append(
@@ -1709,6 +1732,7 @@ def run(
             store=store,
             artifact_store=artifacts,
             sender=bounded_sender,
+            remote_vpn_guard=selected_remote_vpn_guard,
         )
         phase_results.append(
             {
@@ -2266,8 +2290,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="trading-harness-qualification",
         description=(
-            "Role-isolated Hyperliquid TESTNET qualification. Mainnet and "
-            "submission are compiled off."
+            "Role-isolated, remote-VPN-bound Hyperliquid TESTNET qualification. "
+            "Mainnet is hard-disabled."
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)

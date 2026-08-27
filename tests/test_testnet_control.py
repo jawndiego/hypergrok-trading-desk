@@ -17,6 +17,7 @@ from trading_harness.errors import StateConflict, ValidationError
 from trading_harness.execution_grant import TrustedInfrastructureGrant
 from trading_harness.execution_store import ExecutionStore
 from trading_harness.executor_config import parse_executor_config
+from trading_harness.executor_state_binding import write_state_database_binding
 from trading_harness.hyperliquid_account import fetch_account_snapshot
 from trading_harness.learning_bridge import LearningRecorder
 from trading_harness.learning_ledger import LearningLedger
@@ -26,6 +27,7 @@ from trading_harness.research_api import ResearchService
 from trading_harness.research_store import ResearchStore
 from trading_harness.staging_inbox import TradeStagingInbox
 from trading_harness.testnet_control import AttendedTestnetControlPlane
+from trading_harness.testnet_chat_delivery import testnet_chat_execution_scope_from_config
 from tests.test_account_risk import flat_clearing
 from tests.test_hyperliquid_account import ACCOUNT, FixtureTransport
 from tests.test_node import AT, history_reader
@@ -210,13 +212,24 @@ class AttendedTestnetControlPlaneTests(unittest.TestCase):
                 "idempotency_key": "authorize-learning-eth-0001",
             }
         )
+        write_state_database_binding(
+            self.config,
+            self.config.paths.staging_database,
+        )
+        self.config.paths.staging_database.chmod(0o600)
         self.store = ExecutionStore(
             self.config.paths.execution_database,
             environment=Environment.TESTNET,
             account_id=self.config.account_id,
             max_reserved_loss=self.config.max_reserved_loss,
             max_reserved_notional=self.config.max_reserved_notional,
+            chat_scope=testnet_chat_execution_scope_from_config(self.config),
         )
+        write_state_database_binding(
+            self.config,
+            self.config.paths.execution_database,
+        )
+        self.config.paths.execution_database.chmod(0o600)
         self.authority = TestnetApprovalAuthority(
             b"a" * 32,
             key_id="testnet-approval-key",

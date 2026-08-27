@@ -15,6 +15,8 @@ from unittest import mock
 
 from trading_harness.canonical import domain_hash
 from trading_harness.errors import StateConflict
+from trading_harness.executor_config import parse_executor_config
+from trading_harness.execution_store import ExecutionStore
 from trading_harness.qualification_signer import (
     QualificationSignerPolicy,
     QualificationSigningAccount,
@@ -23,6 +25,7 @@ from trading_harness.qualification_store import (
     QUALIFICATION_SUBMISSION_ENABLED,
     QualificationStore,
 )
+from trading_harness import qualification_store as qualification_store_module
 from trading_harness.qualification_role_attestation import (
     QualificationRoleAttestationStage,
     collect_testnet_user_role_attestation,
@@ -40,8 +43,14 @@ from trading_harness.testnet_qualification import (
     QualificationTransportOutcome,
     QualificationWorkflowState,
 )
+from trading_harness import testnet_remote_vpn_health as remote_vpn_module
+from trading_harness.testnet_remote_vpn_health import (
+    TestnetRemoteVpnPromotionGuard,
+)
+from trading_harness.testnet_chat_delivery import testnet_chat_execution_scope_from_config
 
 from tests.test_execution_store import ExecutionStoreTestCase
+from tests.test_executor_config import config_text
 from tests import test_qualification_workflow_store as workflow_fixtures
 from tests.test_testnet_qualification import (
     API_WALLET,
@@ -50,6 +59,11 @@ from tests.test_testnet_qualification import (
     canary_intent,
     retained,
 )
+from tests.test_testnet_remote_vpn_health import (
+    remote_evidence,
+    remote_expectation,
+)
+from tests.test_testnet_route_health import route_expectation
 
 
 class ClockSequence:
@@ -167,6 +181,23 @@ def dropping_server():
             raise AssertionError("local response-drop server did not stop")
 
 
+@contextmanager
+def promoted_submission_gates():
+    with (
+        mock.patch.object(
+            qualification_store_module,
+            "QUALIFICATION_SUBMISSION_ENABLED",
+            True,
+        ),
+        mock.patch.object(
+            remote_vpn_module,
+            "REMOTE_VPN_SUBMISSION_GATE_ENABLED",
+            True,
+        ),
+    ):
+        yield
+
+
 class LocalDropSender:
     def __init__(self, server: _DropServer, *, crash_after_accept: bool = False) -> None:
         self.server = server
@@ -211,7 +242,46 @@ class QualificationSenderTests(ExecutionStoreTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.qualification = QualificationStore(self.store)
+        config = parse_executor_config(
+            config_text()
+            .replace('account_id = "dedicated-testnet"', 'account_id = "testnet-account"')
+            .replace(
+                'main_account_address = "0x1111111111111111111111111111111111111111"',
+                f'main_account_address = "{MAIN_ACCOUNT}"',
+            )
+            .replace(
+                'api_wallet_address = "0x2222222222222222222222222222222222222222"',
+                f'api_wallet_address = "{API_WALLET}"',
+            ),
+            environ={},
+        )
+        scope = testnet_chat_execution_scope_from_config(config)
+        self.store = ExecutionStore(
+            self.path,
+            environment=self.store.environment,
+            account_id=self.store.account_id,
+            max_reserved_loss="100",
+            max_reserved_notional="2000",
+            chat_scope=scope,
+        )
+        self.base_route_expectation = route_expectation(scope.config_hash)
+        self.remote_vpn_expectation = remote_expectation(
+            self.base_route_expectation
+        )
+        self.remote_vpn_evidence = remote_evidence(
+            self.remote_vpn_expectation,
+            at=at(1_000),
+        )
+        self.remote_vpn_guard = TestnetRemoteVpnPromotionGuard(
+            executor_config_hash=self.base_route_expectation.executor_config_hash,
+            base_expectation=self.base_route_expectation,
+            expectation=self.remote_vpn_expectation,
+            reader=lambda: self.remote_vpn_evidence,
+        )
+        self.qualification = QualificationStore(
+            self.store,
+            executor_config_hash=self.base_route_expectation.executor_config_hash,
+        )
         self.policy = QualificationSignerPolicy(
             accounts=(
                 QualificationSigningAccount(
@@ -285,6 +355,11 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             QualificationAttemptPhase.PLACE,
             attempt_id=f"{command.command_id}-attempt",
             issued_ms=500,
+            route_expectation_hash=self.remote_vpn_expectation.expectation_hash,
+            route_evidence_hash=self.remote_vpn_evidence.evidence_hash,
+            route_expires_at_ms=int(
+                self.remote_vpn_evidence.expires_at.timestamp() * 1_000
+            ),
         )
         arguments = {
             "current_workflow": workflow,
@@ -292,11 +367,13 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             "signed_evidence_hash": evidence.evidence_hash,
             "worker_id": "qualification-worker",
             "fencing_token": claim.fencing_token,
+            "remote_vpn_guard": self.remote_vpn_guard,
         }
         return intent, workflow, command, envelope, evidence, authority, arguments
 
     def invoke(self, envelope, authority, arguments, sender):
         with (
+            promoted_submission_gates(),
             mock.patch.object(
                 QualificationStore,
                 "require_submission_authority",
@@ -316,12 +393,14 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             return submit_qualification_once(
                 self.qualification,
                 envelope,
-                clock=ClockSequence(at(600), at(700), at(800)),
+                clock=ClockSequence(
+                    at(600), at(700), at(750), at(800), at(850)
+                ),
                 **arguments,
             )
 
     def test_compiled_gate_blocks_before_any_sender_call(self) -> None:
-        self.assertFalse(QUALIFICATION_SUBMISSION_ENABLED)
+        self.assertTrue(QUALIFICATION_SUBMISSION_ENABLED)
         _, workflow, command, envelope, evidence, claim = self.prepared()
         sender = FakeSender(
             FakeResponse(
@@ -330,10 +409,22 @@ class QualificationSenderTests(ExecutionStoreTestCase):
                 body=b'{"status":"ok"}',
             )
         )
-        with mock.patch.object(
-            transport_module.urlrequest,
-            "build_opener",
-        ) as build:
+        with (
+            mock.patch.object(
+                qualification_store_module,
+                "QUALIFICATION_SUBMISSION_ENABLED",
+                False,
+            ),
+            mock.patch.object(
+                remote_vpn_module,
+                "REMOTE_VPN_SUBMISSION_GATE_ENABLED",
+                False,
+            ),
+            mock.patch.object(
+                transport_module.urlrequest,
+                "build_opener",
+            ) as build,
+        ):
             with self.assertRaisesRegex(StateConflict, "disabled"):
                 submit_qualification_once(
                     self.qualification,
@@ -354,6 +445,87 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             ).state,
             "prepared",
         )
+
+    def test_remote_vpn_gate_blocks_when_submission_gate_alone_is_promoted(self) -> None:
+        _, workflow, command, envelope, evidence, claim = self.prepared()
+        with (
+            mock.patch.object(
+                qualification_store_module,
+                "QUALIFICATION_SUBMISSION_ENABLED",
+                True,
+            ),
+            mock.patch.object(
+                remote_vpn_module,
+                "REMOTE_VPN_SUBMISSION_GATE_ENABLED",
+                False,
+            ),
+            mock.patch.object(
+                QualificationStore,
+                "require_submission_authority",
+            ) as require_authority,
+            mock.patch.object(
+                transport_module.urlrequest,
+                "build_opener",
+            ) as build,
+        ):
+            with self.assertRaisesRegex(StateConflict, "remote VPN.*compiled off"):
+                submit_qualification_once(
+                    self.qualification,
+                    envelope,
+                    current_workflow=workflow,
+                    attempt_id=f"{command.command_id}-attempt",
+                    signed_evidence_hash=evidence.evidence_hash,
+                    worker_id="qualification-worker",
+                    fencing_token=claim.fencing_token,
+                    remote_vpn_guard=self.remote_vpn_guard,
+                    clock=lambda: at(500),
+                )
+        require_authority.assert_not_called()
+        build.assert_not_called()
+
+    def test_constructor_only_config_hash_cannot_rebind_persisted_executor(self) -> None:
+        _, workflow, command, envelope, evidence, claim = self.prepared()
+        wrong_base = route_expectation(domain_hash("test/wrong-config", {}))
+        wrong_expectation = remote_expectation(wrong_base)
+        wrong_evidence = remote_evidence(wrong_expectation, at=at(1_000))
+        wrong_guard = TestnetRemoteVpnPromotionGuard(
+            executor_config_hash=wrong_base.executor_config_hash,
+            base_expectation=wrong_base,
+            expectation=wrong_expectation,
+            reader=lambda: wrong_evidence,
+        )
+        rebound_store = QualificationStore(
+            self.store,
+            executor_config_hash=wrong_base.executor_config_hash,
+        )
+        with (
+            promoted_submission_gates(),
+            mock.patch.object(
+                QualificationStore,
+                "require_submission_authority",
+            ) as require_authority,
+            mock.patch.object(
+                transport_module.urlrequest,
+                "build_opener",
+            ) as build,
+            self.assertRaisesRegex(
+                QualificationSubmissionError,
+                "persisted executor config",
+            ),
+        ):
+            submit_qualification_once(
+                rebound_store,
+                envelope,
+                current_workflow=workflow,
+                attempt_id=f"{command.command_id}-attempt",
+                signed_evidence_hash=evidence.evidence_hash,
+                worker_id="qualification-worker",
+                fencing_token=claim.fencing_token,
+                remote_vpn_guard=wrong_guard,
+                clock=lambda: at(600),
+            )
+        require_authority.assert_not_called()
+        build.assert_not_called()
 
     def test_exact_wire_is_posted_once_and_canonical_hash_is_committed(self) -> None:
         _, workflow, command, envelope, _, authority, arguments = (
@@ -399,16 +571,19 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             ),
             recorded.result,
         )
-        with mock.patch.object(
-            transport_module.urlrequest,
-            "build_opener",
-            return_value=sender,
+        with (
+            promoted_submission_gates(),
+            mock.patch.object(
+                transport_module.urlrequest,
+                "build_opener",
+                return_value=sender,
+            ),
         ):
             with self.assertRaises(StateConflict):
                 submit_qualification_once(
                     self.qualification,
                     envelope,
-                    clock=ClockSequence(at(900), at(1_000), at(1_100)),
+                    clock=ClockSequence(at(900), at(1_000), at(1_050), at(1_100)),
                     **arguments,
                 )
         self.assertEqual(len(sender.calls), 1)
@@ -428,6 +603,7 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             )
         )
         with (
+            promoted_submission_gates(),
             mock.patch.object(
                 QualificationStore,
                 "require_submission_authority",
@@ -442,7 +618,7 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             recorded = submit_qualification_once(
                 self.qualification,
                 envelope,
-                clock=ClockSequence(at(600), at(2_441)),
+                clock=ClockSequence(at(600), at(700), at(800), at(2_441)),
                 **arguments,
             )
         build.assert_not_called()
@@ -454,6 +630,59 @@ class QualificationSenderTests(ExecutionStoreTestCase):
         self.assertEqual(
             recorded.result.detail_code,
             "role_attestation_expired_after_authority",
+        )
+        self.assertEqual(
+            self.qualification.get_command(command.command_id).state,
+            "reconciling",
+        )
+
+    def test_remote_vpn_loss_after_authority_is_unknown_without_http(self) -> None:
+        _, _, command, envelope, _, authority, arguments = self.seed_and_arguments()
+        reads = 0
+
+        def route_reader():
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return self.remote_vpn_evidence
+            raise RuntimeError("route disappeared")
+
+        arguments = {
+            **arguments,
+            "remote_vpn_guard": TestnetRemoteVpnPromotionGuard(
+                executor_config_hash=(
+                    self.base_route_expectation.executor_config_hash
+                ),
+                base_expectation=self.base_route_expectation,
+                expectation=self.remote_vpn_expectation,
+                reader=route_reader,
+            ),
+        }
+        with (
+            promoted_submission_gates(),
+            mock.patch.object(
+                QualificationStore,
+                "require_submission_authority",
+                return_value=authority,
+            ),
+            mock.patch.object(
+                transport_module.urlrequest,
+                "build_opener",
+            ) as build,
+        ):
+            recorded = submit_qualification_once(
+                self.qualification,
+                envelope,
+                clock=ClockSequence(at(600), at(700), at(800)),
+                **arguments,
+            )
+
+        self.assertEqual(2, reads)
+        build.assert_not_called()
+        self.assertIs(recorded.result.outcome, QualificationTransportOutcome.UNKNOWN)
+        self.assertEqual(
+            recorded.result.detail_code,
+            "remote_vpn_lost_after_authority",
         )
         self.assertEqual(
             self.qualification.get_command(command.command_id).state,
@@ -532,16 +761,21 @@ class QualificationSenderTests(ExecutionStoreTestCase):
                 QualificationTransportOutcome.UNKNOWN,
             )
             self.assertEqual(recorded.result.detail_code, "connection_error")
-            with mock.patch.object(
-                transport_module.urlrequest,
-                "build_opener",
-                return_value=sender,
+            with (
+                promoted_submission_gates(),
+                mock.patch.object(
+                    transport_module.urlrequest,
+                    "build_opener",
+                    return_value=sender,
+                ),
             ):
                 with self.assertRaises(StateConflict):
                     submit_qualification_once(
                         self.qualification,
                         envelope,
-                        clock=ClockSequence(at(900), at(1_000), at(1_100)),
+                        clock=ClockSequence(
+                            at(900), at(1_000), at(1_050), at(1_100)
+                        ),
                         **arguments,
                     )
             self.assertEqual(len(sender.calls), 1)
@@ -555,6 +789,7 @@ class QualificationSenderTests(ExecutionStoreTestCase):
         with dropping_server() as server:
             sender = LocalDropSender(server, crash_after_accept=True)
             with (
+                promoted_submission_gates(),
                 mock.patch.object(
                     QualificationStore,
                     "require_submission_authority",
@@ -575,7 +810,9 @@ class QualificationSenderTests(ExecutionStoreTestCase):
                     submit_qualification_once(
                         self.qualification,
                         envelope,
-                        clock=ClockSequence(at(600), at(700), at(800)),
+                        clock=ClockSequence(
+                            at(600), at(700), at(750), at(800), at(850)
+                        ),
                         **arguments,
                     )
             self.assertTrue(server.accepted.wait(timeout=1.0))
@@ -600,16 +837,21 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             self.store.get_reserved_exposure(),
             (intent.reserved_loss, intent.reserved_notional),
         )
-        with mock.patch.object(
-            transport_module.urlrequest,
-            "build_opener",
-            return_value=sender,
+        with (
+            promoted_submission_gates(),
+            mock.patch.object(
+                transport_module.urlrequest,
+                "build_opener",
+                return_value=sender,
+            ),
         ):
             with self.assertRaises(StateConflict):
                 submit_qualification_once(
                     self.qualification,
                     envelope,
-                    clock=ClockSequence(at(15_300), at(15_400), at(15_500)),
+                    clock=ClockSequence(
+                        at(15_300), at(15_400), at(15_450), at(15_500)
+                    ),
                     **arguments,
                 )
         self.assertEqual(len(sender.calls), 1)
@@ -624,6 +866,7 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             )
         )
         with (
+            promoted_submission_gates(),
             mock.patch.object(
                 QualificationStore,
                 "require_submission_authority",
@@ -649,7 +892,9 @@ class QualificationSenderTests(ExecutionStoreTestCase):
                 submit_qualification_once(
                     self.qualification,
                     envelope,
-                    clock=ClockSequence(at(600), at(700), at(800)),
+                    clock=ClockSequence(
+                        at(600), at(700), at(750), at(800), at(850)
+                    ),
                     **arguments,
                 )
         self.assertIs(
@@ -671,6 +916,7 @@ class QualificationSenderTests(ExecutionStoreTestCase):
         _, _, command, envelope, _, authority, arguments = self.seed_and_arguments()
         sender = FakeSender(AssertionError("sender must not be reached"))
         with (
+            promoted_submission_gates(),
             mock.patch.object(
                 QualificationStore,
                 "require_submission_authority",
@@ -686,7 +932,9 @@ class QualificationSenderTests(ExecutionStoreTestCase):
                 submit_qualification_once(
                     self.qualification,
                     envelope,
-                    clock=ClockSequence(at(600), at(700), at(800)),
+                    clock=ClockSequence(
+                        at(600), at(700), at(750), at(800), at(850)
+                    ),
                     **arguments,
                 )
         self.assertEqual(raised.exception.detail_code, "authority_validation_failed")
@@ -705,6 +953,7 @@ class QualificationSenderTests(ExecutionStoreTestCase):
     def test_delay_after_authority_expires_without_network_and_records_unknown(self) -> None:
         _, _, command, envelope, _, authority, arguments = self.seed_and_arguments()
         with (
+            promoted_submission_gates(),
             mock.patch.object(
                 QualificationStore,
                 "require_submission_authority",
@@ -718,7 +967,7 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             recorded = submit_qualification_once(
                 self.qualification,
                 envelope,
-                clock=ClockSequence(at(600), at(5_000)),
+                clock=ClockSequence(at(600), at(700), at(800), at(5_000)),
                 **arguments,
             )
 
@@ -740,6 +989,7 @@ class QualificationSenderTests(ExecutionStoreTestCase):
     def test_clock_rollback_after_authority_skips_network_and_records_unknown(self) -> None:
         _, _, _, envelope, _, authority, arguments = self.seed_and_arguments()
         with (
+            promoted_submission_gates(),
             mock.patch.object(
                 QualificationStore,
                 "require_submission_authority",
@@ -753,7 +1003,7 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             recorded = submit_qualification_once(
                 self.qualification,
                 envelope,
-                clock=ClockSequence(at(600), at(599)),
+                clock=ClockSequence(at(600), at(700), at(800), at(599)),
                 **arguments,
             )
 
@@ -778,6 +1028,7 @@ class QualificationSenderTests(ExecutionStoreTestCase):
         opener = SlowOpener(None)
         started = time.monotonic()
         with (
+            promoted_submission_gates(),
             mock.patch.object(
                 QualificationStore,
                 "require_submission_authority",
@@ -802,7 +1053,9 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             recorded = submit_qualification_once(
                 self.qualification,
                 envelope,
-                clock=ClockSequence(at(600), at(700), at(800)),
+                clock=ClockSequence(
+                    at(600), at(700), at(750), at(800), at(850)
+                ),
                 **arguments,
             )
         elapsed = time.monotonic() - started
@@ -845,6 +1098,7 @@ class QualificationSenderTests(ExecutionStoreTestCase):
         opener.open.return_value = response
         context = mock.Mock()
         with (
+            promoted_submission_gates(),
             mock.patch.object(
                 QualificationStore,
                 "require_submission_authority",
@@ -864,7 +1118,9 @@ class QualificationSenderTests(ExecutionStoreTestCase):
             recorded = submit_qualification_once(
                 self.qualification,
                 envelope,
-                clock=ClockSequence(at(600), at(700), at(800)),
+                clock=ClockSequence(
+                    at(600), at(700), at(750), at(800), at(850)
+                ),
                 **arguments,
             )
 
@@ -904,6 +1160,7 @@ class QualificationSenderTests(ExecutionStoreTestCase):
         _, workflow, command, envelope, evidence, claim = self.prepared()
         rebound = replace(envelope, network=HyperliquidNetwork.MAINNET)
         with (
+            promoted_submission_gates(),
             mock.patch.object(
                 QualificationStore,
                 "require_submission_authority",
@@ -922,6 +1179,7 @@ class QualificationSenderTests(ExecutionStoreTestCase):
                     signed_evidence_hash=evidence.evidence_hash,
                     worker_id="qualification-worker",
                     fencing_token=claim.fencing_token,
+                    remote_vpn_guard=self.remote_vpn_guard,
                     clock=lambda: at(500),
                 )
         require_authority.assert_not_called()

@@ -1,14 +1,14 @@
 # TESTNET commissioning and first-write gap register
 
-Status: **offline engine, schema-v12 qualification core/result coordinator and
+Status: **TESTNET engine, schema-v12 qualification core/result coordinator and
 schema-v13-v16 normal-entry/chat-admission/delivery boundary,
 credential-free signer-envelope, pinned SDK 0.24.0 signer and independent
-recovery verifier, dormant one-shot sender, advisory WebSocket decoder and
+recovery verifier, route-bound one-shot sender, advisory WebSocket decoder and
 local response-drop/crash harness, machine plans and guest/VM renderers
 and role-bound full-lifecycle qualification orchestration implemented; the
 separate TESTNET chat proposal/store/wire/stdio-MCP foundation is implemented;
-submission promotion, live qualification, machine apply and network
-qualification incomplete; first harness order write remains blocked**.
+source submission gates promoted; live qualification, remaining machine apply
+and network qualification incomplete; first harness order write remains blocked**.
 
 This document records the remaining work from a reviewed source commit to the
 first responsible harness-originated Hyperliquid TESTNET order. It is not
@@ -40,9 +40,9 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   Its exact SDK 0.24.0 signer and independently reconstructed EIP-712 recovery
   verifier are golden-tested. Its exact TESTNET one-shot HTTP sender acquires
   authority only from the durable store and atomically records response or
-  unknown transitions, but submission authority remains compiled off, so the
-  full foreground `run` path cannot reach the sender or a credential. The
-  dormant worker already composes place, paired queries, cancel and terminal
+  unknown transitions. Submission authority now requires exact persisted
+  remote-VPN evidence and rechecks it after authority. The foreground worker
+  composes place, paired queries, cancel and terminal
   reconciliation under one absolute read deadline.
 - `trading-harness-qualification` is a separate non-MCP entry point. Control
   UID 452 may collect/verify an owner-only review artifact and perform fresh
@@ -50,8 +50,8 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   fallback. Its issued permit is durably registered and atomically consumed.
   Executor UID 451 may inspect, normalize and reconcile persisted
   qualification state. Public split
-  prepare/sign commands are absent. `run` remains dormant and fails before
-  reading config or state while submission is compiled off.
+  prepare/sign commands are absent. `run` is promoted but fails before
+  credentials whenever fixed installed remote-VPN evidence is unavailable.
 - Credential-free final-path APFS/ACL/install and storage-guard artifacts exist
   under `deploy/macos/testnet`; none has been applied.
 - A pinned Lima/VZ VM plan exists under `deploy/ubuntu-router/lima`; its apply
@@ -77,13 +77,13 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   internally loads a canonical, exact-ACL UID-452-owned config-hash-path
   artifact. Schema v16 persists and restart-validates the complete canonical
   ancestor/identity/ACL/byte evidence. A UID-452 artifact-first publisher,
-  ID-only ready index, broker callback/startup active repair and dormant cached
-  UID-451 consumer now compose offline. All gates remain false. No listener/
-  ACL/runtime install, authenticated account/market/grant provenance or
-  same-process active-session issuer exists, so this is not yet callable.
-  An inert issuance-provenance plan proposes UID/GID 453, fixed TESTNET-info-
-  only evidence, an attended grant-verification receipt and executor
-  preregistration receipt; none is implemented or authorized.
+  ID-only ready index, broker callback/startup active repair and cached
+  UID-451 consumer now compose. The UID-453 exact seven-read collector,
+  full evidence/quote projection, control grant/ticket preparation, UID-451
+  preregistration receipt and broker-session-owned issuer also exist. All
+  TESTNET chat source gates are enabled. No listener, identity, ACL, runtime or
+  collector install exists, so fixed preflight still makes this path
+  non-callable on the current machine.
 
 These facts do not make the machine transaction-ready.
 
@@ -124,16 +124,17 @@ their owning machines because their derived public keys are renderer inputs.
    on their owning machines, derive and
    attest the public keys, then render and qualify `local_nat_lab` using
    `docs/ubuntu_vm_router.md`. It does not change the public IP and does not
-   prevent host bypass. Do not call it VPN-qualified. A separately reviewed
-   macOS PF/Network Extension or non-bypassable physical router remains a later
-   egress-isolation gate; if absent during an attended functional TESTNET
-   canary, the qualification artifact must say network isolation is unqualified.
+   prevent host bypass. Do not call it VPN-qualified. The separate remote
+   `wg-egress` overlay and attended UID-451/UID-65 PF profile must be installed
+   and leak-qualified before a functional TESTNET canary. UID 65 is the shared
+   macOS resolver, so that PF profile restricts host-wide DNS while loaded.
    The application route gate now fails closed before entry preparation and
    again before submission authority with post-reader clock validation and the
    full two-second PRE_SEND headroom. Route-only preflight denial requeues only
    an active proven-unsent command; pre-preview maintenance normalizes claims
-   and releases queued risk at the earliest ticket/leg expiry. It has no installed collector,
-   durable expectation/preflight binding or live evidence. Do not inject test
+   and releases queued risk at the earliest ticket/leg expiry. The continuous
+   collector, helpers and durable submission-authority binding exist, but no
+   helper/artifact/PF/tunnel/process or live evidence is installed. Do not inject test
    evidence into a commissioned process.
 7. **Proxy/trust environment.** Prove the executor rejects ambient proxy and CA
    override variables and that its urllib openers install an empty proxy
@@ -167,15 +168,15 @@ code and attended-evidence gaps:
 
 | Required qualification behavior | Current gap |
 | --- | --- |
-| Far non-marketable GTC canary, exact query and cancel | Schema-v12 typed envelope, pinned SDK signing/independent recovery, one-shot HTTP sender, response/crash-unknown persistence, paired queries, full foreground loop and terminal-flat release exist offline. A proven-unsent expired cancel retains reservation and permits exactly one fresh attended, read-proven-open same-CLOID successor with a new action/envelope/global nonce. Submission promotion and an attended live exercise remain absent |
+| Far non-marketable GTC canary, exact query and cancel | Schema-v12 typed envelope, pinned SDK signing/independent recovery, route-bound one-shot HTTP sender, response/crash-unknown persistence, paired queries, full foreground loop and terminal-flat release exist. A proven-unsent expired cancel retains reservation and permits exactly one fresh attended, read-proven-open same-CLOID successor. Source gates are promoted; installed credentials/VPN evidence and an attended live exercise remain absent |
 | Retained pre-write account/metadata/order snapshot | Exact retained evidence/tamper checks, owner-only artifact export and distinct two-read `userRole` attestations immediately before key use and send are bound through the attempt and durable submission authority. They are implemented and adversarially tested offline but not live-qualified |
-| Ordinary attended reduce-only close, including an unexpected GTC-canary fill | Full-residual envelope/result/query, pinned SDK signer/recovery, attended CLI authorization/reconciliation and terminal-flat source-reservation release exist offline; submission promotion and live exercise remain absent; general bracket-parent close is intentionally unsupported |
+| Ordinary attended reduce-only close, including an unexpected GTC-canary fill | Full-residual envelope/result/query, pinned SDK signer/recovery, attended CLI authorization/reconciliation and terminal-flat source-reservation release are route-bound; live exercise remains absent; general bracket-parent close is intentionally unsupported |
 | WebSocket disconnect/fill/recovery exercise | An injected, credential-free exact TESTNET client/decoder accepts only `orderUpdates` and `userEvents` (`channel: user`) and forces a REST request begun after the causal boundary whose receipt/server watermark covers the event after connect, every advisory event and every disconnect because the official feed has no gap-free sequence; timestamp-less events require strict server-time advance; no live connector, durable event integration or attended exercise exists |
 | Forward request but drop the real response | A bounded loopback HTTP harness proves accept-then-drop, crash normalization, reservation retention and no resend; no live forwarding proxy or attended real-request exercise exists |
-| Router health as an admission capability | A strict two-sample TESTNET `local_nat_lab` model and default-unavailable gate check same-tick readiness, preparation and final pre-authority state with post-reader clocks and two-second headroom. Exact route-only denial may requeue only active proven-unsent state; independent claim normalization and earliest ticket/leg expiry prevent stranded reservation. No authenticated bounded collector, durable config/preflight/attempt binding, PF enforcement, remote exit or live qualification exists |
+| Router health as an admission capability | The remote two-sample contract, hash-pinned root/UID-451 helpers, continuous single-flight collector and durable normal/qualification authority binding are implemented. It binds full PF rules/order, scoped resolver state, destination routes, complete guest config, TLS/read-only `/info`, exact exit IP, forced-physical denial and counter deltas. No provider/VM/WireGuard/PF/helper/artifact/process is installed and no live leak/reboot qualification exists |
 | Executor free-space shutdown threshold | External fail-closed guard and launchd templates exist; root-owned config, real APFS `statvfs`, shutdown and restart behavior are not installed/qualified |
 | Signed qualification artifact | No artifact builder/signing workflow exists; the deliverable is still manual |
-| Codex chat proposal approval | Proposal v2, presentation, durable CAS, peer-checked bridge, one-field stdio MCP, schema-v13-v16 admission, UID-452 artifact-first publisher/ID-only ready index, startup repair and dormant cached UID-451 consumer exist offline. Missing: authenticated account/market collectors and preverified grant provenance, same-process active-session issuer/listener composition, all path/ACL/runtime installation, ready-marker archival/GC and live end-to-end qualification |
+| Codex chat proposal approval | Proposal v2, presentation, durable CAS, peer-checked bridge, one-field stdio MCP, schema-v13-v16 admission, UID-452 artifact-first publisher/ID-only ready index, startup repair and cached UID-451 consumer have enabled TESTNET source gates. The exact seven-read qualification artifact is recompiled by UID 452; an executor-owned receipt proves the exact registered grant/ticket/plan; the broker owns same-session issuance and expired-marker retirement. Missing: UID-453 and fixed path/ACL/runtime installation, collector/broker launch, retirement qualification and live end-to-end qualification |
 
 Close the remaining items as narrow TESTNET-only, durable workflows with
 observable failure tests. They may not become generic MCP execution tools,
@@ -185,7 +186,7 @@ offline remote lane recognizes only exact `execute trade <proposal-id>` for an
 immutable, short-lived, fully bound proposal and can durably record approval,
 and a separately delivered handoff can be atomically admitted offline only
 after the fixed UID-451 reader authenticates its config-bound UID-452 artifact.
-The offline publisher and consumer gates remain false and their paths/ACLs are
+The publisher and consumer source gates are enabled, but their paths/ACLs are
 not installed. Bare/free-form chat remains
 invalid. Until the live gates pass, the first harness order write remains blocked.
 
@@ -211,6 +212,17 @@ After the venue-credential-free gates pass:
    and repeat; only then provision the four explicit System Keychain items.
 7. Render the final public executor config with the lowercase main/API wallet
    addresses, account ID and all previously reviewed values; retain its hash.
+8. From the installed executor release and an empty environment, run
+   `trading-harness-executor check-executor-credentials --config
+   /etc/trading-desk/testnet-executor.toml` as UID 451 and
+   `trading-harness-executor check-control-credentials --config
+   /etc/trading-desk/testnet-executor.toml` as UID 452. Retain only their
+   redacted JSON. The executor check must prove that the signer derives the
+   configured API-wallet address and that recovery is available; the control
+   check must prove approval and grant availability. Both must report no
+   network access, no venue write and no credential value returned to the
+   operator. Any failure blocks `init` and service startup; do not fall back to
+   `/usr/bin/security`, environment variables or a plaintext key file.
 
 Do not put a secret in TOML, an environment variable, argv, a VM profile,
 cloud-init, logs, a shared folder or an agent-readable path.

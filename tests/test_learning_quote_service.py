@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from trading_harness.account_risk import AccountRiskLimits, compile_account_risk_snapshot
 from trading_harness.daily_loss import DailyLossBinding, DailyLossLedger
 from trading_harness.domain import Environment
 from trading_harness.execution_grant import TrustedInfrastructureGrant
@@ -241,6 +242,51 @@ class LearningQuoteServiceTests(unittest.TestCase):
             decision.ticket_payload["daily_loss_deferred_to_executor"]
         )
         self.assertEqual([(ACCOUNT, "testnet")], calls)
+
+    def test_quote_can_use_the_same_precompiled_account_projection_as_chat(self) -> None:
+        account = compile_account_risk_snapshot(
+            self.venue,
+            symbol="ETH",
+            limits=AccountRiskLimits(
+                account_id=self.config.account_id,
+                main_account_address=self.config.main_account_address,
+                environment=Environment.TESTNET,
+                daily_loss_limit=self.config.daily_loss_limit,
+                aggregate_open_risk_limit=self.config.max_reserved_loss,
+                max_notional=self.config.max_reserved_notional,
+                leverage=self.config.max_leverage,
+            ),
+            daily_loss_used=Decimal("0"),
+            open_risk_used=Decimal("0"),
+        )
+        calls: list[tuple[str, datetime]] = []
+        service = InfrastructureLearningQuoteService(
+            self.research,
+            config=self.config,
+            policy=self.policy,
+            grant=self.grant,
+            account_risk_reader=lambda symbol, at: calls.append((symbol, at)) or account,
+            clock=lambda: AT,
+        )
+        decision = service(TrustedQuoteRequest("eth", self.analysis["analysis_hash"]))
+        self.assertEqual("staged", decision.decision.value)
+        assert decision.ticket_payload is not None
+        self.assertEqual(
+            account.artifact_hash,
+            decision.ticket_payload["risk_ticket"]["account_snapshot_hash"],
+        )
+        self.assertEqual([("ETH", AT)], calls)
+
+        with self.assertRaisesRegex(Exception, "mutually exclusive"):
+            InfrastructureLearningQuoteService(
+                self.research,
+                config=self.config,
+                policy=self.policy,
+                grant=self.grant,
+                account_reader=lambda *_args: self.venue,
+                account_risk_reader=lambda *_args: account,
+                clock=lambda: AT,
+            )
 
 
 if __name__ == "__main__":

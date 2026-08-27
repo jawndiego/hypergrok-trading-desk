@@ -21,6 +21,7 @@ from .execution_grant import SignedInfrastructureGrant, TrustedInfrastructureGra
 from .executor_config import ExecutorConfig
 from .hyperliquid_account import HyperliquidAccountSnapshot, fetch_account_snapshot
 from .planning import (
+    AccountRiskSnapshot,
     PlanIdentity,
     RiskSizingPolicy,
     RiskTicketStatus,
@@ -34,6 +35,7 @@ from .strategy import CANDIDATE_V0
 
 Clock: TypeAlias = Callable[[], datetime]
 AccountReader: TypeAlias = Callable[[str, str], HyperliquidAccountSnapshot]
+AccountRiskReader: TypeAlias = Callable[[str, datetime], AccountRiskSnapshot]
 
 
 def _clock() -> datetime:
@@ -57,6 +59,7 @@ class InfrastructureLearningQuoteService:
         policy: RiskSizingPolicy,
         grant: SignedInfrastructureGrant | TrustedInfrastructureGrant,
         account_reader: AccountReader | None = None,
+        account_risk_reader: AccountRiskReader | None = None,
         clock: Clock = _clock,
     ) -> None:
         if not isinstance(research_store, ResearchStore):
@@ -71,6 +74,12 @@ class InfrastructureLearningQuoteService:
             raise TypeError("grant must be a signed or trusted infrastructure scope")
         if account_reader is not None and not callable(account_reader):
             raise TypeError("account_reader must be callable or None")
+        if account_risk_reader is not None and not callable(account_risk_reader):
+            raise TypeError("account_risk_reader must be callable or None")
+        if account_reader is not None and account_risk_reader is not None:
+            raise ValidationError(
+                "account_reader and account_risk_reader are mutually exclusive"
+            )
         if not callable(clock):
             raise TypeError("clock must be callable")
         if (
@@ -97,6 +106,7 @@ class InfrastructureLearningQuoteService:
                 clock=self.clock,
             )
         )
+        self.account_risk_reader = account_risk_reader
 
     def _now(self) -> datetime:
         try:
@@ -159,25 +169,43 @@ class InfrastructureLearningQuoteService:
             },
         )
         try:
-            venue = self.account_reader(self.config.main_account_address, "testnet")
-            if not isinstance(venue, HyperliquidAccountSnapshot):
-                raise TypeError("account reader returned wrong type")
-            limits = AccountRiskLimits(
-                account_id=self.config.account_id,
-                main_account_address=self.config.main_account_address,
-                environment=self.config.environment,
-                daily_loss_limit=self.config.daily_loss_limit,
-                aggregate_open_risk_limit=self.config.max_reserved_loss,
-                max_notional=self.config.max_reserved_notional,
-                leverage=self.config.max_leverage,
-            )
-            account = compile_account_risk_snapshot(
-                venue,
-                symbol=assessment.instrument.removesuffix("-PERP"),
-                limits=limits,
-                daily_loss_used=Decimal("0"),
-                open_risk_used=Decimal("0"),
-            )
+            symbol = assessment.instrument.removesuffix("-PERP")
+            if self.account_risk_reader is not None:
+                account = self.account_risk_reader(symbol, now)
+                if type(account) is not AccountRiskSnapshot:
+                    raise TypeError("account risk reader returned wrong type")
+                if (
+                    account.account_id != self.config.account_id
+                    or account.environment is not self.config.environment
+                    or account.leverage != self.config.max_leverage
+                    or not account.is_fresh(
+                        now,
+                        maximum_age_seconds=self.policy.account_max_age_seconds,
+                    )
+                ):
+                    raise StateConflict(
+                        "account risk reader returned out-of-scope evidence"
+                    )
+            else:
+                venue = self.account_reader(self.config.main_account_address, "testnet")
+                if not isinstance(venue, HyperliquidAccountSnapshot):
+                    raise TypeError("account reader returned wrong type")
+                limits = AccountRiskLimits(
+                    account_id=self.config.account_id,
+                    main_account_address=self.config.main_account_address,
+                    environment=self.config.environment,
+                    daily_loss_limit=self.config.daily_loss_limit,
+                    aggregate_open_risk_limit=self.config.max_reserved_loss,
+                    max_notional=self.config.max_reserved_notional,
+                    leverage=self.config.max_leverage,
+                )
+                account = compile_account_risk_snapshot(
+                    venue,
+                    symbol=symbol,
+                    limits=limits,
+                    daily_loss_used=Decimal("0"),
+                    open_risk_used=Decimal("0"),
+                )
             ticket = quote_infrastructure_learning_ticket(
                 ticket_id=f"learn-{record.analysis_hash[:24]}",
                 assessment=assessment,

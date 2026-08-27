@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import redirect_stderr
+from contextlib import ExitStack, redirect_stderr
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import StringIO
@@ -18,6 +18,8 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import MagicMock, patch
+from tests import test_testnet_control as control_fixtures
+from tests.ownership_fixtures import simulated_ownership
 
 from trading_harness.errors import StorageError, ValidationError
 from trading_harness.testnet_chat_approval_store import TestnetChatApprovalStore
@@ -56,8 +58,8 @@ def broker_session():
 
 
 class BrokerServiceGateTests(unittest.TestCase):
-    def test_gate_is_literal_false_before_identity_path_or_store_io(self) -> None:
-        self.assertIs(False, TESTNET_CHAT_BROKER_SERVICE_ENABLED)
+    def test_gate_is_literal_true_and_disabled_build_patch_precedes_io(self) -> None:
+        self.assertIs(True, TESTNET_CHAT_BROKER_SERVICE_ENABLED)
         source = (ROOT / "src/trading_harness/testnet_chat_broker_service.py").read_text()
         tree = ast.parse(source)
         assignments = {
@@ -69,8 +71,9 @@ class BrokerServiceGateTests(unittest.TestCase):
             and isinstance(node.value, ast.Constant)
             and target.id == "TESTNET_CHAT_BROKER_SERVICE_ENABLED"
         }
-        self.assertEqual({"TESTNET_CHAT_BROKER_SERVICE_ENABLED": False}, assignments)
+        self.assertEqual({"TESTNET_CHAT_BROKER_SERVICE_ENABLED": True}, assignments)
         with (
+            patch.object(service_module, "TESTNET_CHAT_BROKER_SERVICE_ENABLED", False),
             patch.object(
                 service_module,
                 "_run_enabled_service",
@@ -81,6 +84,30 @@ class BrokerServiceGateTests(unittest.TestCase):
             self.assertEqual(78, main([]))
         self.assertFalse(run.called)
         self.assertIn("compiled off", stderr.getvalue())
+
+    def test_enabled_missing_preflight_fails_before_store_or_listener(self) -> None:
+        with (
+            patch.object(
+                service_module,
+                "verify_fixed_service_preflight",
+                side_effect=ValidationError("missing fixed paths"),
+            ),
+            patch.object(
+                service_module,
+                "TestnetChatApprovalStore",
+                side_effect=AssertionError("store opened before preflight"),
+            ) as store,
+            patch.object(
+                service_module,
+                "_create_fixed_listener",
+                side_effect=AssertionError("listener created before preflight"),
+            ) as listener,
+        ):
+            with redirect_stderr(StringIO()) as stderr:
+                self.assertEqual(2, main([]))
+        store.assert_not_called()
+        listener.assert_not_called()
+        self.assertIn("ValidationError", stderr.getvalue())
 
     def test_cli_accepts_no_path_environment_account_or_action_argument(self) -> None:
         secret = "PRIVATE-PATH-OR-ACCOUNT"
@@ -329,13 +356,69 @@ class FakeListener:
 
 
 class SequentialServiceTests(unittest.TestCase):
+    def test_live_issuer_uses_existing_staging_and_listener_precedes_proposal(self) -> None:
+        builder_source = inspect.getsource(service_module._build_live_proposal_issuer)
+        self.assertIn("must_exist=True", builder_source)
+        run_source = inspect.getsource(service_module._run_enabled_service)
+        activation = run_source.index("_activate_listener(")
+        first_issue = run_source.index("live_issuer.issue_available(")
+        self.assertLess(activation, first_issue)
+
+    def test_live_issuer_rejects_wrong_mode_staging_before_reader_composition(self) -> None:
+        fixture = control_fixtures.AttendedTestnetControlPlaneTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        downstream = MagicMock(return_value=object())
+        common = (
+            patch.object(service_module, "RiskSizingPolicy", return_value=fixture.policy),
+            patch.object(
+                service_module,
+                "TestnetChatProposalPresentationPublisher",
+                return_value=object(),
+            ),
+            patch.object(
+                service_module,
+                "TestnetChatQualificationEvidenceReader",
+                return_value=object(),
+            ),
+            patch.object(
+                service_module,
+                "TestnetChatExecutorRegistrationReader",
+                return_value=object(),
+            ),
+            patch.object(service_module, "TestnetChatLiveProposalIssuer", downstream),
+            patch.object(service_module, "TESTNET_CHAT_LIVE_ISSUANCE_ENABLED", True),
+        )
+        fixture.config.paths.staging_database.chmod(0o666)
+        try:
+            with (
+                simulated_ownership(default_uid=451, euid=452),
+                self.assertRaisesRegex(ValidationError, "artifact identity"),
+            ):
+                with ExitStack() as stack:
+                    for context in common:
+                        stack.enter_context(context)
+                    service_module._build_live_proposal_issuer(
+                        store=MagicMock(),
+                        config=fixture.config,
+                    )
+        finally:
+            fixture.config.paths.staging_database.chmod(0o600)
+        downstream.assert_not_called()
+
     def test_enabled_composition_repairs_publications_before_listener_creation(self) -> None:
         callback = MagicMock()
+        publisher = MagicMock()
         callback.reconcile_approved_startup.side_effect = RuntimeError(
             "injected startup repair failure"
         )
         with (
             patch.object(service_module, "verify_fixed_service_preflight"),
+            patch.object(
+                service_module,
+                "TESTNET_CHAT_LIVE_ISSUANCE_ENABLED",
+                True,
+            ),
             patch.object(service_module, "TestnetChatApprovalStore", return_value=object()),
             patch.object(service_module, "load_executor_config", return_value=object()),
             patch.object(
@@ -343,7 +426,11 @@ class SequentialServiceTests(unittest.TestCase):
                 "testnet_chat_execution_scope_from_config",
                 return_value=object(),
             ),
-            patch.object(service_module, "TestnetChatHandoffPublisher", return_value=object()),
+            patch.object(
+                service_module,
+                "TestnetChatHandoffPublisher",
+                return_value=publisher,
+            ),
             patch.object(
                 service_module,
                 "TestnetChatApprovalPublisherCallback",
@@ -353,6 +440,7 @@ class SequentialServiceTests(unittest.TestCase):
             self.assertRaisesRegex(RuntimeError, "startup repair failure"),
         ):
             service_module._run_enabled_service()
+        publisher.retire_expired_ready_markers.assert_called_once()
         callback.reconcile_approved_startup.assert_called_once_with()
         listener.assert_not_called()
 
@@ -395,6 +483,21 @@ class SequentialServiceTests(unittest.TestCase):
             self.assertEqual(1, summary.rejected)
             self.assertEqual(1, summary.unknown)
             self.assertEqual([True, True, True], calls)
+
+    def test_live_proposal_maintenance_runs_inside_active_broker_loop(self) -> None:
+        stop = threading.Event()
+        listener = FakeListener(stop, 0)
+        maintenance: list[bool] = []
+        summary = serve_testnet_chat_broker_sequentially(
+            listener,
+            session=broker_session(),
+            commit_approval=lambda *_args, **_kwargs: None,
+            stop_event=stop,
+            clock=lambda: NOW,
+            maintain_proposals=lambda: maintenance.append(True),
+        )
+        self.assertEqual([True], maintenance)
+        self.assertEqual(0, summary.accepted)
 
     def test_ambiguous_store_boundary_halts_generation_without_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -459,7 +562,10 @@ class DeploymentPlanTests(unittest.TestCase):
         plan = json.loads(path.read_text(encoding="utf-8"))
         self.assertIs(True, plan["plan_only"])
         self.assertIs(False, plan["apply_enabled"])
-        self.assertIs(False, plan["listener_compiled_enabled"])
+        self.assertIs(True, plan["listener_compiled_enabled"])
+        self.assertIs(True, plan["service"]["ready_consumer_compiled_enabled"])
+        self.assertIs(True, plan["service"]["qualification_collector_compiled_enabled"])
+        self.assertIs(True, plan["service"]["executor_registration_compiled_enabled"])
         self.assertIs(False, plan["mainnet_authorized"])
         self.assertIs(False, plan["credentials_present"])
         self.assertIs(False, plan["venue_access_present"])

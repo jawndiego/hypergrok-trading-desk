@@ -1,11 +1,10 @@
 """One-shot TESTNET qualification transport and immutable result evidence.
 
-The only public sender acquires its submission authority from the durable
-qualification store immediately before the network call.  That store boundary
-is deliberately compiled off, so this module adds no reachable production
-write path.  Once a future reviewed build promotes the boundary, the sender
-posts the exact frozen envelope once, records every uncertain outcome as
-``unknown``, and immediately enters the existing reconciliation transition.
+The only public sender requires fresh fixed-cache remote-VPN evidence, then
+acquires its route-bound submission authority from the durable qualification
+store immediately before the network call. It posts the exact frozen envelope
+once, records every uncertain outcome as ``unknown``, and immediately enters
+the existing reconciliation transition.
 
 There is no direct-authority overload, retry loop, redirect path, ambient proxy
 discovery, credential provider, signer, CLI, or MCP surface in this module.
@@ -26,13 +25,24 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 from .canonical import canonical_json, domain_hash
-from .errors import HarnessError, RecordNotFound, StateConflict, ValidationError
+from .errors import (
+    AdmissionDenied,
+    HarnessError,
+    RecordNotFound,
+    StateConflict,
+    ValidationError,
+)
 from .hyperliquid_wire import HyperliquidNetwork
 from .qualification_signer import SignedQualificationEnvelope
 from .testnet_qualification import (
     QualificationAttemptPhase,
     QualificationTransportOutcome,
     QualificationWorkflow,
+)
+from .testnet_remote_vpn_health import (
+    REMOTE_VPN_MODE,
+    TestnetRemoteVpnHealthEvidence,
+    TestnetRemoteVpnPromotionGuard,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -68,6 +78,7 @@ _UNKNOWN_DETAILS = frozenset(
         "invalid_response",
         "expired_after_authority",
         "role_attestation_expired_after_authority",
+        "remote_vpn_lost_after_authority",
         "clock_invalid_after_authority",
         "point_of_no_return_crash",
     }
@@ -666,17 +677,18 @@ def submit_qualification_once(
     signed_evidence_hash: str,
     worker_id: str,
     fencing_token: int,
+    remote_vpn_guard: TestnetRemoteVpnPromotionGuard | None = None,
     clock: Clock = lambda: datetime.now(timezone.utc),
 ) -> RecordedQualificationSubmission:
     """Acquire durable authority, POST once, and atomically record its result.
 
-    The function is intentionally unreachable in this build because
-    :meth:`QualificationStore.require_submission_authority` always fails under
-    the compiled ``QUALIFICATION_SUBMISSION_ENABLED = False`` gate.  There is
-    no overload that accepts an authority from a caller.
+    There is no overload that accepts an authority from a caller or omits the
+    exact installed remote-VPN guard.
     """
 
     from .domain import Environment
+    from . import qualification_store as qualification_store_module
+    from . import testnet_remote_vpn_health as remote_vpn_health_module
     from .qualification_store import (
         QualificationStore,
         QualificationSubmissionAuthority,
@@ -690,6 +702,21 @@ def submit_qualification_once(
         raise TypeError("current_workflow must be exact QualificationWorkflow")
     if not callable(clock):
         raise TypeError("clock must be callable")
+    if not qualification_store_module.QUALIFICATION_SUBMISSION_ENABLED:
+        raise StateConflict("qualification submission is disabled")
+    if not remote_vpn_health_module.REMOTE_VPN_SUBMISSION_GATE_ENABLED:
+        raise StateConflict("remote VPN submission gate is compiled off")
+    if type(remote_vpn_guard) is not TestnetRemoteVpnPromotionGuard:
+        raise QualificationSubmissionError(
+            "exact installed remote VPN guard is required"
+        )
+    if (
+        store.executor_config_hash is None
+        or remote_vpn_guard.executor_config_hash != store.executor_config_hash
+    ):
+        raise QualificationSubmissionError(
+            "remote VPN guard differs from executor configuration"
+        )
     checked_attempt = _identifier(attempt_id, "attempt_id")
     checked_signed = _hash(signed_evidence_hash, "signed_evidence_hash")
     checked_worker = _identifier(worker_id, "worker_id")
@@ -711,6 +738,22 @@ def submit_qualification_once(
     ):
         raise QualificationSubmissionError(
             "qualification submission scope is not exact TESTNET"
+        )
+    try:
+        persisted_scope = store.execution_store.get_chat_scope()
+    except Exception as error:
+        raise QualificationSubmissionError(
+            "qualification store lacks its persisted executor config"
+        ) from error
+    if (
+        persisted_scope.config_hash != store.executor_config_hash
+        or persisted_scope.config_hash != remote_vpn_guard.executor_config_hash
+        or persisted_scope.account_id != signed.account_id
+        or persisted_scope.main_account_address != signed.main_account_address
+        or persisted_scope.api_wallet_address != signed.api_wallet_address
+    ):
+        raise QualificationSubmissionError(
+            "qualification remote VPN guard differs from persisted executor config"
         )
     try:
         local_evidence = signed.execution_store_evidence()
@@ -735,23 +778,57 @@ def submit_qualification_once(
         raise StateConflict("qualification workflow is stale before submission")
     _require_absolute_deadline_support()
 
-    authority_requested_at = _clock_datetime(clock)
+    route_read_started_at = _clock_datetime(clock)
+    route_read_started_at_ms = _datetime_ms(
+        route_read_started_at,
+        "route_read_started_at",
+    )
+    if (
+        route_read_started_at_ms < signed.signed_at_ms
+        or route_read_started_at_ms >= signed.expires_after_ms
+        or route_read_started_at_ms >= signed.lease_expires_at_ms
+    ):
+        raise QualificationSubmissionError(
+            "qualification envelope expired before local submission"
+        )
+    try:
+        route_evidence = remote_vpn_guard.require_qualified(
+            at=route_read_started_at
+        )
+        authority_requested_at = _clock_datetime(clock)
+        remote_vpn_guard.verify_after_read(
+            route_evidence,
+            started_at=route_read_started_at,
+            completed_at=authority_requested_at,
+            minimum_remaining_ms=2_000,
+        )
+    except Exception as error:
+        raise QualificationSubmissionError(
+            "fresh remote VPN evidence is unavailable before submission"
+        ) from error
+    if type(route_evidence) is not TestnetRemoteVpnHealthEvidence:
+        raise QualificationSubmissionError("remote VPN evidence type differs")
     authority_requested_at_ms = _datetime_ms(
         authority_requested_at,
         "authority_requested_at",
     )
     if (
-        authority_requested_at_ms < signed.signed_at_ms
+        authority_requested_at_ms < route_read_started_at_ms
         or authority_requested_at_ms >= signed.expires_after_ms
         or authority_requested_at_ms >= signed.lease_expires_at_ms
     ):
         raise QualificationSubmissionError(
-            "qualification envelope expired before local submission"
+            "qualification envelope expired during remote VPN read"
         )
+    route_expires_at_ms = _datetime_ms(
+        route_evidence.expires_at,
+        "route_evidence.expires_at",
+    )
+    if remote_vpn_guard.expectation is None:
+        raise QualificationSubmissionError("remote VPN expectation is unavailable")
 
-    # This is the sole point-of-no-return transition.  It is compiled off in
-    # production today.  A later promoted implementation must atomically move
-    # the prepared attempt to sending before returning this authority.
+    # This is the sole point-of-no-return transition. It atomically binds the
+    # exact fresh remote-VPN evidence and moves the prepared attempt to sending.
     if cancel_reauthorization_store is None:
         authority = store.require_submission_authority(
             signed.command_id,
@@ -759,6 +836,10 @@ def submit_qualification_once(
             checked_signed,
             worker_id=checked_worker,
             fencing_token=fencing_token,
+            route_mode=REMOTE_VPN_MODE,
+            route_expectation_hash=remote_vpn_guard.expectation.expectation_hash,
+            route_evidence_hash=route_evidence.evidence_hash,
+            route_expires_at_ms=route_expires_at_ms,
             at=authority_requested_at,
         )
     else:
@@ -768,6 +849,10 @@ def submit_qualification_once(
             signed_evidence_hash=checked_signed,
             worker_id=checked_worker,
             fencing_token=fencing_token,
+            route_mode=REMOTE_VPN_MODE,
+            route_expectation_hash=remote_vpn_guard.expectation.expectation_hash,
+            route_evidence_hash=route_evidence.evidence_hash,
+            route_expires_at_ms=route_expires_at_ms,
             at=authority_requested_at,
         )
 
@@ -795,6 +880,12 @@ def submit_qualification_once(
             or authority_lease_ms != signed.lease_expires_at_ms
             or authority.pre_send_expires_at_ms
             <= authority_requested_at_ms
+            or authority.route_mode != REMOTE_VPN_MODE
+            or authority.route_expectation_hash
+            != remote_vpn_guard.expectation.expectation_hash
+            or authority.route_evidence_hash != route_evidence.evidence_hash
+            or authority.route_expires_at_ms != route_expires_at_ms
+            or authority.route_expires_at_ms <= authority_requested_at_ms
             or authority_requested_at_ms < authority_issued_ms
             or authority_requested_at_ms >= authority_lease_ms
         ):
@@ -859,18 +950,52 @@ def submit_qualification_once(
     # for authority must never bless a network send delayed past expiry.
     skip_detail: str | None = None
     try:
-        send_at = _clock_datetime(clock)
-        send_at_ms = _datetime_ms(send_at, "send_at")
+        route_recheck_started_at = _clock_datetime(clock)
     except Exception:
         send_at = authority_requested_at
         send_at_ms = authority_requested_at_ms
         skip_detail = "clock_invalid_after_authority"
+    if skip_detail is None:
+        try:
+            current_route_evidence = remote_vpn_guard.require_qualified(
+                at=route_recheck_started_at
+            )
+            send_at = _clock_datetime(clock)
+            remote_vpn_guard.verify_after_read(
+                current_route_evidence,
+                started_at=route_recheck_started_at,
+                completed_at=send_at,
+                minimum_remaining_ms=0,
+            )
+            send_at_ms = _datetime_ms(send_at, "send_at")
+            if (
+                current_route_evidence.evidence_hash
+                != route_evidence.evidence_hash
+                or current_route_evidence.expectation_hash
+                != route_evidence.expectation_hash
+                or current_route_evidence.expires_at != route_evidence.expires_at
+            ):
+                skip_detail = "remote_vpn_lost_after_authority"
+        except AdmissionDenied as error:
+            send_at = authority_requested_at
+            send_at_ms = authority_requested_at_ms
+            skip_detail = (
+                "clock_invalid_after_authority"
+                if error.code == "REMOTE_VPN_HEALTH_CLOCK_ROLLBACK"
+                else "remote_vpn_lost_after_authority"
+            )
+        except Exception:
+            send_at = authority_requested_at
+            send_at_ms = authority_requested_at_ms
+            skip_detail = "remote_vpn_lost_after_authority"
     if skip_detail is None and (
         send_at_ms < authority_requested_at_ms or send_at_ms < authority_issued_ms
     ):
         skip_detail = "clock_invalid_after_authority"
         send_at = authority_requested_at
         send_at_ms = authority_requested_at_ms
+    elif skip_detail is None and send_at_ms >= authority.route_expires_at_ms:
+        skip_detail = "remote_vpn_lost_after_authority"
     elif skip_detail is None and (
         send_at_ms >= signed.expires_after_ms
         or send_at_ms >= authority_lease_ms

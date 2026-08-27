@@ -39,6 +39,7 @@ from trading_harness import qualification_store as store_module
 from trading_harness.qualification_transport import (
     freeze_qualification_transport_result,
 )
+from trading_harness.testnet_remote_vpn_health import REMOTE_VPN_MODE
 from trading_harness.testnet_qualification import (
     QualificationAttemptPhase,
     QualificationIntentKind,
@@ -222,10 +223,28 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
         *,
         attempt_id: str,
         issued_ms: int,
+        route_expectation_hash: str | None = None,
+        route_evidence_hash: str | None = None,
+        route_expires_at_ms: int | None = None,
     ) -> QualificationSubmissionAuthority:
         """Test-only SQL fixture; no runtime function can create this row."""
 
         issued_at = at(issued_ms)
+        selected_route_expectation_hash = (
+            digest("remote-route-expectation")
+            if route_expectation_hash is None
+            else route_expectation_hash
+        )
+        selected_route_evidence_hash = (
+            digest("remote-route-evidence")
+            if route_evidence_hash is None
+            else route_evidence_hash
+        )
+        selected_route_expires_at_ms = (
+            int(at(issued_ms + 4_000).timestamp() * 1_000)
+            if route_expires_at_ms is None
+            else route_expires_at_ms
+        )
         probe = self.store._connect()
         try:
             signing_row = probe.execute(
@@ -339,7 +358,7 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             self.assertEqual(step.state, "prepared")
             self.assertIsNotNone(outbox.lease_expires_at)
             payload = {
-                "schema_version": "testnet_qualification_submission_authority.v1",
+                "schema_version": "testnet_qualification_submission_authority.v2",
                 "command_id": command_id,
                 "phase": phase.value,
                 "attempt_id": attempt_id,
@@ -353,10 +372,14 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
                 "lease_expires_at": store_module._time(outbox.lease_expires_at),
                 "pre_send_attestation_hash": pre_send.attestation_hash,
                 "pre_send_expires_at_ms": pre_send.expires_at_ms,
+                "route_mode": REMOTE_VPN_MODE,
+                "route_expectation_hash": selected_route_expectation_hash,
+                "route_evidence_hash": selected_route_evidence_hash,
+                "route_expires_at_ms": selected_route_expires_at_ms,
                 "environment": "testnet",
             }
             authority_hash = domain_hash(
-                "trading-harness/qualification-submission-authority/v1",
+                "trading-harness/qualification-submission-authority/v2",
                 payload,
             )
             payload_json, content_hash = store_module._payload(payload)
@@ -438,6 +461,10 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             lease_expires_at=outbox.lease_expires_at,  # type: ignore[arg-type]
             pre_send_attestation_hash=pre_send.attestation_hash,
             pre_send_expires_at_ms=pre_send.expires_at_ms,
+            route_mode=REMOTE_VPN_MODE,
+            route_expectation_hash=selected_route_expectation_hash,
+            route_evidence_hash=selected_route_evidence_hash,
+            route_expires_at_ms=selected_route_expires_at_ms,
             authority_hash=authority_hash,
         )
 
@@ -969,6 +996,10 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             lease_expires_at=at(15_100),
             pre_send_attestation_hash="e" * 64,
             pre_send_expires_at_ms=int(at(2_500).timestamp() * 1_000),
+            route_mode=REMOTE_VPN_MODE,
+            route_expectation_hash=digest("forged-route-expectation"),
+            route_evidence_hash=digest("forged-route-evidence"),
+            route_expires_at_ms=int(at(2_500).timestamp() * 1_000),
             authority_hash="f" * 64,
         )
         result = freeze_qualification_transport_result(
@@ -1709,13 +1740,27 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             lane="cancel_reauthorization",
             at=at(17_750),
         )
-        with self.assertRaisesRegex(StateConflict, "compiled off"):
+        reauthorization_route = {
+            "route_mode": REMOTE_VPN_MODE,
+            "route_expectation_hash": digest("reauth-route-expectation"),
+            "route_evidence_hash": digest("reauth-route-evidence"),
+            "route_expires_at_ms": int(at(20_000).timestamp() * 1_000),
+        }
+        with (
+            mock.patch.object(
+                store_module,
+                "QUALIFICATION_SUBMISSION_ENABLED",
+                False,
+            ),
+            self.assertRaisesRegex(StateConflict, "compiled off"),
+        ):
             reauthorizations.require_submission_authority(
                 reauth_intent.reauthorization_id,
                 attempt_id="cancel-reauth-attempt-1",
                 signed_evidence_hash=successor_evidence.evidence_hash,
                 worker_id="cancel-reauth-worker",
                 fencing_token=claim.fencing_token,
+                **reauthorization_route,
                 at=at(17_755),
             )
         self.assertEqual(
@@ -1733,6 +1778,7 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
                 signed_evidence_hash=successor_evidence.evidence_hash,
                 worker_id="cancel-reauth-worker",
                 fencing_token=claim.fencing_token,
+                **reauthorization_route,
                 at=at(17_760),
             )
         self.assertEqual(submission.attempt_id, "cancel-reauth-attempt-1")

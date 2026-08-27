@@ -44,7 +44,13 @@ from tests.test_execution_store import (
     make_infrastructure_grant,
     make_ticket,
 )
-from tests.test_hyperliquid_signer import FakeNonceAllocator, FakeSigner, FakeWallet
+from tests.test_hyperliquid_signer import (
+    FakeNonceAllocator,
+    FakeSigner,
+    FakeWallet,
+    make_signed,
+)
+from tests.test_hyperliquid_transport import protected_route_fixture
 from tests.test_hyperliquid_wire import metadata
 
 
@@ -65,12 +71,17 @@ class StepClock:
 class DispatcherTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
+        scope, self.remote_vpn_guard, _ = protected_route_fixture(
+            make_signed(),
+            at=NOW + timedelta(seconds=1),
+        )
         self.store = ExecutionStore(
             Path(self.temporary.name) / "execution.sqlite3",
             environment=Environment.TESTNET,
             account_id="testnet-account",
             max_reserved_loss="100",
             max_reserved_notional="2000",
+            chat_scope=scope,
         )
         self.ticket = make_ticket()
         grant = make_infrastructure_grant(self.ticket)
@@ -247,6 +258,7 @@ class DispatcherTests(unittest.TestCase):
             role_attestor=self.attest,
             clock=self.clock,
             lease_seconds=15,
+            remote_vpn_guard=self.remote_vpn_guard,
         )
 
     def test_full_pipeline_persists_before_one_send_then_requires_reconciliation(self) -> None:
@@ -317,12 +329,12 @@ class DispatcherTests(unittest.TestCase):
         self.assertEqual([], self.signing_events)
         self.assertIsNone(dispatcher.dispatch_next("dispatcher-2"))
 
-    def test_transient_route_denial_defers_without_signing_and_can_retry(self) -> None:
+    def test_transient_remote_vpn_denial_defers_without_signing_and_can_retry(self) -> None:
         sender_calls: list[bytes] = []
 
         def route_unavailable(*_arguments):
             raise AdmissionDenied(
-                "ROUTE_HEALTH_UNAVAILABLE",
+                "REMOTE_VPN_HEALTH_UNAVAILABLE",
                 "transient route fixture",
             )
 
@@ -350,7 +362,7 @@ class DispatcherTests(unittest.TestCase):
         assert deferred is not None
         self.assertEqual("preflight_deferred", deferred.outcome)
         self.assertEqual("queued", deferred.command_state)
-        self.assertEqual("ROUTE_HEALTH_UNAVAILABLE", deferred.detail_code)
+        self.assertEqual("REMOTE_VPN_HEALTH_UNAVAILABLE", deferred.detail_code)
         self.assertFalse(deferred.venue_write_attempted)
         sender.assert_not_called()
         self.assertEqual([], self.signing_events)

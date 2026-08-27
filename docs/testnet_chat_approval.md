@@ -6,9 +6,10 @@ protocol/client, a separate one-tool stdio MCP adapter, deterministic execution
 handoff, atomic schema-v13 admission/role fences, schema-v14 signer/outcome
 hardening, schema-v15 config-bound verified delivery and schema-v16 canonical
 delivery evidence, UID-452 artifact-first publisher/ID-only ready index,
-approval callback/startup repair and dormant UID-451 consumer implemented
-offline; all enable gates remain false and listener/presentation/handoff/ready
-ACL configuration and runtimes are not installed; mainnet prohibited**.
+approval callback/startup repair and UID-451 consumer implemented with all
+TESTNET source gates enabled; listener/presentation/handoff/ready ACL
+configuration and runtimes are not installed, so invocation fails closed;
+mainnet prohibited**.
 
 This design adds a convenient attended TESTNET approval gesture without making
 chat, Codex, MCP or a model part of the signing or submission boundary. The
@@ -24,7 +25,7 @@ credential, signer, venue transport or execution-store module.
 executor-config scope; `ExecutionStore` accepts only a handoff ID and invokes
 that fixed reader itself before capital-side admission.
 `testnet_chat_handoff_publisher.py` writes the artifact and ready marker;
-`executor_chat_ready_consumer.py` owns the dormant executor-side scan.
+`executor_chat_ready_consumer.py` owns the enabled executor-side scan.
 
 ## Security meaning
 
@@ -94,31 +95,16 @@ must not exceed `max_loss`. Binary floating point is rejected.
 
 The hashes provide deterministic binding and tamper evidence; they are not a
 signature. `TrustedTestnetChatProposalIssuer.issue` accepts only a staging
-document ID, the exact active broker session and the issuance time. Its exact
-evidence reader must point to the configured staging database, reload and
-verify that database's complete staging chain, and resolve a pre-registered
-account snapshot plus a typed, canonical TESTNET market artifact. The latter
-requires a non-crossed book, complete 25-bps depth, mid-consistency evidence,
-and enough crossable depth for the protected entry. The issuer derives every
-proposal economic value, address, hash and expiry; none is a free per-call
-parameter. Those fixed account/market bindings are typed and self-consistent,
-but their in-memory construction does not itself authenticate collector
-provenance, and the issuance path does not yet require a separately preverified
-grant receipt from an authenticated grant source. Production presentation
-requires fixed reviewed collector/store adapters and grant-receipt validation.
-The inert `deploy/macos/testnet/TESTNET_CHAT_ISSUANCE_PROVENANCE_PLAN.md`
-specifies a proposed UID-453 info-only collector plus grant and executor
-preregistration receipts; it creates or enables none of them.
-Fresh executor preflight prevents capital bypass if issuance evidence was
-forged, but not a misleading proposal display. The issuer creates the
-proposal and initial `PENDING` state in storage that UID 501 cannot modify.
-The issuer accepts the exact in-memory broker session and the presentation
-artifact binds its broker-generation ID. It does not accept a decoded receipt
-or free hash as proof of the active generation. Production must compose
-issuance in the process that owns the active listener and disable issuance
-before closing it; that same-process orchestration is not wired yet.
-It must not accept a caller's self-asserted account-binding hash: the module
-derives that hash from the typed account identity itself.
+document ID, exact active broker session and issuance time. The live adapter
+reloads the UID-453-owned exact seven-read qualification artifact, recompiles
+the staged account hash, verifies fresh canonical market depth, and requires a
+UID-451-owned receipt proving the grant/ticket/plan were registered in the
+exact config-bound execution store. It derives every proposal economic value,
+address, hash and expiry; none is a free per-call parameter. The broker creates
+this issuer only inside the listener-owning process, after `listen`, and stops
+using it before teardown. An active proposal from an older dead generation is
+left immutable and skipped until normal expiry rather than rebound. All
+source gates are enabled; identity/path/service installation remains absent.
 
 The canonical durable document has exact fields and canonical decimal and UTC
 encodings. Its decoder snapshots a supplied mapping once, rejects duplicate or
@@ -195,8 +181,8 @@ remaining condition below before it can be promoted.
 The durable store already rejects noncanonical/symlinked parents, requires its
 current UID to own an exact mode-0700 parent, and requires regular single-link
 mode-0600 database/WAL/SHM/journal files. Named-ACL inspection and the fixed-path
-listener service source exist, but the service has a literal disabled gate and
-no installed runtime, path layout or named ACLs. These checks therefore do not
+listener service source exist with its TESTNET gate enabled, but there is no
+installed runtime, path layout or named ACLs. These checks therefore do not
 qualify a live broker.
 
 The presentation namespace is distinct: UID 452 owns its canonical mode-0700
@@ -346,13 +332,13 @@ The broker callback performs durable approval first and reports any later
 publication uncertainty as `UNKNOWN`; startup repair scans one bounded stable
 snapshot of active approvals before listener activation.
 
-The dormant UID-451 consumer is cached across executor ticks and runs only in
+The UID-451 consumer is cached across executor ticks and runs only in
 nonurgent `IDLE`/`GATE_READY` lanes. It verifies the fixed ready-directory ACL,
 stable marker identities and hard 1,024-entry cap, treats the empty marker as
 notification rather than authority, and asks `ExecutionStore` to authenticate
 the v16 artifact. Existing durable authorization reconciles replay. Both the
-publisher/service and consumer compile-time gates remain false, and no path or
-ACL is installed. Retained markers require reviewed archival/GC before the cap.
+publisher/service and consumer TESTNET gates are enabled, but no path or ACL is
+installed. Broker maintenance retires verified expired markers before the cap.
 
 Schema v13 gives proposal ID/hash, receipt hash, approval-state hash, handoff
 ID/hash, ticket, plan and command independent unique constraints. An exact
@@ -393,10 +379,63 @@ nonempty legacy signed/attempt/submission/outcome state where real role and
 timing evidence cannot be backfilled.
 
 The canonical handoff, artifact-first publisher, ID-only ready index, fixed
-verified reader and cached consumer now compose in offline source. Because the
-broker and consumer gates are false and their paths/ACLs/runtimes are not
-installed, recording approval still cannot queue an order on the current
-machine.
+verified reader and cached consumer now compose in offline source. The
+publisher also has bounded retirement for expired notification markers while
+retaining the canonical handoff; active or unverifiable markers are never
+removed. The broker calls it before startup repair and in each maintenance
+tick. Although the source gates are enabled, their paths/ACLs/runtimes are not
+installed, so recording approval still cannot queue an
+order on the current machine.
+
+## Live issuance composition
+
+`testnet_chat_live_issuance.py` removes the former free in-memory provenance
+gap without defining another venue client. It reuses the exact seven-read
+TESTNET qualification artifact, verifies its fixed `/info` request sequence,
+account/API-wallet role mapping, source hashes and five-second observation
+window, then independently recompiles the account-risk snapshot from the
+configured limits. Its create-only UID-453 store is keyed by that compiled
+account hash; UID 452 receives read-only ACLs. The derived market binding is
+anchored to the venue book observation rather than the later local receipt.
+Collector-owned maintenance retires only hash-verified quote projections after
+their five-second observation lifetime; full source artifacts are retained.
+
+Before display, executor UID 451 registers the exact trusted infrastructure
+grant, ticket and protected plan in its execution store. It then publishes a
+create-only, read-only-to-UID-452 receipt containing the verified execution-
+store identity, config/account binding, ticket, plan, grant, policy and expiry
+hashes. The receipt reserves no risk, creates no approval and conveys no
+execution authority. The control reader never opens the execution database or
+receives the grant HMAC.
+
+`TestnetChatLiveProposalIssuer` accepts only a staging ID, the exact active
+in-process `TestnetChatBrokerSession`, and time. It reloads the executor receipt
+and qualification source, requires their ticket/account/config bindings, then
+delegates to the existing durable proposal issuer. The qualification
+collector, executor preregistration and live issuer source gates are literal
+true. Their fixed roots, ACLs, collection trigger, service lifecycle
+and negative/reboot qualification are still commissioning work; no live
+network or credential action is enabled by this source.
+
+The enabled fixed command surfaces are
+`testnet_chat_collector_service` (UID 453, no arguments, the existing seven
+allowlisted TESTNET `/info` reads only) and
+`executor_chat_registration_service publish-registration
+<ticket-hash>` (UID 451, already-registered store records only). The broker
+service constructs the receipt-backed issuer after creating its exact session
+and runs bounded issuance maintenance inside that session's accept loop. All
+three TESTNET service gates are true, while the UID/GID-453 identity and every
+evidence, projection, registration and presentation path remain uncreated;
+their fixed preflights therefore fail before network or state access.
+
+The existing executor CLI now also has the control-UID command
+`prepare-chat-stage --config <fixed-config> --grant <signed-grant>
+--document-id <staging-id>`. It authenticates only the signed grant through the
+control grant slot, then registers that grant and the exact staged ticket/plan.
+It does not load the approval or signer slots and creates no approval,
+reservation, command or venue request. Its returned ticket hash is the sole
+input to the UID-451 receipt command above. Both role commands are idempotent
+over the same immutable records.
 
 ## Approval is not execution
 
@@ -415,13 +454,13 @@ at PRE_KEY and PRE_SEND. Any mismatch or expiry denies execution.
 This slice still does not implement or authorize:
 
 - an AF_UNIX listener/daemon or socket/ACL installation;
-- same-process active-generation issuance orchestration or installed
-  presentation ACL/configuration;
-- fixed authenticated account/market collector composition for issuance;
-- an authenticated preverified grant-receipt source for issuance;
+- installed active-generation issuance orchestration or presentation
+  ACL/configuration;
+- installation or triggering of the fixed qualification-evidence collector;
 - registration or enabling of the existing raw-`command_text` stdio MCP;
 - installation/enablement of the offline UID-452 publisher/ready index and
-  UID-451 reader/consumer, including bounded marker archival/GC;
+  UID-451 reader/consumer, including qualifying the broker-scheduled
+  expired-marker retirement;
 - Keychain, credential or live venue integration for the chat path;
 - HTTP, WebSocket, VPN or venue access;
 - order placement, cancellation, closing or any other venue write;
@@ -429,9 +468,10 @@ This slice still does not implement or authorize:
 - mainnet use under any circumstances.
 
 Promotion requires fixed-path socket and named-ACL enforcement, installed
-read-only presentation publication, authenticated evidence collectors,
-same-process broker-generation issuance, an at-least-once create-only handoff
-publisher/ready index and executor consumer installation, marker retention/GC,
+read-only presentation publication, the implemented qualification-evidence
+and executor-receipt roots, same-process broker-generation lifecycle wiring,
+an at-least-once create-only handoff publisher/ready index and executor consumer
+installation, qualified marker retirement,
 exact-head installation, and end-to-end
 TESTNET limits including live schema-v14 PRE_KEY/PRE_SEND role-fence and
 UNKNOWN-outcome exercises. Until then `/dev/tty` plus the control-role HMAC is

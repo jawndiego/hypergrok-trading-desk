@@ -24,7 +24,7 @@ the APFS reserve protects 8 GiB from sibling-volume competition. These values
 remain unqualified until post-reboot research-ENOSPC and executor WAL/recovery
 headroom probes pass under the real service UIDs.
 
-## TESTNET chat-approval addition — not in the apply scripts yet
+## TESTNET chat-approval foreground canary layout
 
 The reviewed offline channel uses the fixed socket
 `/private/var/run/trading-desk/testnet-chat-approval.sock` and requires a
@@ -34,20 +34,34 @@ WAL and SHM are mode 0600, regular, single-link and unavailable to UID 501.
 The socket parent may grant UID 501 only the exact traversal/connect rights;
 it may not grant state read/list/create/delete/rename/replace rights.
 
-The current storage/ACL scripts do not create or verify either path, the
-separate presentation namespace or the config-hash-bound handoff namespace,
-or the ID-only ready-index namespace,
-and no script installs or launches a broker. The application wheel includes the
-dormant stdio MCP entry point, but the installer does not register or enable it
-in Codex, the plugin descriptor, OpenCode or launchd. A later exact-head pack
-must add named-ACL inspection, stale socket refusal, broker-generation evidence,
-restart/crash probes, authenticated evidence collectors, same-process issuance,
-installation/enablement of the offline artifact-first publisher, ID-only ready
-index and cached executor consumer, marker archival/GC, and negative UID tests
-before these paths are applied. The router VM receives none of this state.
-The adjacent `TESTNET_CHAT_ISSUANCE_PROVENANCE_PLAN.md` is inert design only;
-its proposed UID 453 collector and grant/executor receipt pipelines do not
-exist and authorize no identity, ACL, network or service change.
+The APFS storage/ACL scripts do not create these paths. The separate
+plan-by-default `06-commission-foreground-testnet.sh` now provides a first-
+canary alternative: it creates the exact control, presentation,
+config-hash-bound handoff/ready, UID-453 evidence/quote, UID-451 registration,
+and root route-cache directories without requiring quota volumes or launchd.
+It renders `/etc/trading-desk/testnet-executor.toml` from one strict root-owned
+public profile and uses the same two-phase SQLite inheritance model. Its
+companion `init-foreground-chat-store.py` accepts no arguments and initializes
+only the fixed UID-452 store. A separate explicit router-identity phase creates
+or adopts disabled non-agent UID/GID 454 and its sole ACL-free mode-0700 Lima
+home; it is not collector UID 453 and receives no harness state or credential.
+Neither artifact starts the broker, collector,
+bridge or executor, registers Codex/OpenCode, touches a credential, changes the
+network, or calls a venue. See `FOREGROUND_TESTNET_CANARY.md` for the attended
+sequence. The router VM receives none of this state.
+
+The layout has not been applied merely because it is checked in. Live
+restart/crash, negative-UID, marker-retirement, route-loss and reboot probes
+remain promotion gates.
+The adjacent `TESTNET_CHAT_ISSUANCE_PROVENANCE_PLAN.md` remains inert for
+deployment. Its TESTNET source adapters and fixed service commands are enabled,
+but UID 453 and their paths/ACLs remain absent; the plan authorizes no identity,
+ACL, network or service installation.
+
+For the first foreground-only canary, follow
+`FOREGROUND_TESTNET_CANARY.md` instead of the APFS/launchd sequence below. This
+is an attended test shortcut only; it carries no storage-headroom or always-on
+qualification claim.
 
 ## Irreversible operator choice
 
@@ -130,6 +144,13 @@ later resize changes the tested resource boundary.
    restart into a full volume. Disk identity/configuration validation failures
    stop the child but exit nonzero so launchd retries rather than treating
    transient Disk Arbitration failure as an intentional shutdown.
+   Separately, after the remote provider/VM/PF values are reviewed, use
+   `05-install-remote-vpn-health.sh --apply ABSOLUTE_ROOT_OWNED_SEALED_MEDIA EXPECTED_MEDIA_SHA256`
+   to install only the fixed hash-pinned sample/probe helpers, public Mac WG/PF
+   bytes and base/remote expectation files. It does not load PF, start a tunnel
+   or collector, generate a key, read Keychain or contact Hyperliquid. The
+   attended PF profile confines executor UID 451 and shared resolver UID 65;
+   while loaded, DNS restriction is intentionally host-wide.
 9. Render public TESTNET config, run credential-free `validate`, and retain the
    empty-state evidence. `init` is a later attended checkpoint, not performed
    by these artifacts.
@@ -147,12 +168,12 @@ must be implemented and qualified before any LaunchDaemon installation or
 always-on claim. The first TESTNET harness write also remains blocked. The
 qualification GTC/query/cancel/close lifecycle, signer/verifier, dormant sender,
 terminal reservation release and direct-terminal fallback now exist offline,
-but submission is compiled off and live evidence is absent. The chat approval
+   and route-bound TESTNET sender now exist, but live VPN evidence is absent. The chat approval
 CAS/wire/stdio MCP, typed issuer/presentation, schema-v13 atomic admission,
 schema-v14 signer/outcome fences, schema-v15 verified handoff reader/scope and
 schema-v16 full canonical delivery evidence are likewise offline. They still
-need authenticated collectors, same-process
-issuance and grant provenance, fixed listener and all named ACLs, installation
+need installation of the offline collector/projection and executor receipt
+paths, same-process issuance activation, fixed listener and all named ACLs, installation
 and enablement of the implemented publisher/ready-index/consumer chain,
-archival before its 1,024-entry cap, and live end-to-end qualification. WebSocket live recovery, real
+scheduled expired-marker retirement before its 1,024-entry cap, and live end-to-end qualification. WebSocket live recovery, real
 response-loss injection and the signed qualification artifact remain incomplete.

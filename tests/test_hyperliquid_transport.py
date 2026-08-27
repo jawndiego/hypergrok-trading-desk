@@ -12,6 +12,7 @@ from unittest import mock
 from trading_harness import hyperliquid_transport
 from trading_harness.errors import StateConflict
 from trading_harness.domain import Environment
+from trading_harness.executor_config import parse_executor_config
 from trading_harness.execution_store import (
     EntrySubmissionAuthority,
     ExecutionStore,
@@ -25,6 +26,9 @@ from trading_harness.hyperliquid_transport import (
 )
 from trading_harness.hyperliquid_signer import SignedActionEnvelope, sign_recovery_action
 from trading_harness.hyperliquid_wire import HyperliquidNetwork
+from trading_harness.testnet_chat_delivery import testnet_chat_execution_scope_from_config
+from trading_harness.testnet_remote_vpn_health import TestnetRemoteVpnPromotionGuard
+from tests.test_executor_config import config_text
 from tests.test_execution_store import ExecutionStoreTestCase
 from tests.test_hyperliquid_signer import (
     STORE_NOW,
@@ -36,9 +40,38 @@ from tests.test_hyperliquid_signer import (
     prepare_durable_recovery_fixture,
     prepare_durable_noop_fixture,
 )
+from tests.test_testnet_remote_vpn_health import remote_evidence, remote_expectation
+from tests.test_testnet_route_health import route_expectation
 
 
 PRE_SEND_ROLE_HASH = "f" * 64
+
+
+def protected_route_fixture(signed, *, at=NOW):
+    config = parse_executor_config(
+        config_text()
+        .replace('account_id = "dedicated-testnet"', f'account_id = "{signed.account_id}"')
+        .replace(
+            'main_account_address = "0x1111111111111111111111111111111111111111"',
+            f'main_account_address = "{signed.main_account_address}"',
+        )
+        .replace(
+            'api_wallet_address = "0x2222222222222222222222222222222222222222"',
+            f'api_wallet_address = "{signed.signer_address}"',
+        ),
+        environ={},
+    )
+    scope = testnet_chat_execution_scope_from_config(config)
+    base = route_expectation(scope.config_hash)
+    expectation = remote_expectation(base)
+    evidence = remote_evidence(expectation, at=at)
+    guard = TestnetRemoteVpnPromotionGuard(
+        executor_config_hash=scope.config_hash,
+        base_expectation=base,
+        expectation=expectation,
+        reader=lambda: evidence,
+    )
+    return scope, guard, evidence
 
 
 class FakeSender:
@@ -56,12 +89,14 @@ class FakeSender:
 def submit(signed, sender, *, clock, **kwargs):
     if isinstance(signed, SignedActionEnvelope) and "store" not in kwargs:
         temporary = tempfile.TemporaryDirectory()
+        scope, route_guard, route_evidence = protected_route_fixture(signed)
         store = ExecutionStore(
             Path(temporary.name) / "execution.sqlite3",
             environment=Environment.TESTNET,
             account_id=signed.account_id,
             max_reserved_loss="100",
             max_reserved_notional="10000",
+            chat_scope=scope,
         )
         command_id = "command-1"
         attempt_id = "attempt-1"
@@ -82,6 +117,10 @@ def submit(signed, sender, *, clock, **kwargs):
             pre_send_role_expires_at_ms=int(
                 (NOW + timedelta(seconds=2)).timestamp() * 1_000
             ),
+            route_mode="testnet_remote_vpn_exit",
+            route_expectation_hash=route_guard.expectation.expectation_hash,
+            route_evidence_hash=route_evidence.evidence_hash,
+            route_expires_at_ms=int(route_evidence.expires_at.timestamp() * 1_000),
             issued_at=NOW,
             lease_expires_at=NOW + timedelta(seconds=30),
             authority_hash="a" * 64,
@@ -94,6 +133,7 @@ def submit(signed, sender, *, clock, **kwargs):
             "worker_id": "transport-test-worker",
             "fencing_token": 1,
             "pre_send_role_attestation_hash": PRE_SEND_ROLE_HASH,
+            "remote_vpn_guard": route_guard,
         }
         authority_patch = mock.patch.object(
             ExecutionStore,
@@ -151,12 +191,14 @@ class SingleAttemptTransportTests(unittest.TestCase):
         self.assertEqual([], sender.calls)
 
         with tempfile.TemporaryDirectory() as directory:
+            scope, route_guard, route_evidence = protected_route_fixture(signed)
             store = ExecutionStore(
                 Path(directory) / "execution.sqlite3",
                 environment=Environment.TESTNET,
                 account_id=signed.account_id,
                 max_reserved_loss="100",
                 max_reserved_notional="10000",
+                chat_scope=scope,
             )
             evidence = signed.execution_store_evidence("command-1")
             authority = EntrySubmissionAuthority(
@@ -172,6 +214,10 @@ class SingleAttemptTransportTests(unittest.TestCase):
                 pre_send_role_expires_at_ms=int(
                     (NOW + timedelta(seconds=2)).timestamp() * 1_000
                 ),
+                route_mode="testnet_remote_vpn_exit",
+                route_expectation_hash=route_guard.expectation.expectation_hash,
+                route_evidence_hash=route_evidence.evidence_hash,
+                route_expires_at_ms=int(route_evidence.expires_at.timestamp() * 1_000),
                 issued_at=NOW,
                 lease_expires_at=NOW + timedelta(seconds=30),
                 authority_hash="c" * 64,
@@ -184,6 +230,7 @@ class SingleAttemptTransportTests(unittest.TestCase):
                 "worker_id": "worker-1",
                 "fencing_token": 1,
                 "pre_send_role_attestation_hash": PRE_SEND_ROLE_HASH,
+                "remote_vpn_guard": route_guard,
             }
             with (
                 mock.patch.object(
@@ -208,8 +255,16 @@ class SingleAttemptTransportTests(unittest.TestCase):
     def test_posts_exact_frozen_wire_once_to_network_endpoint(self) -> None:
         signed = make_signed()
         sender = FakeSender(successful_response(signed.exchange_url))
+        times = iter(
+            (
+                NOW,
+                NOW + timedelta(milliseconds=1),
+                NOW + timedelta(milliseconds=2),
+                NOW + timedelta(milliseconds=3),
+            )
+        )
 
-        attempt = submit(signed, sender, clock=lambda: NOW)
+        attempt = submit(signed, sender, clock=lambda: next(times))
 
         self.assertEqual(
             sender.calls,
@@ -222,6 +277,10 @@ class SingleAttemptTransportTests(unittest.TestCase):
         self.assertEqual(attempt.send_count, 1)
         self.assertFalse(attempt.retry_performed)
         self.assertTrue(attempt.requires_reconciliation)
+        self.assertEqual(
+            int((NOW + timedelta(milliseconds=3)).timestamp() * 1_000),
+            attempt.attempted_at_ms,
+        )
         self.assertEqual(attempt.response()["status"], "ok")  # type: ignore[index]
         self.assertRegex(attempt.response_hash or "", r"^[0-9a-f]{64}$")
         self.assertRegex(attempt.attempt_hash, r"^[0-9a-f]{64}$")
@@ -259,7 +318,14 @@ class SingleAttemptTransportTests(unittest.TestCase):
     def test_pre_send_role_expiry_after_authority_skips_http_and_is_unknown(self) -> None:
         signed = make_signed()
         sender = FakeSender(successful_response(signed.exchange_url))
-        times = iter((NOW, NOW + timedelta(seconds=2)))
+        times = iter(
+            (
+                NOW,
+                NOW,
+                NOW + timedelta(seconds=2),
+                NOW + timedelta(seconds=2),
+            )
+        )
 
         attempt = submit(signed, sender, clock=lambda: next(times))
 
@@ -278,7 +344,7 @@ class SingleAttemptTransportTests(unittest.TestCase):
         def clock():
             nonlocal calls
             calls += 1
-            if calls == 1:
+            if calls <= 2:
                 return NOW
             raise RuntimeError("PRIVATE CLOCK")
 
@@ -288,6 +354,95 @@ class SingleAttemptTransportTests(unittest.TestCase):
         self.assertEqual("clock_invalid_after_authority", attempt.detail_code)
         self.assertNotIn("PRIVATE", json.dumps(attempt.as_dict()))
         self.assertTrue(attempt.outcome_unknown)
+
+    def test_remote_vpn_loss_after_authority_is_unknown_without_http(self) -> None:
+        signed = make_signed()
+        sender = FakeSender(successful_response(signed.exchange_url))
+        scope, configured_guard, evidence = protected_route_fixture(signed)
+        reads = 0
+
+        def read_route():
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return evidence
+            raise OSError("private VPN failure")
+
+        guard = TestnetRemoteVpnPromotionGuard(
+            executor_config_hash=scope.config_hash,
+            base_expectation=configured_guard.base_expectation,
+            expectation=configured_guard.expectation,
+            reader=read_route,
+        )
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = ExecutionStore(
+            Path(temporary.name) / "execution.sqlite3",
+            environment=Environment.TESTNET,
+            account_id=signed.account_id,
+            max_reserved_loss="100",
+            max_reserved_notional="10000",
+            chat_scope=scope,
+        )
+        signed_evidence = signed.execution_store_evidence("command-1")
+        authority = EntrySubmissionAuthority(
+            command_id="command-1",
+            attempt_id="attempt-1",
+            signed_evidence_hash=signed_evidence.evidence_hash,
+            nonce=signed.nonce,
+            action_hash=signed.action_hash,
+            wire_hash=signed.wire_hash,
+            worker_id="worker-1",
+            fencing_token=1,
+            pre_send_role_attestation_hash=PRE_SEND_ROLE_HASH,
+            pre_send_role_expires_at_ms=int(
+                (NOW + timedelta(seconds=2)).timestamp() * 1_000
+            ),
+            route_mode="testnet_remote_vpn_exit",
+            route_expectation_hash=guard.expectation.expectation_hash,
+            route_evidence_hash=evidence.evidence_hash,
+            route_expires_at_ms=int(evidence.expires_at.timestamp() * 1_000),
+            issued_at=NOW + timedelta(milliseconds=1),
+            lease_expires_at=NOW + timedelta(seconds=30),
+            authority_hash="d" * 64,
+        )
+        times = iter(
+            (
+                NOW,
+                NOW + timedelta(milliseconds=1),
+                NOW + timedelta(milliseconds=2),
+            )
+        )
+        with (
+            mock.patch.object(
+                ExecutionStore,
+                "require_submission_authority",
+                return_value=authority,
+            ),
+            mock.patch.object(
+                hyperliquid_transport,
+                "_default_sender",
+                side_effect=sender,
+            ),
+        ):
+            attempt = submit_signed_action(
+                signed,
+                store=store,
+                command_id="command-1",
+                attempt_id="attempt-1",
+                signed_evidence_hash=signed_evidence.evidence_hash,
+                worker_id="worker-1",
+                fencing_token=1,
+                pre_send_role_attestation_hash=PRE_SEND_ROLE_HASH,
+                remote_vpn_guard=guard,
+                clock=lambda: next(times),
+            )
+
+        self.assertEqual(2, reads)
+        self.assertEqual([], sender.calls)
+        self.assertIs(attempt.outcome, SubmissionOutcome.UNKNOWN)
+        self.assertEqual("remote_vpn_lost_after_authority", attempt.detail_code)
+        self.assertNotIn("private", json.dumps(attempt.as_dict()))
 
     def test_non_200_redirect_oversize_and_bad_json_are_all_unknown(self) -> None:
         signed = make_signed()

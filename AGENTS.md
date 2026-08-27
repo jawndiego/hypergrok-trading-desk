@@ -29,16 +29,24 @@ This repository builds an agent-runtime-neutral trading research and execution h
   handoff ID and the store itself invokes the fixed UID-451 reader for a
   config-bound, UID-452-owned canonical artifact. A UID-452 artifact-first
   publisher, empty ID-only ready index, approval callback/startup active repair
-  and dormant cached UID-451 consumer exist offline. Their gates remain false;
-  no listener/ACL/runtime is installed or commissioned.
-- The issuer's staging chain is store-backed, but its account and market
-  evidence bindings are currently typed/self-consistent in-memory values. Do
-  not describe their collectors as authoritative or enable presentation until
-  fixed reviewed collector/store adapters prove provenance. Fresh executor
-  preflight prevents capital bypass, not misleading issuance-time UX.
-  `deploy/macos/testnet/TESTNET_CHAT_ISSUANCE_PROVENANCE_PLAN.md` is an inert
-  proposal for UID 453 collectors, grant verification and executor
-  preregistration receipts; none exists or is authorized to apply.
+  and cached UID-451 consumer exist. Their TESTNET source gates are enabled;
+  no listener/ACL/runtime is installed or commissioned, so fixed preflight
+  still fails closed on this machine.
+- The issuer's staging chain now has an offline live-composition adapter: the
+  existing exact seven-read TESTNET qualification artifact is independently
+  reverified and recompiled into the staged account hash and fresh market
+  binding; UID 451 can preregister the exact grant/ticket/plan and publish a
+  non-authoritative receipt; UID 452 can require both immutable sources before
+  issuing with the exact in-process broker session. The quote service has an
+  injected account-risk reader for using that same compiled source. The
+  collector, preregistration and live-issuance source gates are literal true,
+  but no path/ACL/runtime is installed. Fixed CLIs exist for the UID-453
+  seven-read collector (no arguments) and UID-451 publication of a receipt for
+  an already-registered ticket hash. The control-UID `prepare-chat-stage`
+  command authenticates the signed grant and registers only grant/ticket/plan,
+  never approval/reservation/command. The broker composes bounded issuance only
+  inside its exact live session. Do not enable presentation until UID/GID 453,
+  those fixed roots and the public-data collection trigger are commissioned.
 - The isolated TESTNET worker has a deployable write path, but it is a separate process and CLI. It is never an MCP tool or skill capability. Mainnet remains hard-disabled.
 - The foundation admits only local `infrastructure_testnet` `simulate_order`
   commands; deny strategy, shadow, mainnet, and systematic grants.
@@ -108,26 +116,37 @@ This repository builds an agent-runtime-neutral trading research and execution h
   control-UID collect/verify/attended authorization and executor-UID
   status/recover/reconciliation commands. Its full bounded foreground worker
   composes place, paired CLOID/OID query, cancel and terminal-flat
-  reconciliation, but `run` fails at the compiled submission gate before
-  config, state, Keychain or network access; split prepare/sign commands are
-  not public. Each key/send boundary requires a fresh two-read `userRole`
+  reconciliation. Both literal TESTNET/remote-VPN gates are promoted, but
+  `run` requires fixed root-cached VPN/PF evidence before authority and again
+  immediately before HTTP; split prepare/sign commands are not public. Each
+  key/send boundary requires a fresh two-read `userRole`
   attestation bound through the signed attempt and submission authority. A
   one-shot exact-TESTNET HTTP sender contract, injected credential-free
   advisory WebSocket decoder/client and bounded local accept-then-drop/crash
-  harness exist. The sender remains unreachable because qualification
-  submission authority is compiled off; no live WebSocket adapter or live
-  response-loss forwarder has been qualified.
+  harness exist. No live WebSocket adapter or live response-loss forwarder has
+  been qualified.
 - An expired proven-unsent cancel hard-halts with reservation retained. One
   fresh, attended, read-proven-open same-CLOID successor may be authorized
   through a separately persisted issued-to-consumed permit and a new action,
   envelope and global nonce. Never turn it into a blind retry.
-- Do not promote qualification submission until the executor performs a final
-  fresh stable `userRole(api_wallet)` mapping check after claim and immediately
-  before key use/send, bound into attempt evidence; the agent wire does not
-  encode the intended main account.
+- Do not weaken the promoted qualification boundary: it requires the final
+  stable `userRole(api_wallet)` mapping plus exact remote-VPN evidence bound
+  into the submission authority; the agent wire does not encode the intended
+  main account.
 - Credential-free macOS plans live under `deploy/macos/testnet`. They are
-  plan-only by default and do not authorize APFS creation, ACL mutation,
-  application installation, `init`, launchd, credentials or venue calls.
+  inert by default; an explicit reviewed `--apply` is still an attended root
+  operation and never implies authority for credentials, `init`, launchd or a
+  venue call.
+- Read `deploy/macos/testnet/FOREGROUND_TESTNET_CANARY.md` before commissioning
+  the first attended canary without the APFS quota volumes or launchd. Its
+  `06-commission-foreground-testnet.sh` is plan-only by default, uses separate
+  explicit collector-identity/router-identity/pre-init/post-init phases,
+  renders only the fixed public executor config, and creates the exact
+  chat/route namespaces enforced by the runtime validators. Router UID/GID 454
+  owns only its ACL-free mode-0700 Lima home and is distinct from collector
+  UID/GID 453. The companion UID-452 chat-store initializer accepts no
+  arguments. This foreground exception does not waive role/ACL, VPN/PF,
+  Keychain-reader, route-evidence, venue-lifecycle or mainnet gates.
 - Read `docs/testnet_chat_approval.md` before changing the remote TESTNET
   approval path. The fixed broker must run as UID 452, verify UID/GID 501 before
   reading, and be mutually verified by the UID-501 bridge before it sends. The
@@ -159,6 +178,10 @@ This repository builds an agent-runtime-neutral trading research and execution h
   exact named ACLs and byte/source hashes. Restart decoding recomputes every
   relationship. Nonempty schema-v15 chat state may not auto-migrate because
   that evidence cannot be backfilled.
+- Schema v17 is a no-column promotion boundary for remote-VPN-bound normal and
+  qualification submission authorities. Nonempty legacy signed, attempted,
+  authority or transport state may not migrate because route evidence cannot
+  be reconstructed after the fact.
 - Control-published proposal presentations use a separate UID-452-owned
   mode-0700 directory and immutable mode-0400 files. Only research UID 450 may
   receive a read-only ACL for those sanitized files; it receives no control-DB
@@ -169,10 +192,13 @@ This repository builds an agent-runtime-neutral trading research and execution h
   and ACL-free. UID 452 owns the dedicated root/config directory at 0700 with
   the sole UID-451 execute ACE and must publish immutable 0400 files create-only
   with the sole UID-451 read ACE. Source now publishes the fully durable
-  artifact before an empty marker in the distinct ready index; the dormant
+  artifact before an empty marker in the distinct ready index; the enabled
   consumer treats the marker as notification only and revalidates v16 state.
-  Neither namespace, ACL, publisher nor consumer is installed/enabled. Retain
-  reviewed archival/GC before the hard 1,024-entry ready-index cap is reached.
+  Neither namespace nor its ACL/runtime is installed. The
+  publisher can now retire only exactly verified expired notification markers
+  while retaining immutable handoffs; the broker performs that bounded
+  retirement at startup and in its maintenance loop. Qualify it before the
+  hard 1,024-entry ready-index cap is reached.
 - Never provision a real secret through `security add-generic-password` or
   trust the shared `/usr/bin/security` executable in an item ACL. The macOS
   execution design requires the sealed role-specific native readers, fixed
@@ -194,6 +220,19 @@ This repository builds an agent-runtime-neutral trading research and execution h
   `192.168.106.2/24` guest ingress contract. The rendered
   `local-nat-lab-test-plan` is print-only: PF enforcement, a remote VPN exit,
   test execution and VM apply all remain absent.
+- The distinct credential-free `testnet_remote_vpn_exit` overlay is rendered
+  by `scripts/render_ubuntu_remote_egress.py` against an exact hashed local
+  router bundle. It emits a second `wg-egress` peer and a replacement firewall
+  with default-drop output/forward, physical-WAN exceptions only for DHCP and
+  the fixed outer peer, tunnel-only DNS/NTP/HTTPS, and NAT only to `wg-egress`.
+  It emits no private key, install, service activation, route mutation or
+  direct-WAN fallback. A distinct typed remote evidence/cache guard and
+  render-only UID-451 plus resolver-UID-65 PF anchor exist with promoted
+  TESTNET source gates.
+  Provider endpoint/public-key/address/DNS/expected-exit data, a guest-owned
+  key, installed PF policy/helpers/expectations, a running collector and live
+  qualification remain required; do not call it configured or
+  VPN-qualified merely because it renders.
 - `testnet_route_health.py` defines a credential-free, two-sample,
   five-second TESTNET `local_nat_lab` evidence contract bound to the executor
   config, VM/router manifests, qualified topology, peer-key hashes, stable Mac
@@ -210,13 +249,27 @@ This repository builds an agent-runtime-neutral trading research and execution h
   the queued command at the earliest ticket/leg expiry, releasing risk. A
   final-guard failure after attempt preparation voids proven-unsent entry. No
   path selects a direct-network fallback; recovery remains independent.
-- Do not represent that route gate as installed or VPN-qualified. No trusted
-  bounded collector, durable expectation/config binding, preflight/attempt
-  evidence persistence, PF/Network Extension kill switch, remote VPN peer or
-  live route qualification exists yet.
-- A future final-guard reader must be a bounded local cached-evidence read. It
-  may not run SSH, route commands, DNS, TLS or an `/info` probe while holding
-  the runtime submission lock; the separate collector owns those observations.
+- Do not represent the route gate as installed or VPN-qualified. The fixed
+  root-owned loader/publisher, single-flight foreground collector, hash-pinned
+  sample helper, UID/GID-451 probe helper and plan/apply file installer exist.
+  Normal and qualification senders bind route mode, expectation, evidence and
+  expiry into durable one-shot authority, re-read the same cache after
+  authority, and persist UNKNOWN without HTTP if it disappears. The helpers
+  bind full PF root/anchor hashes, scoped DNS state, complete guest config,
+  destination routes, TLS, read-only `/info`, exact exit IP, a forced-physical
+  denial and advancing tunnel/PF counters. PF/VM/WireGuard/provider apply,
+  helper/artifact installation, service scheduling and live leak/reboot tests
+  remain absent. Resolver UID 65 confinement is deliberately host-wide while
+  the attended TESTNET PF profile is loaded.
+- The Lima state owner is the fixed disabled `trading-router-operator`
+  UID/GID 454 with no supplementary groups or credential slots. It owns only
+  the dedicated mode-0700 ACL-free LIMA_HOME; root observation code must invoke
+  the exact fixed `limactl shell ... guest-check` command as 454, never as root
+  or an agent/control/executor identity.
+- The final-guard reader may use only the fixed bounded local evidence cache.
+  It may not run SSH, route commands, DNS, TLS or an `/info` probe while holding
+  the runtime submission lock; the separate collector owns those observations
+  and must never synthesize missing helper output.
 - The router VM is network-only. It receives no API-wallet, account config,
   execution state, Keychain access, repository/shared-folder mount, approval
   secret, agent runtime or venue authority.

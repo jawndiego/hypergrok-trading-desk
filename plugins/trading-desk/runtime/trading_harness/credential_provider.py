@@ -597,6 +597,12 @@ class MacOSKeychainCredentialProvider:
             _zero(result.stdout)
             _zero(result.stderr)
 
+    def check_available(self) -> None:
+        """Verify the configured signer identity without returning its wallet."""
+
+        wallet = self.load_wallet()
+        del wallet
+
 
 __all__ = (
     "BoundedCommandResult",

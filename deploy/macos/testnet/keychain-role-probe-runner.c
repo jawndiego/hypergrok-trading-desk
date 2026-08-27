@@ -50,9 +50,9 @@
 #define CONTROL_IDENTIFIER \
     "com.jawndiego.trading-desk.keychain-reader.control.v1"
 #define EXECUTOR_SHA256 \
-    "42e583ee40d48546a92bf40bf650fa576ec3d86455bf663cc3760b90d050df27"
+    "8694d14a94ee00a2ac039b7d5cd26c4184e13840aabe1cac2b0d084a629e0ff7"
 #define CONTROL_SHA256 \
-    "da10752940f726258f4e2439b657db0c2f3fefcb3c30ef6a1eaa69df3da8e194"
+    "2ce4ba34366b67b0280302e042ffae67547cb39924353c62f88f5782b9dc52e9"
 
 #define EXECUTOR_PROBE_SLOT "probe-executor"
 #define CONTROL_PROBE_SLOT "probe-control"
@@ -220,11 +220,14 @@ static bool emit_line(const char *line)
 
 static bool has_extended_acl(const char *path)
 {
-    acl_t acl = acl_get_file(path, ACL_TYPE_EXTENDED);
+    acl_t acl;
     acl_entry_t entry;
+    struct stat value;
     int status;
+    errno = 0;
+    acl = acl_get_file(path, ACL_TYPE_EXTENDED);
     if (acl == NULL) {
-        return true;
+        return errno != ENOENT || lstat(path, &value) != 0;
     }
     status = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry);
     (void)acl_free(acl);

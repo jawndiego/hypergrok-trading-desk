@@ -1,0 +1,5 @@
+# Schema: trading-desk.testnet-executor-pf-loader.v1
+# Review and place these lines at the correct early location in /etc/pf.conf.
+# This snippet is not an installer and is never loaded by repo tooling.
+anchor "com.jawndiego.trading-desk-testnet-executor"
+load anchor "com.jawndiego.trading-desk-testnet-executor" from "/etc/pf.anchors/com.jawndiego.trading-desk-testnet-executor"

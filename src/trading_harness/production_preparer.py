@@ -32,6 +32,7 @@ from .planning import ProtectedTradePlan, RiskSizingPolicy, RiskTicket
 from .policy import decimal_subtract, exact_decimal
 from .recovery_dispatcher import PreparedRecovery
 from .testnet_route_health import TestnetRouteHealthGate
+from .testnet_remote_vpn_health import TestnetRemoteVpnPromotionGuard
 
 
 Clock: TypeAlias = Callable[[], datetime]
@@ -60,7 +61,7 @@ class TestnetEntryPreparer:
         main_account_address: str,
         limits: AccountRiskLimits,
         policy: RiskSizingPolicy,
-        route_health_gate: TestnetRouteHealthGate,
+        route_health_gate: TestnetRouteHealthGate | TestnetRemoteVpnPromotionGuard,
         clock: Clock = _clock,
         account_reader: AccountReader | None = None,
         market_reader: MarketReader | None = None,
@@ -74,8 +75,11 @@ class TestnetEntryPreparer:
             raise TypeError("limits must be AccountRiskLimits")
         if not isinstance(policy, RiskSizingPolicy):
             raise TypeError("policy must be RiskSizingPolicy")
-        if type(route_health_gate) is not TestnetRouteHealthGate:
-            raise TypeError("route_health_gate must be exact TestnetRouteHealthGate")
+        if type(route_health_gate) not in {
+            TestnetRouteHealthGate,
+            TestnetRemoteVpnPromotionGuard,
+        }:
+            raise TypeError("route_health_gate must be an exact reviewed TESTNET gate")
         if (
             limits.environment.value != "testnet"
             or limits.account_id != store.account_id

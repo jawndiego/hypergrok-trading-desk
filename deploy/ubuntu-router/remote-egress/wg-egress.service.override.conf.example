@@ -1,0 +1,6 @@
+[Unit]
+Wants=network-online.target
+Requires=nftables.service
+BindsTo=nftables.service
+After=network-online.target nftables.service
+Before=wg-quick@wg-exec.service

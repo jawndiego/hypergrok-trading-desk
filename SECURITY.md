@@ -34,20 +34,25 @@ Use this fork's GitHub **Report a vulnerability** flow to open a private securit
   credential, executor state, repository mount or authority. Its
   `local_nat_lab` profile keeps the existing public IP and cannot prevent a
   macOS process from bypassing the VM; it is not a VPN or capital boundary.
-- Normal entry now has a default-unavailable, short-lived two-sample
-  `local_nat_lab` route gate at readiness, before account/market reads and in
-  the final pre-authority guard. Reader clock rollback/expiry is rejected and
+- Normal entry now has a default-unavailable, short-lived two-sample remote-VPN
+  route gate at readiness, before account/market reads and inside the sender.
+  Reader clock rollback/expiry is rejected and
   the final post-read sample requires the full two-second PRE_SEND TTL of
   remaining evidence life. A preparer-time route denial can only requeue the
   same active claim before any attempt/authority; independent maintenance
   normalizes expired claims and releases queued risk at the earliest
-  ticket/leg expiry. The evidence keeps PF, remote-exit,
-  VPN-qualified, credential, write and mainnet claims false. No trusted live
-  collector or durable preflight/attempt binding exists, and recovery does not
-  depend on this entry gate.
+  ticket/leg expiry. Route mode, expectation, evidence and expiry are durable in
+  the one-shot authority; a post-authority route loss becomes UNKNOWN without
+  HTTP. Fixed collector/helper/install code exists, but no PF, tunnel, helper,
+  artifact or process is installed. Recovery does not depend on this entry gate.
 - Capital HTTP clients ignore ambient urllib proxy discovery, and executor
   config rejects proxy, CA-bundle and TLS-key-log environment variables. Route
   selection and trust roots may not be silently replaced by a login shell.
+- The attended remote TESTNET PF profile confines executor UID 451 HTTPS and
+  macOS resolver UID 65 DNS to the reviewed `utun`. Resolver UID 65 is shared
+  host-wide, so loading this profile intentionally restricts system DNS for the
+  entire Mac during the attended test; live leak/reboot qualification is still
+  mandatory.
 - Human approval must bind the exact staged risk ticket. The current installed
   TESTNET CLI reads confirmation directly from `/dev/tty`. The offline weaker
   chat lane recognizes only exact `execute trade <proposal-id>` for an already
@@ -71,6 +76,9 @@ Use this fork's GitHub **Report a vulnerability** flow to open a private securit
   public store API accepts only a handoff ID and invokes the fixed reader
   itself. None of these offline schema boundaries installs a publisher,
   listener, credential or venue capability.
+- Schema v17 refuses nonempty legacy signed/attempted/authority/outcome state
+  at the remote-VPN promotion boundary; historical route evidence is never
+  backfilled.
 - Unknown venue outcomes remain reserved and must be reconciled; they are never blindly resent.
 - A prepared attempt, fresh dispatch attestation, nonce, action hash and wire hash are durable before the one permitted send. Recovery actions are limited to reduce-only close, owned-CLOID cancel and same-nonce noop fencing.
 - Entry submission additionally holds a revocable runtime guard across final
@@ -183,15 +191,15 @@ The local router and machine setup do not make the live checklist executable.
 The qualification-only GTC/query/cancel, retained snapshot, attended-close and
 fresh same-CLOID cancel-successor semantics have a separate TESTNET-only
 durable core, pinned SDK signer/recovery verifier, dormant sender and bounded
-foreground lifecycle; submission remains compiled off. The chat proposal CAS,
+foreground lifecycle; TESTNET submission is promoted only behind exact fresh
+remote-WireGuard/PF evidence bound into the one-shot authority. The chat proposal CAS,
 mutually peer-checked protocol/client, stdio MCP, typed issuer/presentation,
 artifact-first UID-452 handoff publisher, ID-only ready index, startup repair,
-dormant cached UID-451 consumer, verified reader and schema-v13-v16
-admission/fencing boundaries likewise remain offline with false gates. They
-still lack authenticated account/market/grant provenance, same-process active-
-session issuer/listener composition, installed presentation/handoff/ready paths
-and exact ACLs, Keychain qualification, ready-marker archival/GC before 1,024
-entries, and live end-to-end evidence. The first harness order write is
+cached UID-451 consumer, verified collector/preregistration provenance and
+schema-v13-v16 admission/fencing boundaries have enabled TESTNET source gates.
+They still lack installed presentation/evidence/handoff/ready paths and exact
+ACLs, UID-453 runtime installation, Keychain qualification, and live end-to-end
+evidence. The first harness order write is
 forbidden until these and
 the commissioning sequence in
 [`docs/testnet_commissioning.md`](docs/testnet_commissioning.md) are closed.

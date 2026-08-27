@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+if [ "${1-}" != "--plan" ]; then
+    printf '%s\n' 'pf_policy_apply_disabled' >&2
+    exit 64
+fi
+
+printf '%s\n' \
+    'schema_version=trading-desk.testnet-executor-pf-plan.v1' \
+    'mode=testnet_remote_vpn_exit' \
+    'environment=testnet' \
+    'executor_uid=451' \
+    'resolver_uid=65' \
+    'pf_anchor=com.jawndiego.trading-desk-testnet-executor' \
+    'mac_tunnel_name=wg-exec' \
+    'mac_tunnel_interface=__MAC_TUNNEL_INTERFACE__' \
+    'mac_tunnel_ipv4=__MAC_TUNNEL_IPV4__' \
+    'tunnel_dns_ipv4=__TUNNEL_DNS_IPV4__' \
+    'pf_policy_sha256=__PF_POLICY_SHA256__' \
+    'base_route_expectation_hash=__BASE_ROUTE_EXPECTATION_HASH__' \
+    'remote_egress_bundle_manifest_sha256=__REMOTE_EGRESS_BUNDLE_MANIFEST_SHA256__' \
+    'intended_anchor_path=/etc/pf.anchors/com.jawndiego.trading-desk-testnet-executor' \
+    'apply_enabled=false' \
+    'pf_enabled=false' \
+    'pf_anchor_loaded=false' \
+    'executor_uid_direct_bypass_prevented=false' \
+    'resolver_uid_direct_bypass_prevented=false' \
+    'host_wide_direct_bypass_prevented=false' \
+    'remote_vpn_exit_configured=false' \
+    'vpn_qualified=false' \
+    'submission_gate_enabled=false' \
+    'venue_writes_authorized=false' \
+    'mainnet_authorized=false'

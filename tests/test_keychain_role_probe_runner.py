@@ -16,14 +16,18 @@ SOURCE = DEPLOY / "keychain-role-probe-runner.c"
 BUILD = DEPLOY / "build-keychain-role-probe-runner.sh"
 PLAN = DEPLOY / "KEYCHAIN_ROLE_PROBE_PLAN.md"
 EXPECTED_SOURCE_SHA256 = (
-    "3b434f8ccaee6f1bc09ec0171cf4576ded8b96c6c83f4bfa9dbdcfe2a0e99af3"
+    "4bdaf5ebda40e62fc379d47c95f5477075e2a58f01e2b1f215f6f13c56c682ca"
 )
 EXPECTED_ARTIFACT_SHA256 = (
-    "356e6a01e178571c1ef1985c84a2ce1ca6028850e4ac13081e52f3edbda89076"
+    "96b3c941dba152402728d825c19a9d586d852b718f4ff06a06bd37b4335658f9"
 )
 
 
 class NativeRoleProbeContractTests(unittest.TestCase):
+    def test_acl_free_darwin_enoent_is_not_treated_as_a_named_acl(self) -> None:
+        text = SOURCE.read_text(encoding="utf-8")
+        self.assertIn("errno != ENOENT || lstat(path, &value) != 0", text)
+
     def test_source_has_only_fixed_sacrificial_reader_matrix(self) -> None:
         text = SOURCE.read_text(encoding="utf-8")
         for required in (
@@ -32,8 +36,8 @@ class NativeRoleProbeContractTests(unittest.TestCase):
             "com.jawndiego.trading-desk.keychain-role-probe-runner.v1",
             "/opt/trading-desk/libexec/trading-keychain-reader-executor-v1",
             "/opt/trading-desk/libexec/trading-keychain-reader-control-v1",
-            "42e583ee40d48546a92bf40bf650fa576ec3d86455bf663cc3760b90d050df27",
-            "da10752940f726258f4e2439b657db0c2f3fefcb3c30ef6a1eaa69df3da8e194",
+            "8694d14a94ee00a2ac039b7d5cd26c4184e13840aabe1cac2b0d084a629e0ff7",
+            "2ce4ba34366b67b0280302e042ffae67547cb39924353c62f88f5782b9dc52e9",
             'EXECUTOR_PROBE_SLOT "probe-executor"',
             'CONTROL_PROBE_SLOT "probe-control"',
             "(uid_t)0",

@@ -12,7 +12,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import platform
-import re
 from typing import Callable
 
 from .canonical import domain_hash
@@ -37,7 +36,6 @@ from .credential_provider import (
 from .errors import ValidationError
 
 
-_HEX_SECRET_RE = re.compile(r"^[0-9a-f]{64}$")
 _PURPOSES = frozenset({"approval_hmac", "recovery_hmac", "grant_hmac"})
 _PURPOSE_SLOTS = {
     "approval_hmac": "approval",
@@ -185,25 +183,39 @@ class MacOSKeychainHexSecretProvider:
         )
 
     @staticmethod
-    def _decode(buffer: bytearray) -> bytes:
-        raw = bytes(buffer)
-        if len(raw) != 64 or b"\n" in raw or b"\r" in raw:
+    def _validate_encoded(buffer: bytearray) -> None:
+        if len(buffer) != 64:
             raise CredentialMalformedError("Keychain HMAC credential format is invalid")
+        nonzero = False
+        for value in buffer:
+            if not (48 <= value <= 57 or 97 <= value <= 102):
+                raise CredentialMalformedError(
+                    "Keychain HMAC credential format is invalid"
+                )
+            nonzero = nonzero or value != 48
+        if not nonzero:
+            raise CredentialMalformedError("Keychain HMAC credential is invalid")
+
+    @classmethod
+    def _decode(cls, buffer: bytearray) -> bytes:
+        cls._validate_encoded(buffer)
         try:
-            text = raw.decode("ascii")
-        except UnicodeDecodeError:
-            raise CredentialMalformedError(
-                "Keychain HMAC credential format is invalid"
-            ) from None
-        if not _HEX_SECRET_RE.fullmatch(text):
+            text = buffer.decode("ascii")
+        except UnicodeDecodeError:  # pragma: no cover - validated byte range
             raise CredentialMalformedError("Keychain HMAC credential format is invalid")
-        digits = text
-        result = bytes.fromhex(digits)
+        result = bytes.fromhex(text)
         if len(result) != 32 or not any(result):
             raise CredentialMalformedError("Keychain HMAC credential is invalid")
         return result
 
-    def load_secret(self) -> bytes:
+    def _read(self, *, expose_value: bool) -> bytes | None:
+        """Read one fixed slot, optionally returning its decoded value.
+
+        ``check_available`` uses this path with ``expose_value=False`` so a
+        commissioning probe can validate the installed helper and canonical
+        Keychain record without returning secret material to its caller.
+        """
+
         if self._platform_system() != "Darwin":
             raise CredentialPlatformError("macOS Keychain provider requires Darwin")
         if self._euid_reader() != self._config.expected_uid:
@@ -243,10 +255,24 @@ class MacOSKeychainHexSecretProvider:
                 raise CredentialOutputError("credential command output exceeded limit")
             if type(result.returncode) is not int or result.returncode != 0:
                 raise CredentialNotFoundError("Keychain credential is unavailable")
-            return self._decode(result.stdout)
+            if expose_value:
+                return self._decode(result.stdout)
+            self._validate_encoded(result.stdout)
+            return None
         finally:
             _zero(result.stdout)
             _zero(result.stderr)
+
+    def load_secret(self) -> bytes:
+        value = self._read(expose_value=True)
+        if not isinstance(value, bytes):  # pragma: no cover - internal contract
+            raise CredentialOutputError("Keychain credential returned invalid output")
+        return value
+
+    def check_available(self) -> None:
+        """Validate availability without returning the credential value."""
+
+        self._read(expose_value=False)
 
 
 __all__ = (

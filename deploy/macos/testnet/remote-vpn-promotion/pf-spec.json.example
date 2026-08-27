@@ -1,0 +1,12 @@
+{
+  "anchor_name": "com.jawndiego.trading-desk-testnet-executor",
+  "base_route_expectation_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+  "executor_uid": 451,
+  "resolver_uid": 65,
+  "mac_tunnel_interface": "utun9",
+  "mac_tunnel_ipv4": "10.77.0.2",
+  "mode": "testnet_remote_vpn_exit",
+  "remote_egress_bundle_manifest_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "schema_version": 1,
+  "tunnel_dns_ipv4": "1.1.1.1"
+}

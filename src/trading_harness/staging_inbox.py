@@ -58,6 +58,7 @@ _STAGING_WRITE_HEADROOM_BYTES = 8 * 1024 * 1024
 _MAX_LIST_LIMIT = 1_000
 _MAX_TTL = timedelta(days=1)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_STAGING_DOCUMENT_ID_RE = re.compile(r"^stg_[0-9a-f]{64}$")
 _BLOCK_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,95}$")
 
 _REQUEST_HASH_DOMAIN = "trading-harness/staging-request/v1"
@@ -1709,6 +1710,62 @@ class TradeStagingInbox:
                         break
             self._verify_integrity(connection)
             return tuple(views)
+
+    def list_staged_documents_rotating(
+        self,
+        *,
+        after_document_id: str | None,
+        limit: int = 100,
+    ) -> tuple[StagingView, ...]:
+        """Return one cyclic ID-ordered page of currently active stages."""
+
+        if after_document_id is not None and (
+            not isinstance(after_document_id, str)
+            or _STAGING_DOCUMENT_ID_RE.fullmatch(after_document_id) is None
+        ):
+            raise StagingValidationError("staging page cursor is invalid")
+        if type(limit) is not int or not 1 <= limit <= _MAX_LIST_LIMIT:
+            raise StagingValidationError(
+                f"limit must be an integer from 1 through {_MAX_LIST_LIMIT}"
+            )
+        with self._transaction() as connection:
+            self._verify_integrity(connection)
+            now = self._now()
+            self._expire_due(connection, at=now)
+            now_text = _time_text(now, field_name="staging page time")
+
+            def page(operator: str, cursor: str, count: int) -> list[sqlite3.Row]:
+                return connection.execute(
+                    f"""
+                    SELECT d.* FROM staging_documents AS d
+                    LEFT JOIN staging_events AS e
+                      ON e.document_id = d.document_id
+                     AND e.event_type = 'document_expired'
+                    WHERE d.decision = 'staged'
+                      AND d.expires_at > ?
+                      AND e.sequence IS NULL
+                      AND d.document_id {operator} ?
+                    ORDER BY d.document_id
+                    LIMIT ?
+                    """,
+                    (now_text, cursor, count),
+                ).fetchall()
+
+            rows = page(
+                ">",
+                "" if after_document_id is None else after_document_id,
+                limit,
+            )
+            if after_document_id is not None and len(rows) < limit:
+                rows.extend(page("<=", after_document_id, limit - len(rows)))
+            views = tuple(
+                self._view(connection, self._document_from_row(row))
+                for row in rows
+            )
+            if any(view.state is not StagingState.STAGED for view in views):
+                raise StagingStorageError("staging page returned a non-active document")
+            self._verify_integrity(connection)
+            return views
 
     def list_events(
         self, *, after_sequence: int = 0, limit: int = 100

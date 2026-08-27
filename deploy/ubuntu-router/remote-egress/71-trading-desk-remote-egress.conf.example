@@ -1,0 +1,2 @@
+# Required by the fixed WireGuard fwmark policy-routing contract.
+net.ipv4.conf.all.src_valid_mark = 1

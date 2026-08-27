@@ -42,6 +42,9 @@ from .testnet_chat_broker import TestnetChatBrokerSession
 
 TESTNET_CHAT_PRESENTATION_CONTROL_UID = 452
 TESTNET_CHAT_PRESENTATION_RESEARCH_UID = 450
+TESTNET_CHAT_PRESENTATION_ROOT = Path(
+    "/private/var/db/trading-desk-testnet-chat-presentations"
+)
 TESTNET_CHAT_PRESENTATION_HASH_DOMAIN = (
     "trading-harness/testnet-chat-proposal-presentation/v1"
 )
@@ -1025,6 +1028,7 @@ __all__ = (
     "TestnetChatProposalPresentation",
     "TestnetChatProposalPresentationPublisher",
     "TestnetChatProposalPresentationReader",
+    "TESTNET_CHAT_PRESENTATION_ROOT",
     "build_testnet_chat_proposal_presentation",
     "testnet_chat_proposal_presentation_from_dict",
     "testnet_chat_presentation_output_schema",

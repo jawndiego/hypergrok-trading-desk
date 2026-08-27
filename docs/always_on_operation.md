@@ -172,9 +172,9 @@ rendered bundle manifest with the deployment record.
 full-tunnel path and default-drop VM forwarding, but exits through the same
 home/office connection. It does not change the public IP, stop macOS host
 bypass or supply a remote VPN peer. The application now has a
-default-unavailable, short-lived two-sample route gate before normal entry
-preparation and final submission authority, but no trusted collector or durable
-expectation/command binding is installed.
+short-lived local/remote route gates before normal entry preparation and final
+submission authority. The remote collector, helpers and durable authority
+binding are implemented, but their expectation/PF/VM artifacts are not installed.
 Reader completion is re-timed and must leave the full two-second PRE_SEND
 window. A transient preparation denial can only requeue the same active
 proven-unsent command; pre-preview maintenance normalizes expired claims and

@@ -65,8 +65,8 @@ class NativeKeychainProvisionerContractTests(unittest.TestCase):
             '"sacrificial-probe-control-v1"',
             'trading-keychain-reader-executor-v1',
             'trading-keychain-reader-control-v1',
-            'EXECUTOR_SHA256 "42e583ee40d48546a92bf40bf650fa576ec3d86455bf663cc3760b90d050df27"',
-            'CONTROL_SHA256 "da10752940f726258f4e2439b657db0c2f3fefcb3c30ef6a1eaa69df3da8e194"',
+            'EXECUTOR_SHA256 "8694d14a94ee00a2ac039b7d5cd26c4184e13840aabe1cac2b0d084a629e0ff7"',
+            'CONTROL_SHA256 "2ce4ba34366b67b0280302e042ffae67547cb39924353c62f88f5782b9dc52e9"',
             "SecTrustedApplicationCreateFromPath",
             "SecAccessCreate",
             "SecKeychainItemCreateFromContent",
@@ -94,6 +94,7 @@ class NativeKeychainProvisionerContractTests(unittest.TestCase):
             "tcgetpgrp(STDIN_FILENO) != getpgrp()",
             "fcntl(descriptor, F_GETFD)",
             "errSecDuplicateItem",
+            "errno != ENOENT || lstat(path, &value) != 0",
         ):
             self.assertIn(required, text)
 
@@ -124,10 +125,10 @@ class NativeKeychainProvisionerContractTests(unittest.TestCase):
         self.assertIn("--build-development is explicitly untrusted", result.stdout)
         text = BUILD.read_text(encoding="utf-8")
         expected_source_hash = (
-            "7c874a6ac231ab72012337550b17359ed75d875cf500e91c21c0758986b51d26"
+            "fc102c93fe21ce8d32236ad28d558b952521dcd4870d42fe0c1734fe7562d089"
         )
         expected_artifact_hash = (
-            "8ecaad4c2fb3f2e9d84b4e535177fa41a9a84310e4495588575082de40cd28de"
+            "3a834ab130bd89525ad386b186f8c86d5fd744d7aa5e9fc2a31572f125dfbcb3"
         )
         self.assertEqual(expected_source_hash, hashlib.sha256(SOURCE.read_bytes()).hexdigest())
         self.assertIn(f"EXPECTED_SOURCE_SHA256={expected_source_hash}", text)
@@ -149,6 +150,41 @@ class NativeKeychainProvisionerContractTests(unittest.TestCase):
             "release artifact digest differs from authoritative pin",
         ):
             self.assertIn(required, text)
+
+    def test_failure_reporting_is_fixed_redacted_and_stage_specific(self) -> None:
+        text = SOURCE.read_text(encoding="utf-8")
+        for stage in (
+            "arguments",
+            "setrlimit",
+            "mlock",
+            "identity",
+            "environment",
+            "terminal",
+            "self_path_resolution",
+            "self_file_type",
+            "self_file_owner",
+            "self_file_mode",
+            "self_file_link",
+            "self_file_acl",
+            "self_directory_chain",
+            "self_static_code",
+            "system_keychain_metadata",
+            "reader",
+            "secret_input",
+            "random_generation",
+            "interaction_disable",
+            "keychain_open",
+            "item_create",
+        ):
+            self.assertIn(f'"failure_stage={stage}\\n"', text)
+        for forbidden in (
+            "fprintf(",
+            "strerror(",
+            "SecCopyErrorMessageString",
+            "failure_status=",
+            "failure_path=",
+        ):
+            self.assertNotIn(forbidden, text)
 
     @unittest.skipUnless(platform.system() == "Darwin", "release rejection requires macOS")
     def test_release_rejects_symlinked_builder_and_sibling_source_substitution(self) -> None:
@@ -224,7 +260,7 @@ class NativeKeychainProvisionerContractTests(unittest.TestCase):
             artifact = artifacts[0]
             self.assertTrue(artifact.is_file())
             self.assertEqual(
-                "8ecaad4c2fb3f2e9d84b4e535177fa41a9a84310e4495588575082de40cd28de",
+                "3a834ab130bd89525ad386b186f8c86d5fd744d7aa5e9fc2a31572f125dfbcb3",
                 hashlib.sha256(artifact.read_bytes()).hexdigest(),
             )
             self.assertEqual(artifact.read_bytes(), artifacts[1].read_bytes())
@@ -304,9 +340,9 @@ class NativeKeychainProvisionerContractTests(unittest.TestCase):
             )
             expected_reader_hashes = {
                 "trading-keychain-reader-executor-v1":
-                    "42e583ee40d48546a92bf40bf650fa576ec3d86455bf663cc3760b90d050df27",
+                    "8694d14a94ee00a2ac039b7d5cd26c4184e13840aabe1cac2b0d084a629e0ff7",
                 "trading-keychain-reader-control-v1":
-                    "da10752940f726258f4e2439b657db0c2f3fefcb3c30ef6a1eaa69df3da8e194",
+                    "2ce4ba34366b67b0280302e042ffae67547cb39924353c62f88f5782b9dc52e9",
             }
             for name, expected_hash in expected_reader_hashes.items():
                 reader_bytes = reader_output.joinpath(name).read_bytes()

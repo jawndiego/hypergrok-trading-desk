@@ -3,9 +3,10 @@
 The resulting :class:`ToolService` still exposes no approval, execution-store,
 credential, signer, nonce, dispatcher, or venue-write method.  This factory
 only installs the exact risk policy, signed (but non-authoritative) grant scope,
-complete daily-loss ledger, public account reader, immutable staging inbox,
-and learning ledger required for ``stage_trade_candidate`` to return a real
-non-authoritative TESTNET ticket instead of a configuration blocker.
+complete daily-loss ledger, fixed UID-450 collector projection, immutable
+staging inbox, proposal-presentation reader, and learning ledger required for
+``stage_trade_candidate`` to return a real non-authoritative TESTNET ticket
+instead of a configuration blocker.
 The agent process never receives the symmetric grant key; MAC authentication
 is deferred to the attended control plane before admission.
 """
@@ -24,7 +25,6 @@ from .executor_service import (
     _validate_state_database_layout,
     _verify_state_database_binding,
 )
-from .hyperliquid_account import HyperliquidAccountSnapshot
 from .learning_bridge import LearningRecorder
 from .learning_ledger import LearningLedger
 from .learning_quote_service import InfrastructureLearningQuoteService
@@ -32,13 +32,15 @@ from .planning import RiskSizingPolicy
 from .research_api import ResearchService
 from .research_store import ResearchStore
 from .staging_inbox import TradeStagingInbox
+from .testnet_chat_live_issuance import TestnetChatAccountQuoteProjectionReader
+from .testnet_chat_presentation import (
+    TESTNET_CHAT_PRESENTATION_ROOT,
+    TestnetChatProposalPresentationReader,
+)
 from .tool_api import ToolService
 
 
 Clock = Callable[[], datetime]
-AccountReader = Callable[[str, str], HyperliquidAccountSnapshot]
-
-
 def _clock() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -101,7 +103,6 @@ def build_testnet_learning_tool_service(
     research_database: str | Path,
     signed_grant: SignedInfrastructureGrant,
     clock: Clock = _clock,
-    account_reader: AccountReader | None = None,
     policy: RiskSizingPolicy = RiskSizingPolicy(),
 ) -> ToolService:
     """Build the configured non-authoritative Codex/OpenCode tool surface."""
@@ -114,8 +115,6 @@ def build_testnet_learning_tool_service(
         raise TypeError("policy must be RiskSizingPolicy")
     if not callable(clock):
         raise TypeError("clock must be callable")
-    if account_reader is not None and not callable(account_reader):
-        raise TypeError("account_reader must be callable or None")
     try:
         now = clock()
     except Exception as error:
@@ -148,12 +147,16 @@ def build_testnet_learning_tool_service(
         clock=clock,
         learning_recorder=recorder,
     )
+    account_risk_reader = TestnetChatAccountQuoteProjectionReader(config)
+    presentation_reader = TestnetChatProposalPresentationReader(
+        TESTNET_CHAT_PRESENTATION_ROOT / config.config_hash
+    )
     quote = InfrastructureLearningQuoteService(
         research_store,
         config=config,
         policy=policy,
         grant=signed_grant,
-        account_reader=account_reader,
+        account_risk_reader=account_risk_reader,
         clock=clock,
     )
     staging = TradeStagingInbox(
@@ -179,6 +182,7 @@ def build_testnet_learning_tool_service(
         learning_ledger_path=config.paths.learning_database,
         learning_ledger=learning,
         learning_quote_configured=True,
+        testnet_chat_presentation_reader=presentation_reader,
     )
 
 

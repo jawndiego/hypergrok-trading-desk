@@ -87,6 +87,15 @@ class KeychainHexSecretTests(unittest.TestCase):
         for sensitive in (SERVICE, ACCOUNT, SECRET):
             self.assertNotIn(sensitive, rendered)
 
+    def test_availability_check_validates_and_zeroes_without_returning_secret(self) -> None:
+        result = BoundedCommandResult(0, bytearray(SECRET.encode()), bytearray())
+        selected, runner = provider(result)
+
+        self.assertIsNone(selected.check_available())
+
+        self.assertEqual(1, len(runner.calls))
+        self.assertTrue(all(value == 0 for value in result.stdout))
+
     def test_system_keychain_is_config_bound_but_never_caller_selected_in_argv(self) -> None:
         result = BoundedCommandResult(
             0, bytearray(SECRET.encode()), bytearray()

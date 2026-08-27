@@ -256,6 +256,37 @@ class PublisherCase(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertEqual(1, len(self.acl_set_calls))
 
+    def test_expired_ready_marker_is_retired_but_handoff_audit_remains(self) -> None:
+        publication = self.publisher.publish(self.handoff)
+        artifact = Path(publication.artifact_path)
+        marker = Path(publication.ready_marker_path)
+
+        self.assertEqual(
+            (),
+            self.publisher.retire_expired_ready_markers(
+                at=self.handoff.proposal.expires_at - timedelta(microseconds=1)
+            ),
+        )
+        self.assertTrue(marker.exists())
+        self.assertEqual(
+            (self.handoff.handoff_id,),
+            self.publisher.retire_expired_ready_markers(
+                at=self.handoff.proposal.expires_at
+            ),
+        )
+        self.assertFalse(marker.exists())
+        self.assertTrue(artifact.exists())
+        self.assertEqual(
+            canonical_json(self.handoff.as_dict()).encode("utf-8"),
+            artifact.read_bytes(),
+        )
+        self.assertEqual(
+            (),
+            self.publisher.retire_expired_ready_markers(
+                at=self.handoff.proposal.expires_at + timedelta(seconds=1)
+            ),
+        )
+
     def test_two_concurrent_exact_publications_reconcile_one_inode(self) -> None:
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = tuple(

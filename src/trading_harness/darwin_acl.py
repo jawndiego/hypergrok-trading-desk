@@ -22,7 +22,9 @@ from .errors import ValidationError
 _ACL_TYPE_EXTENDED = 0x00000100
 _MAX_ACL_TEXT_BYTES = 16 * 1024
 _ACL_LINE_RE = re.compile(r"[!-~]{1,1024}", re.ASCII)
-_EXACT_RIGHTS = frozenset({"execute", "read", "read,execute"})
+_EXACT_RIGHTS = frozenset(
+    {"execute", "read", "read,execute", "read,write,readattr"}
+)
 
 
 def _path_signature(metadata: os.stat_result) -> tuple[int, ...]:
@@ -79,7 +81,7 @@ def expected_darwin_user_acl(uid: int, *, right: str) -> tuple[str, ...]:
     if type(uid) is not int or uid < 0:
         raise ValueError("UID must be a nonnegative integer")
     if right not in _EXACT_RIGHTS:
-        raise ValueError("ACL right must be exact execute, read, or read,execute")
+        raise ValueError("ACL right is outside the exact reviewed set")
     entry = pwd.getpwuid(uid)
     if entry.pw_uid != uid:
         raise ValidationError("ACL account UID differs")

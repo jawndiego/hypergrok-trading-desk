@@ -142,8 +142,8 @@ class AtomicFirstInstallContractTests(unittest.TestCase):
         verify = shell_function(text, "verify_installed_keychain_helper")
         apply = shell_function(text, "apply_install")
         for required in (
-            "EXPECTED_EXECUTOR_KEYCHAIN_HELPER_SHA256=42e583ee40d48546a92bf40bf650fa576ec3d86455bf663cc3760b90d050df27",
-            "EXPECTED_CONTROL_KEYCHAIN_HELPER_SHA256=da10752940f726258f4e2439b657db0c2f3fefcb3c30ef6a1eaa69df3da8e194",
+            "EXPECTED_EXECUTOR_KEYCHAIN_HELPER_SHA256=8694d14a94ee00a2ac039b7d5cd26c4184e13840aabe1cac2b0d084a629e0ff7",
+            "EXPECTED_CONTROL_KEYCHAIN_HELPER_SHA256=2ce4ba34366b67b0280302e042ffae67547cb39924353c62f88f5782b9dc52e9",
             "LIBEXEC_PARENT=$TRADING_ROOT/libexec",
             "ROLE_HELPER_RELEASE_REBIND_REQUIRED=0",
         ):

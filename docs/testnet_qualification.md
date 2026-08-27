@@ -1,15 +1,17 @@
 # Hyperliquid testnet qualification
 
-Status: **offline capital core, credential-free signer-envelope, pinned SDK
-0.24.0 signer/independent recovery verifier, dormant one-shot sender,
+Status: **capital core, credential-free signer-envelope, pinned SDK
+0.24.0 signer/independent recovery verifier, remote-VPN-bound one-shot sender,
 advisory WebSocket decoder/local response-drop harness and schema-v12
 result/workflow persistence plus a role-bound full-lifecycle direct-terminal
-orchestration surface implemented; submission promotion, commissioning and live
-adapter gaps remain; live venue qualification not run**.
+orchestration surface implemented; source submission gates promoted;
+machine/VPN/credential commissioning and live adapter gaps remain; live venue
+qualification not run**.
 
 The ordinary isolated TESTNET executor contains a real write boundary. The
-qualification worker is complete but its submission authority is compiled
-off. No account, API wallet or worker service is configured by the repository,
+qualification worker is complete and its TESTNET submission authority is bound
+to fresh fixed-cache remote-WireGuard/PF evidence before authority and again
+before HTTP. No account, API wallet or worker service is installed,
 and no installed Codex/MCP tool can invoke either capital path.
 
 This checklist is a release gate, not a setup shortcut. Unit tests, local paper
@@ -154,14 +156,14 @@ independently reconstructed EIP-712 recovery verifier are golden-tested for all
 three action shapes and use the schema-v2 global nonce authority. The separate
 `trading-harness-qualification` CLI exposes fixed control-UID
 collect/verify/fresh attended authorization and executor-UID
-status/recover/reconciliation phases. Its `run` command checks the compiled-off
-submission gate before config, state, Keychain or network access; split
+status/recover/reconciliation phases. Its `run` command checks both literal
+TESTNET/VPN gates before config, state, Keychain or network access; split
 prepare/sign commands are not public. The dormant worker composes the full
 bounded place, paired-query, cancel and terminal reconciliation lifecycle. The
 following promotion, live integrations and observable tests remain:
 
-- promotion and attended exercise of the implemented full `run` lifecycle;
-  until then its compiled gate makes it operator-inaccessible;
+- attended exercise of the implemented full `run` lifecycle after fixed
+  remote-VPN expectation/evidence installation and leak qualification;
 - attended live exercise of the implemented one-successor cancel path. An
   expired proven-unsent cancel retains reservation; only a newly attended,
   read-proven-open same-CLOID action with a durable issued-to-consumed permit,
@@ -183,19 +185,20 @@ following promotion, live integrations and observable tests remain:
 - attended fault injection that forwards one real exact request while dropping
   its response; the bounded loopback accept/drop/crash/no-resend harness passes
   offline but is not evidence of a live forwarded request;
-- installation and live qualification of the implemented default-unavailable
-  two-sample route-health gate. Its trusted collector, durable expectation and
-  preflight/attempt binding, final-path PF enforcement and remote VPN exit are
-  still absent. Offline code now rejects reader rollback/expiry, requires two
-  seconds of final headroom, defers only active proven-unsent route failures and
-  releases queued risk at the earliest ticket/leg expiry;
+- installation and live qualification of the implemented local/remote
+  two-sample route-health caches, remote `wg-egress` overlay and UID-451/UID-65 PF
+  anchor. Qualification and normal authorities now bind the exact remote
+  expectation/evidence/expiry and recheck after authority. Provider values,
+  fixed observation helpers/collector/install path are implemented; provider
+  values, artifact/helper installation, PF/VM apply and live leak tests remain;
 - installed and empirically qualified free-space shutdown guards plus a
   deterministic qualification artifact builder/signing workflow.
 
 The ordinary always-on signer still accepts only the mandatory three-leg
 `normalTpsl` group with IOC entry. The separate qualification
-envelope/recovery-verifier and full worker remain compiled-off offline
-contracts, and runtime monitoring is REST polling.
+envelope/recovery-verifier and full worker are TESTNET-only promoted contracts;
+missing fixed VPN evidence fails before authority, and runtime monitoring is
+REST polling.
 Machine setup and credentials alone therefore do not make the
 first harness order write responsible. API-wallet `approveAgent` registration
 is a separate attended out-of-band account-provisioning write, not harness

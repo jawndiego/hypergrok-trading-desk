@@ -859,11 +859,30 @@ class CancelReauthorizationStore:
         )
         if not isinstance(payload, dict):
             raise StorageError("cancel reauthorization submission authority is invalid")
+        try:
+            route_mode = payload["route_mode"]
+            if route_mode != "testnet_remote_vpn_exit":
+                raise ValidationError("route mode differs")
+            route_expectation_hash = store_module._hash(
+                payload["route_expectation_hash"],
+                "route_expectation_hash",
+            )
+            route_evidence_hash = store_module._hash(
+                payload["route_evidence_hash"],
+                "route_evidence_hash",
+            )
+            route_expires_at_ms = payload["route_expires_at_ms"]
+            if type(route_expires_at_ms) is not int or route_expires_at_ms < 0:
+                raise ValidationError("route expiry differs")
+        except (KeyError, TypeError, ValidationError) as error:
+            raise StorageError(
+                "cancel reauthorization route binding is invalid"
+            ) from error
         authority_hash = domain_hash(
-            "trading-harness/qualification-submission-authority/v1", payload
+            "trading-harness/qualification-submission-authority/v2", payload
         )
         expected = {
-            "schema_version": "testnet_qualification_submission_authority.v1",
+            "schema_version": "testnet_qualification_submission_authority.v2",
             "command_id": attempt.reauthorization_id,
             "phase": "cancel",
             "attempt_id": attempt.attempt_id,
@@ -877,6 +896,10 @@ class CancelReauthorizationStore:
             "lease_expires_at": row["lease_expires_at"],
             "pre_send_attestation_hash": row["pre_send_attestation_hash"],
             "pre_send_expires_at_ms": int(row["pre_send_expires_at_ms"]),
+            "route_mode": route_mode,
+            "route_expectation_hash": route_expectation_hash,
+            "route_evidence_hash": route_evidence_hash,
+            "route_expires_at_ms": route_expires_at_ms,
             "environment": "testnet",
         }
         if (
@@ -987,6 +1010,10 @@ class CancelReauthorizationStore:
                 row["pre_send_attestation_hash"]
             ),
             pre_send_expires_at_ms=int(row["pre_send_expires_at_ms"]),
+            route_mode=route_mode,
+            route_expectation_hash=route_expectation_hash,
+            route_evidence_hash=route_evidence_hash,
+            route_expires_at_ms=route_expires_at_ms,
             authority_hash=authority_hash,
         )
         result.verify_integrity()
@@ -2411,6 +2438,10 @@ class CancelReauthorizationStore:
         signed_evidence_hash: str,
         worker_id: str,
         fencing_token: int,
+        route_mode: str,
+        route_expectation_hash: str,
+        route_evidence_hash: str,
+        route_expires_at_ms: int,
         at: datetime,
     ) -> QualificationSubmissionAuthority:
         """Validate the complete successor boundary, then honor the hard gate."""
@@ -2421,7 +2452,21 @@ class CancelReauthorizationStore:
             signed_evidence_hash, "signed_evidence_hash"
         )
         worker = store_module._identifier(worker_id, "worker_id")
+        if route_mode != "testnet_remote_vpn_exit":
+            raise ValidationError("qualification route mode is not remote TESTNET VPN")
+        checked_route_expectation = store_module._hash(
+            route_expectation_hash,
+            "route_expectation_hash",
+        )
+        checked_route_evidence = store_module._hash(
+            route_evidence_hash,
+            "route_evidence_hash",
+        )
+        if type(route_expires_at_ms) is not int or route_expires_at_ms < 0:
+            raise ValidationError("route_expires_at_ms must be nonnegative")
         checked_at = store_module._utc(at, "at")
+        if route_expires_at_ms <= store_module._milliseconds(checked_at):
+            raise StateConflict("qualification remote VPN evidence expired")
         with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
             row = connection.execute(
                 """
@@ -2527,7 +2572,7 @@ class CancelReauthorizationStore:
             if not store_module.QUALIFICATION_SUBMISSION_ENABLED:
                 raise StateConflict("qualification submission is compiled off")
             payload = {
-                "schema_version": "testnet_qualification_submission_authority.v1",
+                "schema_version": "testnet_qualification_submission_authority.v2",
                 "command_id": checked,
                 "phase": "cancel",
                 "attempt_id": checked_attempt,
@@ -2541,10 +2586,14 @@ class CancelReauthorizationStore:
                 "lease_expires_at": store_module._time(current.lease_expires_at),
                 "pre_send_attestation_hash": pre_send.attestation_hash,
                 "pre_send_expires_at_ms": pre_send.expires_at_ms,
+                "route_mode": route_mode,
+                "route_expectation_hash": checked_route_expectation,
+                "route_evidence_hash": checked_route_evidence,
+                "route_expires_at_ms": route_expires_at_ms,
                 "environment": "testnet",
             }
             authority_hash = domain_hash(
-                "trading-harness/qualification-submission-authority/v1", payload
+                "trading-harness/qualification-submission-authority/v2", payload
             )
             payload_json, content_hash = store_module._payload(payload)
             connection.execute(
@@ -2636,6 +2685,10 @@ class CancelReauthorizationStore:
                 lease_expires_at=current.lease_expires_at,
                 pre_send_attestation_hash=pre_send.attestation_hash,
                 pre_send_expires_at_ms=pre_send.expires_at_ms,
+                route_mode=route_mode,
+                route_expectation_hash=checked_route_expectation,
+                route_evidence_hash=checked_route_evidence,
+                route_expires_at_ms=route_expires_at_ms,
                 authority_hash=authority_hash,
             )
             result.verify_integrity()

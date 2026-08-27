@@ -55,6 +55,7 @@ from tests.test_account_risk import flat_clearing
 from tests.test_execution_store import (
     NOW,
     digest,
+    entry_route_binding,
     make_approval,
     make_infrastructure_grant,
     make_ticket,
@@ -511,6 +512,7 @@ class RecoveryCoordinatorTests(unittest.TestCase):
             "dispatcher",
             claim.fencing_token,
             pre_send_role_attestation_hash=pre_send_role.attestation_hash,
+            **entry_route_binding(),
             at=NOW + timedelta(seconds=2, milliseconds=200),
         )
         unknown = TransportOutcomeEvidence(
