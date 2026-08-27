@@ -327,9 +327,49 @@ the sender fails before authority if that deadline mechanism is unavailable or
 an existing alarm/timer would be displaced.
 Every failure after authority is unknown; an uncommitted process/store failure
 is recovered only by point-of-no-return crash normalization and cannot resend.
-A direct-`/dev/tty` executor CLI must be reviewed before the
-first live canary. No verifier may be selected by caller, config or MCP, and no
-qualification action may become an MCP tool.
+The reviewed direct-terminal surface is a separate
+`trading-harness-qualification` entry point, never MCP or a skill. Control UID
+452 owns credential-free collection/verification plus fresh same-process
+action derivation and exact `/dev/tty` approval-HMAC authorization. Executor
+UID 451 owns status, explicit crash normalization and REST reconciliation.
+Public split prepare/sign commands are compiled out. `run` is a pre-started,
+per-invocation-identity worker contract with a qualification-specific 100 ms
+queue poll (never the general executor's configurable poll), but submission remains compiled off
+and its current one-phase shape is not a complete live GTC/query/cancel
+lifecycle. It must fail before config, state, Keychain or network access until
+that promotion is separately reviewed. No verifier may be selected by caller,
+config or MCP, and no qualification action may become an MCP tool.
+
+The full signed wire is retained before schema-v11 digest preparation only as
+a bearer-sensitive, create-only artifact under the executor-only nonce parent.
+It contains no private key and no harness durable submission authority, but it
+is externally relayable and therefore receives no weaker protection than the
+signer lane: exact owner/mode, no named ACL, `F_FULLFSYNC` on each pending/final
+file and parent, exclusive no-replace publication, and a separately published
+completion receipt. Restart re-establishes durability before accepting any
+pending/final/receipt crash state. A committed nonce without a receipt-complete
+artifact halts proven-unsent before another Keychain read. Expired queued work
+also halts atomically; an unsent place releases reservation while an unsent
+cancel retains it because the venue order may remain live.
+No fresh same-CLOID cancel reauthorization exists yet; that halted state is a
+hard live blocker until read-proven-open evidence can mint new bounded attended
+cancel authority without treating it as a retry.
+Because Hyperliquid's agent-signed wire does not encode the main account, live
+promotion also requires a fresh stable `userRole(api_wallet)` mapping to the
+configured main account after claim and immediately before key use/send, with
+that causal read bound into attempt evidence. Admission-time role evidence is
+insufficient by itself.
+
+Reconciliation is restart-idempotent rather than order-status retrying: an
+existing query row and its hash-bound retained snapshot are hydrated from
+schema-v11 state. Paired CLOID/OID advancement and creation of a required
+cancel step commit in one transaction, so no durable `OPEN_VERIFIED` state can
+exist without the cancel already queued. A crash after terminal-query
+persistence keeps that order evidence immutable. If its account fence becomes
+stale before finish, only the fence may atomically rebind to a strictly newer
+same-account snapshot whose server watermark covers the original status; the
+`orderStatus` request is never repeated. Advisory WebSocket observations never
+advance these authoritative transitions.
 
 The credential-free qualification WebSocket contract uses only the official
 TESTNET `wss://api.hyperliquid-testnet.xyz/ws` endpoint and the documented

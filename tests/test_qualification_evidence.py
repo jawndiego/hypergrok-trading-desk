@@ -22,6 +22,7 @@ from trading_harness.qualification_evidence import (
     QualificationEvidenceTransportError,
     collect_testnet_qualification_evidence,
     export_qualification_evidence_review_artifact,
+    qualification_evidence_review_artifact_from_dict,
     verify_exported_qualification_evidence_review_artifact,
     verify_qualification_evidence_review_artifact,
 )
@@ -243,6 +244,30 @@ class QualificationEvidenceCollectionTests(unittest.TestCase):
         self.assertFalse(value["credential_loaded"])
         self.assertFalse(value["venue_write_attempted"])
         self.assertEqual(collect().artifact_hash, artifact.artifact_hash)
+
+    def test_typed_loader_canonically_detaches_hostile_mapping_once(self) -> None:
+        fresh = collect().as_dict()
+        stale = deepcopy(fresh)
+        stale["collected_at_ms"] = SERVER_TIME_MS - 60_000
+
+        class SwappingMapping(dict):
+            def __init__(self) -> None:
+                super().__init__(fresh)
+                self.item_reads = 0
+
+            def items(self):  # type: ignore[override]
+                self.item_reads += 1
+                selected = fresh if self.item_reads == 1 else stale
+                return selected.items()
+
+        hostile = SwappingMapping()
+        loaded = qualification_evidence_review_artifact_from_dict(
+            hostile,
+            at=moment(SERVER_TIME_MS + 700),
+        )
+
+        self.assertEqual(hostile.item_reads, 1)
+        self.assertEqual(loaded.as_dict(), fresh)
 
     def test_collector_signature_has_no_network_endpoint_or_default_transport(self) -> None:
         signature = inspect.signature(collect_testnet_qualification_evidence)

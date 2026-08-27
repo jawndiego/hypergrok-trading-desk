@@ -2,8 +2,9 @@
 """Render and verify a secret-free, plan-only Lima/VZ router VM bundle.
 
 The renderer performs no downloads, package installation, VM lifecycle,
-privilege, key, network, credential, or venue operation. Checked-in version
-pins are immutable; the pending apt-source sentinel keeps installation disabled.
+privilege, key, network, credential, or venue operation. Checked-in version,
+signed-snapshot, dependency-closure and provenance pins are immutable; the
+commission authorization object keeps every apply operation disabled.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE_ROOT = ROOT / "deploy" / "ubuntu-router" / "lima"
 DEFAULT_IMAGE_LOCK = TEMPLATE_ROOT / "image-lock.json"
 DEFAULT_PACKAGE_LOCK = TEMPLATE_ROOT / "package-lock.json"
+DEFAULT_COMMISSION_LOCK = TEMPLATE_ROOT / "commission-lock.json"
 
 PLACEHOLDER_RE = re.compile(r"__[A-Z0-9_]+__")
 INSTANCE_RE = re.compile(r"[a-z][a-z0-9-]{0,30}")
@@ -95,7 +97,13 @@ PACKAGE_LOCK_KEYS = frozenset(
 )
 HOST_TOOL_KEYS = frozenset({"lima", "socket_vmnet"})
 LIMA_TOOL_LOCK_KEYS = frozenset(
-    {"version", "source_url", "sha256", "binary_sha256"}
+    {
+        "version",
+        "source_url",
+        "sha256",
+        "binary_sha256",
+        "attestation_repository",
+    }
 )
 SOCKET_VMNET_TOOL_LOCK_KEYS = frozenset(
     {
@@ -104,10 +112,17 @@ SOCKET_VMNET_TOOL_LOCK_KEYS = frozenset(
         "sha256",
         "binary_sha256",
         "client_binary_sha256",
+        "attestation_repository",
     }
 )
 APT_SOURCE_KEYS = frozenset(
-    {"review_status", "snapshot_url", "signed_by_path", "keyring_sha256"}
+    {
+        "review_status",
+        "snapshot_url",
+        "signed_by_path",
+        "keyring_sha256",
+        "commission_lock_sha256",
+    }
 )
 REQUIRED_GUEST_PACKAGES = frozenset(
     {
@@ -128,11 +143,19 @@ TEMPLATES: dict[str, tuple[str, int]] = {
     "bootstrap-public.sh": ("bootstrap-public.sh", 0o700),
     "host-preflight.sh": ("host-preflight.sh", 0o700),
     "guest-preflight.sh": ("guest-preflight.sh", 0o700),
+    "commission-public.py": ("commission-public.py", 0o700),
 }
 CANONICAL_INPUTS: dict[str, int] = {
     "vm-spec.json": 0o600,
     "image-lock.json": 0o600,
     "package-lock.json": 0o600,
+    "commission-lock.json": 0o600,
+}
+STATIC_PUBLIC_INPUTS: dict[str, int] = {
+    "ubuntu-cloud-image-signing-key.gpg": 0o600,
+    "lima-2.2.0-attestation.jsonl": 0o600,
+    "socket-vmnet-1.2.2-attestation.jsonl": 0o600,
+    "sigstore-trusted-root.jsonl": 0o600,
 }
 
 SECURITY_CLAIMS = {
@@ -301,6 +324,15 @@ def _validate_tool_lock(name: str, value: object) -> dict[str, str]:
             value["binary_sha256"], f"{name} binary SHA-256", SHA256_RE
         ),
     }
+    expected_attestation_repository = (
+        "lima-vm/lima" if name == "lima" else "lima-vm/socket_vmnet"
+    )
+    if value["attestation_repository"] != expected_attestation_repository:
+        raise ValueError(
+            f"{name} artifact attestation repository must be exactly "
+            f"{expected_attestation_repository}"
+        )
+    result["attestation_repository"] = expected_attestation_repository
     if name == "socket_vmnet":
         result["client_binary_sha256"] = _reviewed_string(
             value["client_binary_sha256"],
@@ -312,8 +344,8 @@ def _validate_tool_lock(name: str, value: object) -> dict[str, str]:
 
 def validate_package_lock(lock: dict[str, Any]) -> dict[str, Any]:
     _exact_keys(lock, PACKAGE_LOCK_KEYS, "package lock")
-    if type(lock["schema_version"]) is not int or lock["schema_version"] != 1:
-        raise ValueError("package lock schema_version must be exactly 1")
+    if type(lock["schema_version"]) is not int or lock["schema_version"] != 3:
+        raise ValueError("package lock schema_version must be exactly 3")
     _review_status(
         lock["review_status"],
         "package lock",
@@ -337,51 +369,34 @@ def validate_package_lock(lock: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("apt_install_source must be an object")
     _exact_keys(apt_source, APT_SOURCE_KEYS, "apt_install_source")
     source_status = apt_source["review_status"]
-    if source_status == "review_pending_live_apt_policy":
-        if apt_source["snapshot_url"] != (
-            "https://snapshot.ubuntu.com/ubuntu/20260814T203500Z/"
-        ):
-            raise ValueError("pending apt source must retain the reviewed candidate URL")
-        if apt_source["signed_by_path"] != (
-            "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
-        ):
-            raise ValueError("apt signed-by path differs from the Ubuntu archive keyring")
-        keyring_sha256 = _reviewed_string(
-            apt_source["keyring_sha256"],
-            "apt keyring SHA-256",
-            SHA256_RE,
-        )
-        apt_source = {
-            "review_status": source_status,
-            "snapshot_url": apt_source["snapshot_url"],
-            "signed_by_path": apt_source["signed_by_path"],
-            "keyring_sha256": keyring_sha256,
-        }
-    elif source_status == "verified":
-        snapshot_url, parsed = _https_url(
-            apt_source["snapshot_url"], "apt snapshot URL"
-        )
-        if parsed.hostname.lower() != "snapshot.ubuntu.com":
-            raise ValueError("apt snapshot URL must use a reviewed Ubuntu snapshot host")
-        if not re.fullmatch(r"/ubuntu/[0-9]{8}T[0-9]{6}Z/", parsed.path):
-            raise ValueError("apt snapshot URL must contain one immutable snapshot ID")
-        if apt_source["signed_by_path"] != (
-            "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
-        ):
-            raise ValueError("apt signed-by path differs from the Ubuntu archive keyring")
-        keyring_sha256 = _reviewed_string(
-            apt_source["keyring_sha256"],
-            "apt keyring SHA-256",
-            SHA256_RE,
-        )
-        apt_source = {
-            "review_status": "verified",
-            "snapshot_url": snapshot_url,
-            "signed_by_path": apt_source["signed_by_path"],
-            "keyring_sha256": keyring_sha256,
-        }
-    else:
+    if source_status != (
+        "signed_snapshot_and_dependency_closure_locked_apply_disabled"
+    ):
         raise ValueError("apt install source review status is invalid")
+    if apt_source["snapshot_url"] != (
+        "https://snapshot.ubuntu.com/ubuntu/20260814T203500Z/"
+    ):
+        raise ValueError("pending apt source must retain the reviewed candidate URL")
+    if apt_source["signed_by_path"] != (
+        "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+    ):
+        raise ValueError("apt signed-by path differs from the Ubuntu archive keyring")
+    keyring_sha256 = _reviewed_string(
+        apt_source["keyring_sha256"],
+        "apt keyring SHA-256",
+        SHA256_RE,
+    )
+    apt_source = {
+        "review_status": source_status,
+        "snapshot_url": apt_source["snapshot_url"],
+        "signed_by_path": apt_source["signed_by_path"],
+        "keyring_sha256": keyring_sha256,
+        "commission_lock_sha256": _reviewed_string(
+            apt_source["commission_lock_sha256"],
+            "commission lock SHA-256",
+            SHA256_RE,
+        ),
+    }
 
     packages = lock["ubuntu_packages"]
     if not isinstance(packages, dict) or not all(
@@ -417,6 +432,179 @@ def validate_package_lock(lock: dict[str, Any]) -> dict[str, Any]:
         "running_kernel_release": running_kernel,
         "ubuntu_packages": validated_packages,
     }
+
+
+def validate_commission_lock(
+    lock: dict[str, Any],
+    image_lock: dict[str, Any],
+    package_lock: dict[str, Any],
+) -> dict[str, Any]:
+    _exact_keys(
+        lock,
+        frozenset(
+            {
+                "architecture",
+                "authorization",
+                "cloud_image",
+                "host_attestation",
+                "install_transaction",
+                "review_status",
+                "schema_version",
+                "snapshot",
+            }
+        ),
+        "commission lock",
+    )
+    if type(lock["schema_version"]) is not int or lock["schema_version"] != 1:
+        raise ValueError("commission lock schema_version must be exactly 1")
+    if lock["review_status"] != (
+        "signed_snapshot_and_dependency_closure_locked_apply_disabled"
+    ):
+        raise ValueError("commission lock review status is invalid")
+    if lock["architecture"] != "arm64":
+        raise ValueError("commission lock architecture must be arm64")
+    expected_authorization = {
+        "apply_enabled": False,
+        "guest_package_install_enabled": False,
+        "host_install_enabled": False,
+        "network_changes_enabled": False,
+        "router_key_generation_enabled": False,
+        "vm_create_enabled": False,
+    }
+    if lock["authorization"] != expected_authorization:
+        raise ValueError("commission lock unexpectedly authorizes mutation")
+
+    cloud = lock["cloud_image"]
+    if not isinstance(cloud, dict):
+        raise ValueError("commission cloud-image lock must be an object")
+    for key in (
+        "image_sha256",
+        "manifest_sha256",
+        "sha256sums_sha256",
+        "sha256sums_signature_sha256",
+        "signing_key_sha256",
+    ):
+        _reviewed_string(cloud.get(key), f"commission cloud {key}", SHA256_RE)
+    if (
+        cloud.get("base_url")
+        != "https://cloud-images.ubuntu.com/releases/noble/release-20260814/"
+        or cloud.get("image_filename")
+        != "ubuntu-24.04-server-cloudimg-arm64.img"
+        or cloud.get("manifest_filename")
+        != "ubuntu-24.04-server-cloudimg-arm64.manifest"
+        or cloud.get("image_sha256") != image_lock["sha256"]
+        or cloud.get("image_size_bytes") != image_lock["size_bytes"]
+        or cloud.get("signing_key_fingerprint")
+        != "D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81"
+    ):
+        raise ValueError("commission cloud-image lock differs from the image pin")
+
+    snapshot = lock["snapshot"]
+    if not isinstance(snapshot, dict):
+        raise ValueError("commission snapshot lock must be an object")
+    if (
+        snapshot.get("base_url")
+        != "https://snapshot.ubuntu.com/ubuntu/20260814T203500Z/"
+        or snapshot.get("archive_keyring_sha256")
+        != package_lock["apt_install_source"]["keyring_sha256"]
+        or snapshot.get("archive_signing_fingerprint")
+        != "F6ECB3762474EDA9D21B7022871920D1991BC93C"
+        or snapshot.get("components") != ["main"]
+    ):
+        raise ValueError("commission snapshot identity differs from the apt pin")
+    suites = snapshot.get("suites")
+    expected_suites = ["noble", "noble-updates", "noble-security", "noble-backports"]
+    if not isinstance(suites, list) or [item.get("name") for item in suites] != expected_suites:
+        raise ValueError("commission snapshot suite set differs")
+    for suite in suites:
+        if not isinstance(suite, dict):
+            raise ValueError("commission snapshot suite must be an object")
+        for key in ("inrelease_sha256", "packages_sha256"):
+            _reviewed_string(suite.get(key), f"commission suite {key}", SHA256_RE)
+        if suite.get("packages_path") != "main/binary-arm64/Packages.xz":
+            raise ValueError("commission package index path differs")
+        for key in ("inrelease_size_bytes", "packages_size_bytes"):
+            if type(suite.get(key)) is not int or suite[key] <= 0:
+                raise ValueError("commission snapshot size is invalid")
+
+    transaction = lock["install_transaction"]
+    if not isinstance(transaction, dict):
+        raise ValueError("commission transaction lock must be an object")
+    direct = transaction.get("direct_packages")
+    closure = transaction.get("closure_packages")
+    if direct != package_lock["ubuntu_packages"]:
+        raise ValueError("commission direct packages differ from the package lock")
+    if (
+        not isinstance(closure, dict)
+        or transaction.get("closure_package_count") != len(closure)
+        or len(closure) != 116
+        or transaction.get("base_manifest_package_count") != 663
+        or transaction.get("apt_no_install_recommends") is not True
+        or transaction.get("packages_added") != ["wireguard-tools"]
+        or transaction.get("packages_removed") != []
+        or transaction.get("packages_upgraded") != []
+    ):
+        raise ValueError("commission dependency closure policy differs")
+    for name, version in closure.items():
+        if not PACKAGE_NAME_RE.fullmatch(name):
+            raise ValueError("commission closure package name is invalid")
+        _reviewed_string(version, f"commission closure version for {name}", PACKAGE_VERSION_RE)
+    if not set(direct).issubset(closure) or any(
+        closure.get(name) != version for name, version in direct.items()
+    ):
+        raise ValueError("commission direct packages are not bound by the closure")
+    downloads = transaction.get("download_archives")
+    if not isinstance(downloads, list) or len(downloads) != 1:
+        raise ValueError("commission download archive set differs")
+    download = downloads[0]
+    if (
+        not isinstance(download, dict)
+        or download.get("package") != "wireguard-tools"
+        or download.get("version") != package_lock["ubuntu_packages"]["wireguard-tools"]
+        or download.get("architecture") != "arm64"
+        or download.get("repository_path")
+        != "pool/main/w/wireguard/wireguard-tools_1.0.20210914-1ubuntu4_arm64.deb"
+    ):
+        raise ValueError("commission download archive identity differs")
+    _reviewed_string(download.get("sha256"), "commission download SHA-256", SHA256_RE)
+
+    host = lock["host_attestation"]
+    if not isinstance(host, dict):
+        raise ValueError("commission host-attestation lock must be an object")
+    _reviewed_string(
+        host.get("sigstore_trusted_root_sha256"),
+        "Sigstore trusted-root SHA-256",
+        SHA256_RE,
+    )
+    for name in ("lima", "socket_vmnet"):
+        contract = host.get(name)
+        if not isinstance(contract, dict):
+            raise ValueError(f"commission {name} attestation lock must be an object")
+        for key in ("archive_sha256", "attestation_bundle_sha256"):
+            _reviewed_string(contract.get(key), f"commission {name} {key}", SHA256_RE)
+        if contract.get("archive_sha256") != package_lock["host_tools"][name]["sha256"]:
+            raise ValueError(f"commission {name} archive differs from the package lock")
+        if contract.get("repository") != package_lock["host_tools"][name][
+            "attestation_repository"
+        ]:
+            raise ValueError(f"commission {name} attestation repository differs")
+        if contract.get("runner_environment") != "github-hosted":
+            raise ValueError(f"commission {name} runner must be GitHub-hosted")
+    if host["lima"].get("binary_sha256") != package_lock["host_tools"]["lima"][
+        "binary_sha256"
+    ]:
+        raise ValueError("commission limactl binary digest differs")
+    expected_socket_members = {
+        "./opt/socket_vmnet/bin/socket_vmnet": package_lock["host_tools"][
+            "socket_vmnet"
+        ]["binary_sha256"],
+        "./opt/socket_vmnet/bin/socket_vmnet_client": package_lock["host_tools"][
+            "socket_vmnet"
+        ]["client_binary_sha256"],
+    }
+    if host["socket_vmnet"].get("binary_members") != expected_socket_members:
+        raise ValueError("commission socket_vmnet binary digests differ")
+    return lock
 
 
 def _is_rfc1918(address: ipaddress.IPv4Address) -> bool:
@@ -692,6 +880,36 @@ def _replacements(
         "__APT_INSTALL_SOURCE_STATUS__": package_lock["apt_install_source"][
             "review_status"
         ],
+        "__APT_SNAPSHOT_URL__": package_lock["apt_install_source"][
+            "snapshot_url"
+        ],
+        "__APT_SIGNED_BY_PATH__": package_lock["apt_install_source"][
+            "signed_by_path"
+        ],
+        "__APT_KEYRING_SHA256_VALUE__": package_lock["apt_install_source"][
+            "keyring_sha256"
+        ],
+        "__COMMISSION_LOCK_SHA256__": package_lock["apt_install_source"][
+            "commission_lock_sha256"
+        ],
+        "__PINNED_LIMA_SOURCE_URL__": package_lock["host_tools"]["lima"][
+            "source_url"
+        ],
+        "__PINNED_LIMA_ARCHIVE_SHA256__": package_lock["host_tools"]["lima"][
+            "sha256"
+        ],
+        "__PINNED_LIMA_ATTESTATION_REPOSITORY__": package_lock["host_tools"][
+            "lima"
+        ]["attestation_repository"],
+        "__PINNED_SOCKET_VMNET_SOURCE_URL__": package_lock["host_tools"][
+            "socket_vmnet"
+        ]["source_url"],
+        "__PINNED_SOCKET_VMNET_ARCHIVE_SHA256__": package_lock["host_tools"][
+            "socket_vmnet"
+        ]["sha256"],
+        "__PINNED_SOCKET_VMNET_ATTESTATION_REPOSITORY__": package_lock[
+            "host_tools"
+        ]["socket_vmnet"]["attestation_repository"],
         "__LIMA_HOME_PATH_SHELL__": shlex.quote(lima_home["path"]),
         "__DEFAULT_YAML_STATE_SHELL__": shlex.quote(
             lima_home["default_yaml"]["state"]
@@ -739,13 +957,23 @@ def render_bundle(
     image_lock_path: Path,
     package_lock_path: Path,
     output_dir: Path,
+    commission_lock_path: Path = DEFAULT_COMMISSION_LOCK,
 ) -> dict[str, Any]:
     spec_input = _read_json(spec_path, "VM spec")
     image_input = _read_json(image_lock_path, "image lock")
     package_input = _read_json(package_lock_path, "package lock")
+    commission_input = _read_json(commission_lock_path, "commission lock")
     spec = validate_vm_spec(spec_input)
     image_lock = validate_image_lock(image_input)
     package_lock = validate_package_lock(package_input)
+    commission_lock = validate_commission_lock(
+        commission_input, image_lock, package_lock
+    )
+    commission_bytes = _canonical_json(commission_input)
+    if _sha256(commission_bytes) != package_lock["apt_install_source"][
+        "commission_lock_sha256"
+    ]:
+        raise ValueError("commission lock digest differs from the package lock")
 
     if not output_dir.is_absolute():
         raise ValueError("output directory must be absolute")
@@ -774,9 +1002,32 @@ def render_bundle(
         "vm-spec.json": _canonical_json(spec_input),
         "image-lock.json": _canonical_json(image_input),
         "package-lock.json": _canonical_json(package_input),
+        "commission-lock.json": commission_bytes,
     }
     for name, content in canonical_inputs.items():
         rendered[name] = (content, CANONICAL_INPUTS[name])
+    static_expected_hashes = {
+        "ubuntu-cloud-image-signing-key.gpg": commission_lock["cloud_image"][
+            "signing_key_sha256"
+        ],
+        "lima-2.2.0-attestation.jsonl": commission_lock["host_attestation"][
+            "lima"
+        ]["attestation_bundle_sha256"],
+        "socket-vmnet-1.2.2-attestation.jsonl": commission_lock[
+            "host_attestation"
+        ]["socket_vmnet"]["attestation_bundle_sha256"],
+        "sigstore-trusted-root.jsonl": commission_lock["host_attestation"][
+            "sigstore_trusted_root_sha256"
+        ],
+    }
+    for name, mode in STATIC_PUBLIC_INPUTS.items():
+        source = TEMPLATE_ROOT / name
+        if not source.is_file() or source.is_symlink() or source.stat().st_nlink != 1:
+            raise ValueError(f"static public input is missing or unsafe: {name}")
+        content = source.read_bytes()
+        if _sha256(content) != static_expected_hashes[name]:
+            raise ValueError(f"static public input digest differs: {name}")
+        rendered[name] = (content, mode)
 
     try:
         output_dir.mkdir(mode=0o700)
@@ -791,9 +1042,9 @@ def render_bundle(
             "REVIEW_REQUIRED"
         )
         evidence_status = (
-            "awaiting_lima_effective_digest_signed_apt_snapshot_and_vm_guest_preflight"
+            "awaiting_lima_effective_digest_immutable_input_replay_and_vm_guest_preflight"
             if effective_pending
-            else "awaiting_signed_apt_snapshot_and_vm_guest_preflight"
+            else "awaiting_immutable_public_input_replay_and_vm_guest_preflight"
         )
         manifest: dict[str, Any] = {
             "schema_version": 1,
@@ -815,6 +1066,17 @@ def render_bundle(
                 "effective_config_command": "limactl validate --fill",
                 "create_start_authorized": False,
             },
+            "commission_contract": {
+                "commission_lock_sha256": package_lock["apt_install_source"][
+                    "commission_lock_sha256"
+                ],
+                "dependency_closure_package_count": commission_lock[
+                    "install_transaction"
+                ]["closure_package_count"],
+                "immutable_public_inputs_locked": True,
+                "immutable_public_inputs_verified": False,
+                "apply_authorized": False,
+            },
             "network_contract": {
                 "expected_guest_nic_count": 2,
                 "explicit_ingress_interface": spec["ingress_network"][
@@ -835,13 +1097,34 @@ def render_bundle(
                 "apt_install_source_status": package_lock["apt_install_source"][
                     "review_status"
                 ],
+                "apt_snapshot_url": package_lock["apt_install_source"][
+                    "snapshot_url"
+                ],
+                "apt_keyring_sha256": package_lock["apt_install_source"][
+                    "keyring_sha256"
+                ],
+                "commission_lock_sha256": package_lock["apt_install_source"][
+                    "commission_lock_sha256"
+                ],
                 "lima_version": package_lock["host_tools"]["lima"]["version"],
+                "lima_archive_sha256": package_lock["host_tools"]["lima"][
+                    "sha256"
+                ],
+                "lima_attestation_repository": package_lock["host_tools"][
+                    "lima"
+                ]["attestation_repository"],
                 "limactl_binary_sha256": package_lock["host_tools"]["lima"][
                     "binary_sha256"
                 ],
                 "socket_vmnet_version": package_lock["host_tools"]["socket_vmnet"][
                     "version"
                 ],
+                "socket_vmnet_archive_sha256": package_lock["host_tools"][
+                    "socket_vmnet"
+                ]["sha256"],
+                "socket_vmnet_attestation_repository": package_lock["host_tools"][
+                    "socket_vmnet"
+                ]["attestation_repository"],
                 "socket_vmnet_binary_sha256": package_lock["host_tools"][
                     "socket_vmnet"
                 ]["binary_sha256"],
@@ -891,6 +1174,7 @@ def verify_bundle(
         output_name: mode for output_name, mode in TEMPLATES.values()
     }
     expected_modes.update(CANONICAL_INPUTS)
+    expected_modes.update(STATIC_PUBLIC_INPUTS)
     expected_modes["bundle-manifest.json"] = 0o600
     entries = {path.name: path for path in bundle_dir.iterdir()}
     if set(entries) != set(expected_modes):
@@ -928,6 +1212,7 @@ def verify_bundle(
         "apply_enabled",
         "security_claims",
         "host_contract",
+        "commission_contract",
         "network_contract",
         "pins",
         "files",
@@ -947,12 +1232,22 @@ def verify_bundle(
     package_lock = validate_package_lock(
         _read_json(entries["package-lock.json"], "embedded package lock")
     )
+    commission_input = _read_json(
+        entries["commission-lock.json"], "embedded commission lock"
+    )
+    commission_lock = validate_commission_lock(
+        commission_input, image_lock, package_lock
+    )
+    if _sha256(_canonical_json(commission_input)) != package_lock[
+        "apt_install_source"
+    ]["commission_lock_sha256"]:
+        raise ValueError("embedded commission lock digest differs")
     expected_evidence_status = (
-        "awaiting_lima_effective_digest_signed_apt_snapshot_and_vm_guest_preflight"
+        "awaiting_lima_effective_digest_immutable_input_replay_and_vm_guest_preflight"
         if spec["lima_home"]["effective_config_sha256"].startswith(
             "REVIEW_REQUIRED"
         )
-        else "awaiting_signed_apt_snapshot_and_vm_guest_preflight"
+        else "awaiting_immutable_public_input_replay_and_vm_guest_preflight"
     )
     if manifest["evidence_status"] != expected_evidence_status:
         raise ValueError("bundle evidence status is invalid")
@@ -967,13 +1262,30 @@ def verify_bundle(
         "apt_install_source_status": package_lock["apt_install_source"][
             "review_status"
         ],
+        "apt_snapshot_url": package_lock["apt_install_source"]["snapshot_url"],
+        "apt_keyring_sha256": package_lock["apt_install_source"][
+            "keyring_sha256"
+        ],
+        "commission_lock_sha256": package_lock["apt_install_source"][
+            "commission_lock_sha256"
+        ],
         "lima_version": package_lock["host_tools"]["lima"]["version"],
+        "lima_archive_sha256": package_lock["host_tools"]["lima"]["sha256"],
+        "lima_attestation_repository": package_lock["host_tools"]["lima"][
+            "attestation_repository"
+        ],
         "limactl_binary_sha256": package_lock["host_tools"]["lima"][
             "binary_sha256"
         ],
         "socket_vmnet_version": package_lock["host_tools"]["socket_vmnet"][
             "version"
         ],
+        "socket_vmnet_archive_sha256": package_lock["host_tools"][
+            "socket_vmnet"
+        ]["sha256"],
+        "socket_vmnet_attestation_repository": package_lock["host_tools"][
+            "socket_vmnet"
+        ]["attestation_repository"],
         "socket_vmnet_binary_sha256": package_lock["host_tools"][
             "socket_vmnet"
         ]["binary_sha256"],
@@ -999,6 +1311,37 @@ def verify_bundle(
     }
     if manifest["host_contract"] != expected_host_contract:
         raise ValueError("bundle host contract differs from its embedded spec")
+    expected_commission_contract = {
+        "commission_lock_sha256": package_lock["apt_install_source"][
+            "commission_lock_sha256"
+        ],
+        "dependency_closure_package_count": commission_lock["install_transaction"][
+            "closure_package_count"
+        ],
+        "immutable_public_inputs_locked": True,
+        "immutable_public_inputs_verified": False,
+        "apply_authorized": False,
+    }
+    if manifest["commission_contract"] != expected_commission_contract:
+        raise ValueError("bundle commission contract differs from its embedded lock")
+
+    expected_static_hashes = {
+        "ubuntu-cloud-image-signing-key.gpg": commission_lock["cloud_image"][
+            "signing_key_sha256"
+        ],
+        "lima-2.2.0-attestation.jsonl": commission_lock["host_attestation"][
+            "lima"
+        ]["attestation_bundle_sha256"],
+        "socket-vmnet-1.2.2-attestation.jsonl": commission_lock[
+            "host_attestation"
+        ]["socket_vmnet"]["attestation_bundle_sha256"],
+        "sigstore-trusted-root.jsonl": commission_lock["host_attestation"][
+            "sigstore_trusted_root_sha256"
+        ],
+    }
+    for name, digest in expected_static_hashes.items():
+        if _sha256(entries[name].read_bytes()) != digest:
+            raise ValueError(f"bundle static public input hash mismatch: {name}")
     expected_network_contract = {
         "expected_guest_nic_count": 2,
         "explicit_ingress_interface": spec["ingress_network"]["guest_interface"],
@@ -1033,6 +1376,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--spec", type=Path)
     parser.add_argument("--image-lock", type=Path, default=DEFAULT_IMAGE_LOCK)
     parser.add_argument("--package-lock", type=Path, default=DEFAULT_PACKAGE_LOCK)
+    parser.add_argument("--commission-lock", type=Path, default=DEFAULT_COMMISSION_LOCK)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--check-bundle", type=Path)
     parser.add_argument("--expected-manifest-sha256")
@@ -1075,6 +1419,7 @@ def main(argv: list[str] | None = None) -> int:
             arguments.image_lock,
             arguments.package_lock,
             arguments.output_dir,
+            arguments.commission_lock,
         )
         manifest_digest = _sha256(
             (arguments.output_dir.resolve(strict=False) / "bundle-manifest.json").read_bytes()

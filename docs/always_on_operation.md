@@ -627,6 +627,36 @@ fresh node heartbeats before relying on new research output. Clock uncertainty
 must halt freshness-sensitive decisions; changing the wall clock is not a
 recovery technique.
 
+## Qualification terminal boundary
+
+`trading-harness-qualification` is installed separately from the MCP and the
+ordinary executor CLI. Its credential-free `collect` and `verify` commands and
+executor-only `status`/`recover` inspection do not enable venue writes. Fresh
+attended canary authorization collects and exports evidence in the same
+control-UID process before reading the fixed approval-HMAC slot from the
+control role helper; confirmation is accepted only from `/dev/tty`. Do not put
+that confirmation, an HMAC, worker identity, action, nonce, endpoint or payload
+in argv, stdin or an environment variable.
+
+The full signed envelope artifact is a bearer-sensitive relay capability. Its
+fixed hashed name, pending file, final file and completion receipt live only in
+the executor-owned nonce parent. That parent and every artifact must have no
+named ACL; runtime checks owner/mode/ACL and applies file plus directory
+`F_FULLFSYNC` around exclusive publication. Retain terminal artifacts for
+audit; never copy them into the execution/control-shared parent.
+
+The public split prepare/sign commands are disabled, and `run` fails before
+config/state/Keychain/network while qualification submission remains compiled
+off. Even after sender promotion, the current one-phase run contract is not a
+complete live canary. In particular, an expired proven-unsent cancel retains
+reservation and halts the command, but no fresh attended same-CLOID cancel
+reauthorization/account-safety lane exists. Live promotion therefore still
+requires read-proven-open state followed by fresh bounded cancel authority,
+never a blind retry, and one in-process place/query/cancel/terminal exercise.
+It also requires a final stable `userRole` mapping read after claim and
+immediately before key use/send, bound into attempt evidence, because the
+agent-signed wire does not encode the intended main account.
+
 ## Promotion boundary
 
 The research deployment proves continuous evidence collection. The isolated

@@ -66,14 +66,22 @@ TEMPLATES: dict[str, tuple[str, int]] = {
         "trading-desk-router-check",
         0o700,
     ),
+    "local-nat-lab-test-plan.sh.example": (
+        "local-nat-lab-test-plan",
+        0o700,
+    ),
 }
 
 SECURITY_CLAIMS = {
     "changes_public_egress_ip": False,
     "host_direct_bypass_prevented": False,
+    "macos_full_tunnel_routes_emitted": True,
+    "macos_pf_kill_switch_emitted": False,
     "mainnet_authorized": False,
-    "venue_writes_authorized": False,
     "private_key_field_emitted": False,
+    "remote_vpn_exit_configured": False,
+    "venue_writes_authorized": False,
+    "vpn_qualified": False,
 }
 
 
@@ -224,6 +232,14 @@ def validate_spec(spec: dict[str, Any]) -> dict[str, str]:
     ):
         raise ValueError(
             "router endpoint must be a usable private address sharing the management network"
+        )
+    if (
+        str(management_source) != "192.168.106.1/32"
+        or str(endpoint_interface) != "192.168.106.2/24"
+    ):
+        raise ValueError(
+            "local_nat_lab ingress must match the pinned Lima host-only "
+            "192.168.106.1/32 -> 192.168.106.2/24 contract"
         )
     dns = _ipv4_address(spec["dns_ipv4"], "dns_ipv4")
     if not dns.is_global:

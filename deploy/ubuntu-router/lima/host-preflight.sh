@@ -167,4 +167,4 @@ printf '%s\n' \
     "networks_yaml_sha256=${actual_networks_sha256}" \
     "effective_config_sha256=${actual_effective_sha256}" \
     'apply_enabled=false' \
-    'evidence_status=awaiting_signed_apt_snapshot_and_vm_guest_preflight'
+    'evidence_status=awaiting_immutable_public_input_replay_and_vm_guest_preflight'

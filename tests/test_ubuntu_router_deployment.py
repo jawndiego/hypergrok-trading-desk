@@ -39,8 +39,8 @@ def valid_spec() -> dict[str, object]:
         "mode": "local_nat_lab",
         "wan_interface": "enp0s1",
         "ingress_interface": "enp0s2",
-        "management_source_cidr": "192.168.64.1/32",
-        "router_endpoint_interface": "192.168.64.2/24",
+        "management_source_cidr": "192.168.106.1/32",
+        "router_endpoint_interface": "192.168.106.2/24",
         "listen_port": 51820,
         "router_ipv4_interface": "10.77.0.1/24",
         "mac_ipv4_peer": "10.77.0.2/32",
@@ -62,6 +62,7 @@ class UbuntuRouterTemplateTests(unittest.TestCase):
             "70-trading-desk-router.conf.example",
             "mac-wireguard.conf.fragment.example",
             "trading-desk-router-check.sh.example",
+            "local-nat-lab-test-plan.sh.example",
         }
         root_files = [path for path in ROUTER_ROOT.iterdir() if path.is_file()]
         self.assertEqual(expected, {path.name for path in root_files})
@@ -115,6 +116,7 @@ class UbuntuRouterRendererTests(unittest.TestCase):
                 "70-trading-desk-router.conf",
                 "mac-wireguard.conf.fragment",
                 "trading-desk-router-check",
+                "local-nat-lab-test-plan",
                 "bundle-manifest.json",
             }
             self.assertEqual(expected_files, {path.name for path in output.iterdir()})
@@ -122,11 +124,12 @@ class UbuntuRouterRendererTests(unittest.TestCase):
                 stat.S_IMODE(output.stat().st_mode),
                 0o700,
             )
-            self.assertEqual(
-                stat.S_IMODE((output / "trading-desk-router-check").stat().st_mode),
-                0o700,
-            )
-            for name in expected_files - {"trading-desk-router-check"}:
+            for name in ("trading-desk-router-check", "local-nat-lab-test-plan"):
+                self.assertEqual(stat.S_IMODE((output / name).stat().st_mode), 0o700)
+            for name in expected_files - {
+                "trading-desk-router-check",
+                "local-nat-lab-test-plan",
+            }:
                 self.assertEqual(stat.S_IMODE((output / name).stat().st_mode), 0o600)
 
             self.assertEqual(manifest["mode"], "local_nat_lab")
@@ -136,9 +139,13 @@ class UbuntuRouterRendererTests(unittest.TestCase):
                 {
                     "changes_public_egress_ip": False,
                     "host_direct_bypass_prevented": False,
+                    "macos_full_tunnel_routes_emitted": True,
+                    "macos_pf_kill_switch_emitted": False,
                     "mainnet_authorized": False,
-                    "venue_writes_authorized": False,
                     "private_key_field_emitted": False,
+                    "remote_vpn_exit_configured": False,
+                    "venue_writes_authorized": False,
+                    "vpn_qualified": False,
                 },
             )
 
@@ -170,10 +177,11 @@ class UbuntuRouterRendererTests(unittest.TestCase):
             )
             self.assertIn('"enp0s1":', netplan)
             self.assertIn('"enp0s2":', netplan)
-            self.assertIn("- 192.168.64.2/24", netplan)
+            self.assertIn("- 192.168.106.2/24", netplan)
 
             nftables = (output / "nftables.conf").read_text(encoding="utf-8")
             self.assertIn("chain forward", nftables)
+            self.assertIn("chain prerouting_observe", nftables)
             self.assertIn("policy drop", nftables)
             self.assertIn(
                 'iifname "wg-exec" oifname "enp0s1" ip saddr 10.77.0.0/24 ip daddr 1.1.1.1 udp dport 53 ct state new,established accept',
@@ -193,12 +201,17 @@ class UbuntuRouterRendererTests(unittest.TestCase):
             )
             self.assertNotIn('iifname "enp0s2" oifname "enp0s1"', nftables)
             self.assertNotIn("ip6 saddr", nftables)
+            self.assertIn(
+                'iifname "wg-exec" meta nfproto ipv6 counter',
+                nftables,
+            )
+            self.assertIn('iifname "wg-exec" counter drop', nftables)
 
             mac = (output / "mac-wireguard.conf.fragment").read_text(
                 encoding="utf-8"
             )
             self.assertIn("AllowedIPs = 0.0.0.0/0, ::/0", mac)
-            self.assertIn("Endpoint = 192.168.64.2:51820", mac)
+            self.assertIn("Endpoint = 192.168.106.2:51820", mac)
             self.assertIn("PersistentKeepalive = 25", mac)
             check = (output / "trading-desk-router-check").read_text(
                 encoding="utf-8"
@@ -206,6 +219,9 @@ class UbuntuRouterRendererTests(unittest.TestCase):
             self.assertIn("PATH=/usr/sbin:/usr/bin:/sbin:/bin", check)
             self.assertIn("trading_desk_nat postrouting", check)
             self.assertIn('wg show "$wg_interface" allowed-ips', check)
+            self.assertIn("ip -6 route show default", check)
+            self.assertIn('address show dev "$wan_interface" scope global', check)
+            self.assertIn("prerouting_observe", check)
             self.assertIn("router_local_checks_passed", check)
             self.assertNotIn("router_ready", check)
             subprocess.run(
@@ -214,6 +230,43 @@ class UbuntuRouterRendererTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
+            test_plan = output / "local-nat-lab-test-plan"
+            subprocess.run(
+                ["/bin/sh", "-n", str(test_plan)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            plan = subprocess.run(
+                [str(test_plan), "--plan"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            for required in (
+                "apply_enabled=false",
+                "test_execution_enabled=false",
+                "macos_pf_kill_switch_emitted=false",
+                "remote_vpn_exit_configured=false",
+                "vpn_qualified=false",
+                "expected_router_endpoint=192.168.106.2:51820",
+                "guest_command_ipv6_ingress_counter=",
+                "guest_command_ipv4_drop_counter=",
+                "guest_command_ipv6_forwarding=",
+                "guest_command_ipv6_default_route=",
+                "guest_command_ipv6_wan_global_address=",
+                "mac_command_unsigned_info=",
+                "evidence_status=awaiting_vm_apply_router_keys_and_attended_local_nat_lab_test",
+            ):
+                self.assertIn(required, plan.stdout)
+            refused = subprocess.run(
+                [str(test_plan)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(64, refused.returncode)
+            self.assertIn("local_nat_lab_test_apply_disabled", refused.stderr)
             manifest_digest = hashlib.sha256(
                 (output / "bundle-manifest.json").read_bytes()
             ).hexdigest()
@@ -265,16 +318,17 @@ class UbuntuRouterRendererTests(unittest.TestCase):
             ("wan_interface", "lo"),
             ("wan_interface", ".."),
             ("ingress_interface", "enp0s1"),
-            ("management_source_cidr", "192.168.64.0/24"),
+            ("management_source_cidr", "192.168.106.0/24"),
+            ("management_source_cidr", "192.168.64.1/32"),
             ("management_source_cidr", "8.8.8.8/32"),
             ("management_source_cidr", "0.0.0.0/32"),
             ("management_source_cidr", "127.0.0.1/32"),
             ("management_source_cidr", "255.255.255.255/32"),
             ("router_endpoint_interface", "127.0.0.1/24"),
-            ("router_endpoint_interface", "192.168.64.1/24"),
+            ("router_endpoint_interface", "192.168.106.1/24"),
             ("router_endpoint_interface", "10.77.0.3/24"),
             ("router_endpoint_interface", "255.255.255.255/24"),
-            ("router_endpoint_interface", "192.168.65.2/24"),
+            ("router_endpoint_interface", "192.168.64.2/24"),
             ("listen_port", 80),
             ("router_ipv4_interface", "10.77.0.1/16"),
             ("router_ipv4_interface", "10.77.0.0/24"),

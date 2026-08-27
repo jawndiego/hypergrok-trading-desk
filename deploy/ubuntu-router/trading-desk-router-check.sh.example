@@ -25,8 +25,12 @@ systemctl is-active --quiet nftables.service
 systemctl is-active --quiet "wg-quick@${wg_interface}.service"
 ip link show dev "$wan_interface" | grep -E '<[^>]*UP[^>]*>' >/dev/null
 ip -4 route show default | grep -F "dev ${wan_interface}" >/dev/null
+[ -z "$(ip -6 route show default)" ]
+[ -z "$(ip -o -6 address show dev "$wan_interface" scope global)" ]
 ip -4 address show dev "$ingress_interface" | grep -F "inet ${router_endpoint}" >/dev/null
 ip -4 address show dev "$wg_interface" | grep -F "inet ${router_address}" >/dev/null
+nft -nn list chain inet trading_desk_filter prerouting_observe | \
+    grep -F "iifname \"${wg_interface}\" meta nfproto ipv6 counter" >/dev/null
 nft list chain inet trading_desk_filter input | grep -F 'policy drop' >/dev/null
 nft list chain inet trading_desk_filter forward | grep -F 'policy drop' >/dev/null
 nft list chain inet trading_desk_filter output | grep -F 'policy accept' >/dev/null
@@ -42,6 +46,7 @@ printf '%s\n' "$forward_rules" | grep -F "iifname \"${wg_interface}\" oifname \"
 printf '%s\n' "$forward_rules" | grep -F "iifname \"${wg_interface}\" oifname \"${wan_interface}\" ip saddr ${router_network} tcp dport 443" >/dev/null
 printf '%s\n' "$forward_rules" | grep -F "iifname \"${wg_interface}\" oifname \"${wan_interface}\" ip saddr ${router_network} udp dport 123" >/dev/null
 printf '%s\n' "$forward_rules" | grep -F "iifname \"${wan_interface}\" oifname \"${wg_interface}\" ip daddr ${router_network} ct state established,related" >/dev/null
+printf '%s\n' "$forward_rules" | grep -F "iifname \"${wg_interface}\"" | grep -F ' counter ' | grep -F ' drop' >/dev/null
 nft -nn list chain ip trading_desk_nat postrouting | grep -F "oifname \"${wan_interface}\" ip saddr ${router_network} masquerade" >/dev/null
 [ "$(wg show "$wg_interface" listen-port)" = "$listen_port" ]
 [ "$(wg show "$wg_interface" peers)" = "$expected_peer" ]

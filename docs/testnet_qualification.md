@@ -3,8 +3,9 @@
 Status: **offline capital core, credential-free signer-envelope, pinned SDK
 0.24.0 signer/independent recovery verifier, dormant one-shot sender,
 advisory WebSocket decoder/local response-drop harness and schema-v11
-result/workflow persistence implemented; CLI and live adapters,
-commissioning and live-workflow gaps remain; live venue qualification not run**.
+result/workflow persistence plus a role-bound direct-terminal orchestration
+surface implemented; submission/lifecycle promotion, commissioning and live
+adapter gaps remain; live venue qualification not run**.
 
 The TESTNET execution functions are real and armed when the isolated worker is
 explicitly constructed. No account, API wallet or worker service is configured
@@ -134,14 +135,27 @@ exposed CLI. Do not skip its first steps by sending the already-armed bracket.
 The GTC/cancel/close semantics, dedicated signer-envelope validator and durable
 schema-v11 result coordinator now exist. The exact pinned SDK 0.24.0 signer and
 independently reconstructed EIP-712 recovery verifier are golden-tested for all
-three action shapes and use the schema-v2 global nonce authority. They expose
-no credential or CLI capability, and submission authority remains compiled
-off. The following live integrations and observable tests remain:
+three action shapes and use the schema-v2 global nonce authority. The separate
+`trading-harness-qualification` CLI exposes fixed control-UID
+collect/verify/fresh attended authorization and executor-UID
+status/recover/reconciliation phases. Its `run` command checks the compiled-off
+submission gate before config, state, Keychain or network access; split
+prepare/sign commands are not public. The following live integrations and
+observable tests remain:
 
-- a direct TTY CLI for the narrow attended TESTNET-only GTC
-  canary/query/cancel core;
-- a live `userRole` reader and operator-facing retained
-  account/metadata/order artifact export;
+- promotion of `run` into one bounded in-process
+  place/query/cancel/terminal lifecycle. Its current dormant one-phase
+  contract is not an operator-ready live canary;
+- a read-proven-open, fresh attended same-CLOID cancel reauthorization and
+  account-safety path. Today an expired proven-unsent cancel correctly retains
+  reservation and halts, but cannot mint replacement cancel authority; a blind
+  retry is forbidden;
+- a final fresh, stable `userRole(api_wallet)` mapping to the configured main
+  account after claim and immediately before key use/send, causally bound into
+  attempt evidence. The signed agent wire does not itself encode the main
+  account, so admission-time role evidence alone cannot promote submission;
+- attended live qualification of the implemented `userRole` reader and
+  owner-only account/metadata/order artifact export;
 - live attended integration for the ordinary bounded reduce-only canary close;
   its signer and offline terminal-flat release are implemented;
 - a live adapter and durable integration for the credential-free advisory

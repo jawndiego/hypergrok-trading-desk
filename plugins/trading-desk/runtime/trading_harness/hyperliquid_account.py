@@ -19,10 +19,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, DecimalException
 from enum import Enum
+import json
 import re
 from typing import Any, TypeAlias
 
-from .canonical import canonical_decimal, domain_hash, validate_decimal_bounds
+from .canonical import (
+    canonical_decimal,
+    canonical_json,
+    domain_hash,
+    validate_decimal_bounds,
+)
 from .errors import HarnessError, ValidationError
 from .market_data import post_public_info, public_info_endpoint
 
@@ -786,6 +792,204 @@ def verify_account_snapshot_integrity(
         raise ValidationError("account snapshot hash does not match contents")
 
 
+def hyperliquid_account_snapshot_from_dict(
+    value: Mapping[str, object],
+) -> HyperliquidAccountSnapshot:
+    """Rehydrate one canonical, hash-verified read-only account snapshot."""
+
+    try:
+        detached = json.loads(canonical_json(value))
+    except (TypeError, ValueError, RecursionError) as error:
+        raise HyperliquidAccountResponseError(
+            "account snapshot cannot be canonically detached"
+        ) from error
+    if not isinstance(detached, dict):
+        raise HyperliquidAccountResponseError("account snapshot must be an object")
+
+    def mapping(raw: object, field: str) -> dict[str, object]:
+        if not isinstance(raw, dict):
+            raise HyperliquidAccountResponseError(f"{field} must be an object")
+        return raw
+
+    def summary(raw: object, field: str) -> MarginSummary:
+        item = mapping(raw, field)
+        return MarginSummary(
+            account_value=_exact_decimal(item["account_value"], f"{field}.account_value"),
+            total_notional_position=_exact_decimal(
+                item["total_notional_position"], f"{field}.total_notional_position"
+            ),
+            total_raw_usd=_exact_decimal(item["total_raw_usd"], f"{field}.total_raw_usd"),
+            total_margin_used=_exact_decimal(
+                item["total_margin_used"], f"{field}.total_margin_used"
+            ),
+        )
+
+    def order(raw: object, field: str, *, depth: int = 0) -> OpenOrder:
+        if depth > _MAX_ORDER_TREE_DEPTH:
+            raise HyperliquidAccountResponseError("open-order tree exceeds depth limit")
+        item = mapping(raw, field)
+        children = item.get("children")
+        if not isinstance(children, list):
+            raise HyperliquidAccountResponseError(f"{field}.children must be an array")
+        trigger = item.get("trigger_kind")
+        return OpenOrder(
+            symbol=_symbol(item["symbol"], f"{field}.symbol"),
+            asset_id=_integer(item["asset_id"], f"{field}.asset_id", maximum=1_000_000),
+            oid=_integer(item["oid"], f"{field}.oid", maximum=2**63 - 1),
+            cloid=(None if item.get("cloid") is None else _cloid(item["cloid"], f"{field}.cloid")),
+            side=OrderSide(item["side"]),
+            remaining_size=_exact_decimal(
+                item["remaining_size"], f"{field}.remaining_size", nonnegative=True
+            ),
+            original_size=_exact_decimal(
+                item["original_size"], f"{field}.original_size", nonnegative=True
+            ),
+            limit_price=_exact_decimal(
+                item["limit_price"], f"{field}.limit_price", nonnegative=True
+            ),
+            order_type=_text(item["order_type"], f"{field}.order_type"),
+            tif=(None if item.get("tif") is None else _text(item["tif"], f"{field}.tif")),
+            timestamp_ms=_integer(item["timestamp_ms"], f"{field}.timestamp_ms"),
+            is_trigger=_bool(item["is_trigger"], f"{field}.is_trigger"),
+            trigger_price=_exact_decimal(
+                item["trigger_price"], f"{field}.trigger_price", nonnegative=True
+            ),
+            trigger_condition=_text(
+                item["trigger_condition"], f"{field}.trigger_condition"
+            ),
+            trigger_kind=(None if trigger is None else TriggerKind(trigger)),
+            reduce_only=_bool(item["reduce_only"], f"{field}.reduce_only"),
+            is_position_tpsl=_bool(
+                item["is_position_tpsl"], f"{field}.is_position_tpsl"
+            ),
+            children=tuple(
+                order(child, f"{field}.children[{index}]", depth=depth + 1)
+                for index, child in enumerate(children)
+            ),
+        )
+
+    try:
+        metadata_raw = mapping(detached["metadata"], "metadata")
+        raw_instruments = metadata_raw["instruments"]
+        if not isinstance(raw_instruments, list):
+            raise HyperliquidAccountResponseError("metadata.instruments must be an array")
+        instruments = tuple(
+            PerpInstrument(
+                symbol=_symbol(item["symbol"], f"metadata.instruments[{index}].symbol"),
+                asset_id=_integer(
+                    item["asset_id"],
+                    f"metadata.instruments[{index}].asset_id",
+                    maximum=1_000_000,
+                ),
+                sz_decimals=_integer(
+                    item["sz_decimals"],
+                    f"metadata.instruments[{index}].sz_decimals",
+                    maximum=8,
+                ),
+                max_leverage=_exact_decimal(
+                    item["max_leverage"],
+                    f"metadata.instruments[{index}].max_leverage",
+                    positive=True,
+                ),
+                margin_mode=_text(
+                    item["margin_mode"], f"metadata.instruments[{index}].margin_mode"
+                ),
+                margin_table_id=item["margin_table_id"],
+                is_delisted=_bool(
+                    item["is_delisted"],
+                    f"metadata.instruments[{index}].is_delisted",
+                ),
+                metadata_hash=item["metadata_hash"],
+            )
+            for index, raw in enumerate(raw_instruments)
+            for item in (mapping(raw, f"metadata.instruments[{index}]"),)
+        )
+        positions_raw = detached["positions"]
+        if not isinstance(positions_raw, list):
+            raise HyperliquidAccountResponseError("positions must be an array")
+        positions: list[PerpPosition] = []
+        for index, raw in enumerate(positions_raw):
+            item = mapping(raw, f"positions[{index}]")
+            funding = mapping(item["cumulative_funding"], f"positions[{index}].cumulative_funding")
+            positions.append(
+                PerpPosition(
+                    symbol=_symbol(item["symbol"], f"positions[{index}].symbol"),
+                    asset_id=_integer(
+                        item["asset_id"], f"positions[{index}].asset_id", maximum=1_000_000
+                    ),
+                    signed_size=_exact_decimal(item["signed_size"], f"positions[{index}].signed_size"),
+                    entry_price=_optional_decimal(
+                        item["entry_price"], f"positions[{index}].entry_price", positive=True
+                    ),
+                    position_value=_exact_decimal(item["position_value"], f"positions[{index}].position_value"),
+                    unrealized_pnl=_exact_decimal(item["unrealized_pnl"], f"positions[{index}].unrealized_pnl"),
+                    margin_used=_exact_decimal(item["margin_used"], f"positions[{index}].margin_used", nonnegative=True),
+                    liquidation_price=_optional_decimal(
+                        item["liquidation_price"], f"positions[{index}].liquidation_price", positive=True
+                    ),
+                    leverage_type=_text(item["leverage_type"], f"positions[{index}].leverage_type"),
+                    leverage=_exact_decimal(item["leverage"], f"positions[{index}].leverage", positive=True),
+                    leverage_raw_usd=_optional_decimal(item["leverage_raw_usd"], f"positions[{index}].leverage_raw_usd"),
+                    max_leverage=_exact_decimal(item["max_leverage"], f"positions[{index}].max_leverage", positive=True),
+                    return_on_equity=_exact_decimal(item["return_on_equity"], f"positions[{index}].return_on_equity"),
+                    cumulative_funding_all_time=_exact_decimal(funding["all_time"], f"positions[{index}].funding.all_time"),
+                    cumulative_funding_since_open=_exact_decimal(funding["since_open"], f"positions[{index}].funding.since_open"),
+                    cumulative_funding_since_change=_exact_decimal(funding["since_change"], f"positions[{index}].funding.since_change"),
+                )
+            )
+        orders_raw = detached["open_orders"]
+        if not isinstance(orders_raw, list):
+            raise HyperliquidAccountResponseError("open_orders must be an array")
+        snapshot = HyperliquidAccountSnapshot(
+            network=detached["network"],
+            source_url=detached["source_url"],
+            main_account_address=_address(detached["main_account_address"]),
+            account_mode=StandardAccountMode(detached["account_mode"]),
+            server_time_ms=_integer(detached["server_time_ms"], "server_time_ms"),
+            received_at_ms=_integer(detached["received_at_ms"], "received_at_ms"),
+            age_ms=detached["age_ms"],
+            margin_summary=summary(detached["margin_summary"], "margin_summary"),
+            cross_margin_summary=summary(
+                detached["cross_margin_summary"], "cross_margin_summary"
+            ),
+            cross_maintenance_margin_used=_exact_decimal(
+                detached["cross_maintenance_margin_used"],
+                "cross_maintenance_margin_used",
+                nonnegative=True,
+            ),
+            withdrawable=_exact_decimal(
+                detached["withdrawable"], "withdrawable", nonnegative=True
+            ),
+            positions=tuple(positions),
+            open_orders=tuple(
+                order(raw, f"open_orders[{index}]")
+                for index, raw in enumerate(orders_raw)
+            ),
+            metadata=PerpMetadataSnapshot(
+                collateral_token=metadata_raw["collateral_token"],
+                instruments=instruments,
+                metadata_hash=metadata_raw["metadata_hash"],
+            ),
+            snapshot_hash=detached["snapshot_hash"],
+        )
+        verify_account_snapshot_integrity(snapshot)
+    except (
+        KeyError,
+        TypeError,
+        ValueError,
+        HyperliquidAccountResponseError,
+        ValidationError,
+    ) as error:
+        if isinstance(error, HyperliquidAccountResponseError):
+            raise
+        raise HyperliquidAccountResponseError("account snapshot is invalid") from error
+    if canonical_json(snapshot.as_dict()) != canonical_json(detached):
+        raise HyperliquidAccountResponseError(
+            "account snapshot fields are not the exact canonical schema"
+        )
+    return snapshot
+
+
 def _parse_account_mode(response: object) -> StandardAccountMode:
     if not isinstance(response, str):
         raise HyperliquidAccountResponseError(
@@ -1432,5 +1636,6 @@ __all__ = (
     "TriggerKind",
     "UnsupportedAccountModeError",
     "fetch_account_snapshot",
+    "hyperliquid_account_snapshot_from_dict",
     "verify_account_snapshot_integrity",
 )

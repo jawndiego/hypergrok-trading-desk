@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import timedelta
 import hashlib
 import unittest
+from unittest import mock
 
 from trading_harness.canonical import canonical_decimal, domain_hash
-from trading_harness.errors import StateConflict, StorageError
+from trading_harness.errors import RecordNotFound, StateConflict, StorageError
 from trading_harness.qualification_signer import (
     QualificationSignature,
     QualificationSignerPolicy,
@@ -26,6 +27,7 @@ from trading_harness.testnet_qualification import (
     QualificationTransportOutcome,
     QualificationWorkflowState,
     build_attended_close_intent,
+    build_gtc_canary_intent,
     parse_qualification_order_status,
     start_qualification_workflow,
     verified_qualification_permit,
@@ -457,18 +459,32 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             observed_at=at(1_000),
             account_snapshot=retained(retained_at=at(1_000)),
         )
-        workflow = self.qualification.advance_canary_open_queries(
+        loaded_cloid, loaded_cloid_snapshot = self.qualification.load_query_evidence(
+            command.command_id, "open_by_cloid"
+        )
+        loaded_oid, loaded_oid_snapshot = self.qualification.load_query_evidence(
+            command.command_id, "open_by_oid"
+        )
+        self.assertEqual((loaded_cloid, loaded_oid), (by_cloid, by_oid))
+        self.assertEqual(
+            (
+                loaded_cloid_snapshot.snapshot_hash,
+                loaded_oid_snapshot.snapshot_hash,
+            ),
+            (
+                retained(retained_at=at(900)).snapshot_hash,
+                retained(retained_at=at(1_000)).snapshot_hash,
+            ),
+        )
+        workflow, atomic_cancel = self.qualification.advance_and_queue_canary_cancel(
             command.command_id,
             current_workflow=workflow,
             by_cloid=by_cloid,
             by_oid=by_oid,
             at=at(1_000),
         )
-        workflow, cancel_action = self.qualification.queue_canary_cancel(
-            command.command_id,
-            current_workflow=workflow,
-            at=at(1_100),
-        )
+        self.assertIsNotNone(atomic_cancel)
+        cancel_action = atomic_cancel
         command = self.qualification.get_command(command.command_id)
         cancel_envelope, cancel_signed, _ = self.prepare_envelope(
             command,
@@ -527,12 +543,47 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             observed_at=at(1_900),
             account_snapshot=flat,
         )
+        loaded_terminal, loaded_flat = self.qualification.load_query_evidence(
+            command.command_id, "terminal"
+        )
+        self.assertEqual(loaded_terminal, terminal)
+        self.assertEqual(loaded_flat, flat)
+        with self.assertRaisesRegex(StateConflict, "stale"):
+            self.qualification.finish_terminal_reconciliation(
+                command.command_id,
+                current_workflow=workflow,
+                terminal_query=terminal,
+                retained=loaded_flat,
+                at=at(7_000),
+            )
+        with self.assertRaisesRegex(StateConflict, "strictly advance"):
+            self.qualification.refresh_terminal_query_snapshot(
+                command.command_id,
+                evidence=loaded_terminal,
+                account_snapshot=loaded_flat,
+                at=at(1_900),
+            )
+        refreshed_flat = retained(
+            server_time_ms=int(at(7_000).timestamp() * 1_000),
+            retained_at=at(7_000),
+        )
+        self.qualification.refresh_terminal_query_snapshot(
+            command.command_id,
+            evidence=loaded_terminal,
+            account_snapshot=refreshed_flat,
+            at=at(7_000),
+        )
+        rebound_terminal, rebound_flat = self.qualification.load_query_evidence(
+            command.command_id, "terminal"
+        )
+        self.assertEqual(rebound_terminal, terminal)
+        self.assertEqual(rebound_flat, refreshed_flat)
         workflow = self.qualification.finish_terminal_reconciliation(
             command.command_id,
             current_workflow=workflow,
-            terminal_query=terminal,
-            retained=flat,
-            at=at(2_000),
+            terminal_query=rebound_terminal,
+            retained=rebound_flat,
+            at=at(7_000),
         )
         self.assertIs(workflow.state, QualificationWorkflowState.COMPLETE)
         terminal_command = self.qualification.get_command(command.command_id)
@@ -863,6 +914,255 @@ class QualificationWorkflowStoreTests(ExecutionStoreTestCase):
             at=at(15_400),
         )
         self.assertIs(hydrated.state, QualificationWorkflowState.OPEN_VERIFIED)
+        self.assertEqual(
+            self.store.get_reserved_exposure(),
+            (intent.reserved_loss, intent.reserved_notional),
+        )
+
+    def test_restart_loads_only_exact_live_incident_free_unused_authority(self) -> None:
+        evidence = retained()
+        intent = canary_intent(account_id=self.store.account_id)
+        _, command = self.admit_intent(
+            evidence,
+            intent,
+            command_id="qualification-command-load-authority",
+            permit_id="qualification-permit-load-authority",
+            at_ms=0,
+        )
+        claim = self.qualification.claim(
+            command.command_id,
+            worker_id="qualification-worker",
+            at=at(100),
+            lease_seconds=15,
+        )
+        with self.assertRaises(StateConflict):
+            self.qualification.claim(
+                command.command_id,
+                worker_id="competing-worker",
+                at=at(150),
+                lease_seconds=15,
+            )
+        authority = self.qualification.require_signing_authority(
+            command.command_id,
+            intent.primary_action,
+            worker_id="qualification-worker",
+            fencing_token=claim.fencing_token,
+            at=at(200),
+        )
+        self.assertEqual(
+            self.qualification.load_current_signing_authority(
+                command.command_id,
+                worker_id="qualification-worker",
+                at=at(300),
+            ),
+            authority,
+        )
+        with self.assertRaises(StateConflict):
+            self.qualification.load_current_signing_authority(
+                command.command_id,
+                worker_id="other-worker",
+                at=at(300),
+            )
+        incident = self.store.record_incident(
+            incident_id="qualification-critical-incident",
+            command_id=None,
+            code="QUALIFICATION_TEST",
+            severity="critical",
+            at=at(350),
+        )
+        with self.assertRaisesRegex(StateConflict, "active and unused"):
+            self.qualification.load_current_signing_authority(
+                command.command_id,
+                worker_id="qualification-worker",
+                at=at(400),
+            )
+        self.assertEqual(incident.state, "open")
+
+    def test_missing_envelope_and_expired_signing_gate_halt_proven_unsent(self) -> None:
+        evidence = retained()
+        intent = canary_intent(account_id=self.store.account_id)
+        _, command = self.admit_intent(
+            evidence,
+            intent,
+            command_id="qualification-command-expired-unused",
+            permit_id="qualification-permit-expired-unused",
+            at_ms=0,
+        )
+        claim = self.qualification.claim(
+            command.command_id,
+            worker_id="qualification-worker",
+            at=at(100),
+            lease_seconds=15,
+        )
+        self.qualification.require_signing_authority(
+            command.command_id,
+            intent.primary_action,
+            worker_id="qualification-worker",
+            fencing_token=claim.fencing_token,
+            at=at(200),
+        )
+        with self.assertRaisesRegex(StateConflict, "active and unused"):
+            self.qualification.load_current_signing_authority(
+                command.command_id,
+                worker_id="qualification-worker",
+                at=at(10_600),
+            )
+        halted = self.qualification.halt_unused_signing_authority(
+            command.command_id,
+            worker_id="qualification-worker",
+            fencing_token=claim.fencing_token,
+            at=at(10_600),
+        )
+        self.assertEqual(halted.state, "halted")
+        self.assertTrue(halted.reservation_released)
+        self.assertEqual(self.store.get_reserved_exposure(), (0, 0))
+
+        second_evidence = retained(
+            server_time_ms=int(at(11_000).timestamp() * 1_000) - 500,
+            retained_at=at(11_000),
+        )
+        second_intent = build_gtc_canary_intent(
+            second_evidence,
+            market(observed_at=at(11_000)),
+            qualification_id="canary-second",
+            account_id=self.store.account_id,
+            symbol="ETH",
+            allowed_asset_ids=frozenset({0}),
+            at=at(11_000),
+        )
+        _, second = self.admit_intent(
+            second_evidence,
+            second_intent,
+            command_id="qualification-command-missing-envelope",
+            permit_id="qualification-permit-missing-envelope",
+            at_ms=11_000,
+        )
+        _, _, second_claim = self.prepare_envelope(
+            second,
+            second_intent,
+            second_intent.primary_action,
+            QualificationAttemptPhase.PLACE,
+            attempt_id="qualification-attempt-missing-envelope",
+            claim_ms=11_100,
+        )
+        missing = self.qualification.halt_prepared_attempt_for_missing_envelope(
+            second.command_id,
+            worker_id="qualification-worker",
+            fencing_token=second_claim.fencing_token,
+            at=at(11_500),
+        )
+        self.assertEqual(missing.state, "halted")
+        self.assertTrue(missing.reservation_released)
+        with self.assertRaises(StateConflict):
+            self.qualification.claim(
+                second.command_id,
+                worker_id="qualification-worker",
+                at=at(11_600),
+            )
+
+    def test_open_query_advance_and_cancel_queue_roll_back_as_one_crash_boundary(self) -> None:
+        evidence = retained()
+        intent = canary_intent(account_id=self.store.account_id)
+        workflow, command = self.admit_intent(
+            evidence,
+            intent,
+            command_id="qualification-command-atomic-cancel",
+            permit_id="qualification-permit-atomic-cancel",
+            at_ms=0,
+        )
+        envelope, signed, _ = self.prepare_envelope(
+            command,
+            intent,
+            intent.primary_action,
+            QualificationAttemptPhase.PLACE,
+            attempt_id="qualification-attempt-atomic-cancel",
+            claim_ms=100,
+        )
+        send_authority = self.seed_future_point_of_no_return(
+            command.command_id,
+            QualificationAttemptPhase.PLACE,
+            attempt_id="qualification-attempt-atomic-cancel",
+            issued_ms=500,
+        )
+        workflow, _ = self.record_result(
+            command.command_id,
+            workflow,
+            envelope,
+            signed,
+            send_authority,
+            attempt_id="qualification-attempt-atomic-cancel",
+            attempted_ms=600,
+            outcome=QualificationTransportOutcome.RESPONSE_RECEIVED,
+        )
+        by_cloid = parse_qualification_order_status(
+            status_response(intent.primary_action, status_at=at(900)),
+            intent.primary_action,
+            requested_identifier=intent.primary_action.cloid,
+            at=at(900),
+        )
+        by_oid = parse_qualification_order_status(
+            status_response(intent.primary_action, status_at=at(1_000)),
+            intent.primary_action,
+            requested_identifier=123,
+            at=at(1_000),
+        )
+        self.qualification.record_query_evidence(
+            command.command_id,
+            query_kind="open_by_cloid",
+            evidence=by_cloid,
+            observed_at=at(900),
+            account_snapshot=retained(retained_at=at(900)),
+        )
+        self.qualification.record_query_evidence(
+            command.command_id,
+            query_kind="open_by_oid",
+            evidence=by_oid,
+            observed_at=at(1_000),
+            account_snapshot=retained(retained_at=at(1_000)),
+        )
+        original_write = self.qualification._write_command_locked
+        with mock.patch.object(
+            self.qualification,
+            "_write_command_locked",
+            side_effect=RuntimeError("injected crash before commit"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "injected crash"):
+                self.qualification.advance_and_queue_canary_cancel(
+                    command.command_id,
+                    current_workflow=workflow,
+                    by_cloid=by_cloid,
+                    by_oid=by_oid,
+                    at=at(1_100),
+                )
+        del original_write
+        after = self.qualification.get_command(command.command_id)
+        self.assertEqual((after.state, after.current_phase), ("reconciling", "place"))
+        self.assertEqual(
+            self.qualification.load_workflow(command.command_id).workflow_hash,
+            workflow.workflow_hash,
+        )
+        with self.assertRaises(RecordNotFound):
+            self.qualification.get_step(
+                command.command_id, QualificationAttemptPhase.CANCEL
+            )
+
+        resumed, action = self.qualification.advance_and_queue_canary_cancel(
+            command.command_id,
+            current_workflow=workflow,
+            by_cloid=by_cloid,
+            by_oid=by_oid,
+            at=at(1_200),
+        )
+        self.assertIsNotNone(action)
+        self.assertIs(resumed.state, QualificationWorkflowState.CANCEL_READY)
+        after = self.qualification.get_command(command.command_id)
+        self.assertEqual((after.state, after.current_phase), ("queued", "cancel"))
+        self.assertEqual(
+            self.qualification.normalize_expired_claims(at=at(11_300)), 1
+        )
+        expired_cancel = self.qualification.get_command(command.command_id)
+        self.assertEqual(expired_cancel.state, "halted")
+        self.assertFalse(expired_cancel.reservation_released)
         self.assertEqual(
             self.store.get_reserved_exposure(),
             (intent.reserved_loss, intent.reserved_notional),

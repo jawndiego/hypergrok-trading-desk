@@ -59,6 +59,7 @@ from .testnet_qualification import (
     record_canary_cancel_attempt,
     record_canary_open_queries,
     record_primary_attempt,
+    retained_qualification_snapshot_from_dict,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -2217,6 +2218,113 @@ class QualificationStore:
                 authority_hash=authority_hash,
             )
 
+    def load_current_signing_authority(
+        self,
+        command_id: str,
+        *,
+        worker_id: str,
+        at: datetime,
+    ) -> QualificationSigningAuthority:
+        """Load the sole durable authority for an active claimed phase.
+
+        This is the restart-safe counterpart to ``require_signing_authority``.
+        It never creates, refreshes, or replaces authority and it refuses a
+        phase after an attempt exists.  The production signer still performs
+        its independent ``require_current_signing_authority`` check before it
+        allocates a nonce or touches the wallet.
+        """
+
+        checked_command = _identifier(command_id, "command_id")
+        checked_worker = _identifier(worker_id, "worker_id")
+        checked_at = _utc(at, "at")
+        connection = self.execution_store._connect()  # type: ignore[attr-defined]
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            if connection.execute("PRAGMA query_only").fetchone()[0] != 1:
+                raise StorageError("qualification authority load is not query-only")
+            connection.execute("BEGIN")
+            outbox_row = connection.execute(
+                "SELECT * FROM execution_qualification_outbox WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            if outbox_row is None:
+                raise RecordNotFound("qualification outbox is not persisted")
+            current_outbox = self._outbox_from_row(outbox_row)
+            command, outbox, step = self._require_claim_locked(
+                connection,
+                command_id=checked_command,
+                worker_id=checked_worker,
+                fencing_token=current_outbox.fencing_token,
+                at=checked_at,
+            )
+            rows = connection.execute(
+                """
+                SELECT * FROM execution_qualification_signing_authorities
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked_command, step.phase.value),
+            ).fetchall()
+            if len(rows) != 1:
+                raise StateConflict(
+                    "durable qualification signing authority is not unique"
+                )
+            row = rows[0]
+            self._verify_signing_authority_row(row)
+            attempt = connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_attempts
+                WHERE command_id = ? AND phase = ? LIMIT 1
+                """,
+                (checked_command, step.phase.value),
+            ).fetchone()
+            critical = connection.execute(
+                """
+                SELECT 1 FROM execution_incidents
+                WHERE severity = 'critical' AND state != 'closed' LIMIT 1
+                """
+            ).fetchone()
+            authority = QualificationSigningAuthority(
+                command_id=checked_command,
+                phase=step.phase,
+                action_hash=str(row["action_hash"]),
+                worker_id=str(row["worker_id"]),
+                fencing_token=int(row["fencing_token"]),
+                issued_at=_parse_time(row["issued_at"], "issued_at"),
+                lease_expires_at=_parse_time(
+                    row["lease_expires_at"], "lease_expires_at"
+                ),
+                authority_hash=str(row["authority_hash"]),
+            )
+            authority.verify_integrity()
+            if (
+                step.state != "claimed"
+                or command.current_phase != authority.phase.value
+                or step.phase is not authority.phase
+                or step.action_hash != authority.action_hash
+                or outbox.current_attempt_id is not None
+                or attempt is not None
+                or critical is not None
+                or row["command_id"] != checked_command
+                or row["phase"] != step.phase.value
+                or row["action_hash"] != step.action_hash
+                or row["worker_id"] != checked_worker
+                or int(row["fencing_token"]) != outbox.fencing_token
+                or authority.worker_id != checked_worker
+                or authority.fencing_token != outbox.fencing_token
+                or authority.lease_expires_at != outbox.lease_expires_at
+                or not authority.issued_at <= checked_at < authority.lease_expires_at
+                or _milliseconds(checked_at) >= step.expires_at_ms
+            ):
+                raise StateConflict(
+                    "qualification signing authority is not active and unused"
+                )
+            return authority
+        finally:
+            try:
+                connection.rollback()
+            finally:
+                connection.close()
+
     def require_current_signing_authority(
         self,
         command_id: str,
@@ -3317,16 +3425,122 @@ class QualificationStore:
     def normalize_expired_claims(self, *, at: datetime) -> int:
         """Normalize expired claims without ever authorizing another send.
 
+        An expired never-claimed queued step is terminalized as proven unsent.
         An untouched claimed step can be reclaimed while its exact action is
-        still live.  Once signing authority exists, the permit is never used
-        to sign again.  A prepared attempt without submission authority is
-        proven unsent and releases its reservation; ``sending`` becomes
-        unknown and retains reservation for reconciliation.
+        still live. Once signing authority exists, the permit is never used to
+        sign again. A prepared attempt without submission authority is proven
+        unsent. Place reservation is released; an unsent cancel retains the
+        live order's reservation. ``sending`` becomes unknown and retains its
+        reservation for reconciliation.
         """
 
         checked_at = _utc(at, "at")
         changed_count = 0
         with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
+            queued_rows = connection.execute(
+                """
+                SELECT o.command_id
+                FROM execution_qualification_outbox AS o
+                JOIN execution_qualification_commands AS c
+                  ON c.command_id = o.command_id
+                JOIN execution_qualification_steps AS s
+                  ON s.command_id = c.command_id
+                 AND s.phase = c.current_phase
+                WHERE o.state = 'queued' AND c.state = 'queued'
+                  AND s.state = 'ready' AND s.expires_at_ms <= ?
+                ORDER BY o.created_at, o.command_id
+                """,
+                (_milliseconds(checked_at),),
+            ).fetchall()
+            for identity in queued_rows:
+                command_row = connection.execute(
+                    "SELECT * FROM execution_qualification_commands WHERE command_id = ?",
+                    (identity["command_id"],),
+                ).fetchone()
+                outbox_row = connection.execute(
+                    "SELECT * FROM execution_qualification_outbox WHERE command_id = ?",
+                    (identity["command_id"],),
+                ).fetchone()
+                if command_row is None or outbox_row is None:
+                    raise StorageError("expired queued qualification is incomplete")
+                command = self._command_from_row(command_row)
+                outbox = self._outbox_from_row(outbox_row)
+                phase = QualificationAttemptPhase(command.current_phase)
+                step_row = connection.execute(
+                    """
+                    SELECT * FROM execution_qualification_steps
+                    WHERE command_id = ? AND phase = ?
+                    """,
+                    (command.command_id, phase.value),
+                ).fetchone()
+                if step_row is None:
+                    raise StorageError("expired queued qualification lacks a step")
+                step = self._step_from_row(step_row)
+                forbidden = any(
+                    connection.execute(query, (command.command_id, phase.value)).fetchone()
+                    is not None
+                    for query in (
+                        "SELECT 1 FROM execution_qualification_signing_authorities WHERE command_id = ? AND phase = ?",
+                        "SELECT 1 FROM execution_qualification_attempts WHERE command_id = ? AND phase = ?",
+                        "SELECT 1 FROM execution_qualification_submission_authorities WHERE command_id = ? AND phase = ?",
+                        "SELECT 1 FROM execution_qualification_transport_evidence WHERE command_id = ? AND phase = ?",
+                    )
+                )
+                if (
+                    step.state != "ready"
+                    or outbox.worker_id is not None
+                    or outbox.current_attempt_id is not None
+                    or forbidden
+                ):
+                    raise StorageError(
+                        "expired queued qualification is not proven unsent"
+                    )
+                if phase is not QualificationAttemptPhase.CANCEL:
+                    self._release_reservation_locked(
+                        connection, command, at=checked_at
+                    )
+                reservation_released = (
+                    command.reservation_released
+                    if phase is QualificationAttemptPhase.CANCEL
+                    else True
+                )
+                self._write_step_locked(
+                    connection, step, state="terminal_unsent", at=checked_at
+                )
+                self._write_command_locked(
+                    connection,
+                    command,
+                    state="halted",
+                    current_phase="halted",
+                    at=checked_at,
+                    terminal=True,
+                    reservation_released=reservation_released,
+                )
+                self._write_outbox_locked(
+                    connection,
+                    outbox,
+                    state="halted",
+                    at=checked_at,
+                    worker_id=None,
+                    fencing_token=outbox.fencing_token,
+                    claimed_at=None,
+                    lease_expires_at=None,
+                    current_attempt_id=None,
+                    attempt_count=outbox.attempt_count,
+                )
+                self.execution_store._append_event_locked(  # type: ignore[attr-defined]
+                    connection,
+                    command_id=None,
+                    event_type="qualification_queued_action_expired_unsent",
+                    occurred_at=checked_at,
+                    payload={
+                        "qualification_command_id": command.command_id,
+                        "phase": phase.value,
+                        "reservation_retained": not reservation_released,
+                        "retry_performed": False,
+                    },
+                )
+                changed_count += 1
             rows = connection.execute(
                 """
                 SELECT command_id FROM execution_qualification_outbox
@@ -3583,8 +3797,14 @@ class QualificationStore:
                 # Signing authority with no durable attempt, an expired action,
                 # or a prepared attempt without submission authority is proven
                 # unable to have reached the venue. Consume it permanently.
-                self._release_reservation_locked(
-                    connection, command, at=checked_at
+                if phase is not QualificationAttemptPhase.CANCEL:
+                    self._release_reservation_locked(
+                        connection, command, at=checked_at
+                    )
+                reservation_released = (
+                    command.reservation_released
+                    if phase is QualificationAttemptPhase.CANCEL
+                    else True
                 )
                 terminal_step_state = (
                     "terminal_unsent"
@@ -3604,7 +3824,7 @@ class QualificationStore:
                     current_phase="halted",
                     at=checked_at,
                     terminal=True,
-                    reservation_released=True,
+                    reservation_released=reservation_released,
                 )
                 self._write_outbox_locked(
                     connection,
@@ -3620,6 +3840,228 @@ class QualificationStore:
                 )
                 changed_count += 1
         return changed_count
+
+    def halt_prepared_attempt_for_missing_envelope(
+        self,
+        command_id: str,
+        *,
+        worker_id: str,
+        fencing_token: int,
+        at: datetime,
+    ) -> QualificationCommandRecord:
+        """Terminalize a proven-unsent attempt whose wire artifact is unusable.
+
+        Full signed wire bytes live in an executor-only audit artifact rather
+        than the authority database.  If that artifact is absent or fails its
+        integrity checks, the exact prepared attempt cannot be sent.  This
+        transition requires that no submission authority or transport result
+        ever existed and permanently consumes the permit/signing authority so
+        no replacement can be signed or resent. An unsent place releases its
+        reservation; an unsent cancel retains the live order's reservation.
+        """
+
+        checked_command = _identifier(command_id, "command_id")
+        checked_worker = _identifier(worker_id, "worker_id")
+        if type(fencing_token) is not int or fencing_token <= 0:
+            raise ValidationError("fencing_token must be positive")
+        checked_at = _utc(at, "at")
+        with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
+            command, outbox, step = self._require_claim_locked(
+                connection,
+                command_id=checked_command,
+                worker_id=checked_worker,
+                fencing_token=fencing_token,
+                at=checked_at,
+            )
+            attempt_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_attempts
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked_command, step.phase.value),
+            ).fetchone()
+            if attempt_row is None:
+                raise RecordNotFound("qualification prepared attempt is missing")
+            attempt = self._attempt_from_row(attempt_row)
+            submission = connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_submission_authorities
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked_command, step.phase.value),
+            ).fetchone()
+            transport = connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_transport_evidence
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked_command, step.phase.value),
+            ).fetchone()
+            if (
+                step.state != "prepared"
+                or attempt.state != "prepared"
+                or attempt.worker_id != checked_worker
+                or attempt.fencing_token != fencing_token
+                or outbox.current_attempt_id != attempt.attempt_id
+                or submission is not None
+                or transport is not None
+            ):
+                raise StateConflict(
+                    "qualification attempt is not proven unsent and haltable"
+                )
+            if step.phase is not QualificationAttemptPhase.CANCEL:
+                self._release_reservation_locked(connection, command, at=checked_at)
+            reservation_released = (
+                command.reservation_released
+                if step.phase is QualificationAttemptPhase.CANCEL
+                else True
+            )
+            self._write_step_locked(
+                connection,
+                step,
+                state="terminal_unsent",
+                at=checked_at,
+            )
+            halted = self._write_command_locked(
+                connection,
+                command,
+                state="halted",
+                current_phase="halted",
+                at=checked_at,
+                terminal=True,
+                reservation_released=reservation_released,
+            )
+            self._write_outbox_locked(
+                connection,
+                outbox,
+                state="halted",
+                at=checked_at,
+                worker_id=None,
+                fencing_token=outbox.fencing_token,
+                claimed_at=None,
+                lease_expires_at=None,
+                current_attempt_id=outbox.current_attempt_id,
+                attempt_count=outbox.attempt_count,
+            )
+            self.execution_store._append_event_locked(  # type: ignore[attr-defined]
+                connection,
+                command_id=None,
+                event_type="qualification_prepared_envelope_unusable",
+                occurred_at=checked_at,
+                payload={
+                    "qualification_command_id": checked_command,
+                    "phase": step.phase.value,
+                    "attempt_id": attempt.attempt_id,
+                    "proven_unsent": True,
+                    "retry_performed": False,
+                },
+            )
+            return halted
+
+    def halt_unused_signing_authority(
+        self,
+        command_id: str,
+        *,
+        worker_id: str,
+        fencing_token: int,
+        at: datetime,
+    ) -> QualificationCommandRecord:
+        """Halt an unsent claimed phase after its signing gate becomes unusable.
+
+        This path is for an expired action or a newly opened critical incident
+        discovered before nonce allocation/envelope persistence.  It requires
+        no attempt, submission authority, or transport evidence and consumes
+        the phase permanently rather than refreshing or reclaiming it.
+        """
+
+        checked_command = _identifier(command_id, "command_id")
+        checked_worker = _identifier(worker_id, "worker_id")
+        if type(fencing_token) is not int or fencing_token <= 0:
+            raise ValidationError("fencing_token must be positive")
+        checked_at = _utc(at, "at")
+        with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
+            command, outbox, step = self._require_claim_locked(
+                connection,
+                command_id=checked_command,
+                worker_id=checked_worker,
+                fencing_token=fencing_token,
+                at=checked_at,
+            )
+            attempt = connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_attempts
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked_command, step.phase.value),
+            ).fetchone()
+            submission = connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_submission_authorities
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked_command, step.phase.value),
+            ).fetchone()
+            transport = connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_transport_evidence
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked_command, step.phase.value),
+            ).fetchone()
+            if (
+                step.state != "claimed"
+                or outbox.current_attempt_id is not None
+                or attempt is not None
+                or submission is not None
+                or transport is not None
+            ):
+                raise StateConflict(
+                    "qualification signing authority is not proven unused"
+                )
+            if step.phase is not QualificationAttemptPhase.CANCEL:
+                self._release_reservation_locked(connection, command, at=checked_at)
+            reservation_released = (
+                command.reservation_released
+                if step.phase is QualificationAttemptPhase.CANCEL
+                else True
+            )
+            self._write_step_locked(
+                connection, step, state="terminal_unsent", at=checked_at
+            )
+            halted = self._write_command_locked(
+                connection,
+                command,
+                state="halted",
+                current_phase="halted",
+                at=checked_at,
+                terminal=True,
+                reservation_released=reservation_released,
+            )
+            self._write_outbox_locked(
+                connection,
+                outbox,
+                state="halted",
+                at=checked_at,
+                worker_id=None,
+                fencing_token=outbox.fencing_token,
+                claimed_at=None,
+                lease_expires_at=None,
+                current_attempt_id=None,
+                attempt_count=outbox.attempt_count,
+            )
+            self.execution_store._append_event_locked(  # type: ignore[attr-defined]
+                connection,
+                command_id=None,
+                event_type="qualification_signing_authority_unusable",
+                occurred_at=checked_at,
+                payload={
+                    "qualification_command_id": checked_command,
+                    "phase": step.phase.value,
+                    "proven_unsent": True,
+                    "retry_performed": False,
+                },
+            )
+            return halted
 
     @staticmethod
     def _verify_query_against_durable_action(
@@ -3975,6 +4417,300 @@ class QualificationStore:
                 raise StateConflict("terminal snapshot differs from retained query evidence")
         return str(snapshot_row["snapshot_hash"])
 
+    def load_query_evidence(
+        self,
+        command_id: str,
+        query_kind: str,
+    ) -> tuple[QualificationOrderStatusEvidence, RetainedQualificationSnapshot]:
+        """Hydrate an already-recorded query and its exact retained snapshot.
+
+        Reconciliation commands use this after a crash so they never issue a
+        replacement read merely because the prior process died between the
+        query insert and the workflow transition.
+        """
+
+        checked_command = _identifier(command_id, "command_id")
+        if query_kind not in {"open_by_cloid", "open_by_oid", "terminal"}:
+            raise ValidationError("qualification query kind is unsupported")
+        connection = self.execution_store._connect()  # type: ignore[attr-defined]
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            connection.execute("BEGIN")
+            command_row = connection.execute(
+                "SELECT * FROM execution_qualification_commands WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            query_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_queries
+                WHERE command_id = ? AND query_kind = ?
+                """,
+                (checked_command, query_kind),
+            ).fetchone()
+            if command_row is None:
+                raise RecordNotFound("qualification command is not persisted")
+            if query_row is None:
+                raise RecordNotFound("qualification query evidence is missing")
+            command = self._command_from_row(command_row)
+            query_payload = _decode(
+                query_row["payload_json"],
+                query_row["content_hash"],
+                field="qualification query evidence",
+            )
+            if not isinstance(query_payload, dict):
+                raise StorageError("qualification query evidence is not an object")
+            evidence = self._order_status_from_payload(
+                query_payload.get("order_status")
+            )
+            if evidence is None:
+                raise StorageError("qualification query order status is missing")
+            snapshot_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_snapshots
+                WHERE snapshot_hash = ?
+                """,
+                (query_row["account_snapshot_hash"],),
+            ).fetchone()
+            if snapshot_row is None:
+                raise StorageError("qualification query lost its account snapshot")
+            snapshot_payload = _decode(
+                snapshot_row["payload_json"],
+                snapshot_row["content_hash"],
+                field="qualification query account snapshot",
+            )
+            if not isinstance(snapshot_payload, dict):
+                raise StorageError("qualification query account snapshot is invalid")
+            try:
+                snapshot = retained_qualification_snapshot_from_dict(snapshot_payload)
+            except (TypeError, ValidationError, StateConflict) as error:
+                raise StorageError(
+                    "qualification query account snapshot is invalid"
+                ) from error
+            self._require_query_locked(
+                connection,
+                command=command,
+                query_kind=query_kind,
+                evidence=evidence,
+                snapshot=snapshot,
+            )
+            return evidence, snapshot
+        finally:
+            try:
+                connection.rollback()
+            finally:
+                connection.close()
+
+    def refresh_terminal_query_snapshot(
+        self,
+        command_id: str,
+        *,
+        evidence: QualificationOrderStatusEvidence,
+        account_snapshot: RetainedQualificationSnapshot,
+        at: datetime,
+    ) -> RetainedQualificationSnapshot:
+        """Rebind immutable terminal order evidence to a newer account fence.
+
+        A process may crash after recording terminal order status but before
+        terminal workflow/release. The unique order evidence is never queried
+        or replaced again. If its account snapshot becomes stale, this method
+        atomically advances only the causal account watermark to a strictly
+        newer same-account snapshot that still covers the original status.
+        """
+
+        checked_command = _identifier(command_id, "command_id")
+        if not isinstance(evidence, QualificationOrderStatusEvidence):
+            raise TypeError("evidence must be QualificationOrderStatusEvidence")
+        evidence.verify_integrity()
+        if evidence.missing or not evidence.terminal:
+            raise ValidationError("terminal snapshot refresh requires terminal evidence")
+        if not isinstance(account_snapshot, RetainedQualificationSnapshot):
+            raise TypeError("account_snapshot must be RetainedQualificationSnapshot")
+        account_snapshot.verify_integrity()
+        checked_at = _utc(at, "at")
+        age_ms = _milliseconds(checked_at) - account_snapshot.account.server_time_ms
+        if age_ms > 5_000 or age_ms < -1_000:
+            raise StateConflict("refreshed terminal account snapshot is stale or future-dated")
+        if abs(
+            _milliseconds(checked_at) - _milliseconds(account_snapshot.retained_at)
+        ) > 5_000:
+            raise StateConflict("refreshed terminal account snapshot is not contemporaneous")
+        snapshot_payload_json, snapshot_content_hash = _payload(
+            account_snapshot.as_dict()
+        )
+        snapshot_material = self._snapshot_record(
+            account_snapshot,
+            account_id=self.execution_store.account_id,
+            payload_hash=snapshot_content_hash,
+        )
+        snapshot_record_hash = _record_hash("snapshot", snapshot_material)
+        with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
+            command_row = connection.execute(
+                "SELECT * FROM execution_qualification_commands WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            query_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_queries
+                WHERE command_id = ? AND query_kind = 'terminal'
+                """,
+                (checked_command,),
+            ).fetchone()
+            if command_row is None or query_row is None:
+                raise RecordNotFound("terminal qualification query is missing")
+            command = self._command_from_row(command_row)
+            workflow = self._workflow_from_payload(
+                json.loads(command.workflow_json),
+                self._intent_from_payload(json.loads(command.intent_json)),
+            )
+            self._require_exact_workflow(command, workflow)
+            if (
+                command.state != "reconciling"
+                or workflow.state
+                not in {
+                    QualificationWorkflowState.CANCEL_PENDING_QUERY,
+                    QualificationWorkflowState.CLOSE_PENDING_QUERY,
+                }
+            ):
+                raise StateConflict("qualification is not awaiting terminal completion")
+            query_payload = _decode(
+                query_row["payload_json"],
+                query_row["content_hash"],
+                field="qualification terminal query",
+            )
+            if not isinstance(query_payload, dict):
+                raise StorageError("qualification terminal query is not an object")
+            stored_evidence = self._order_status_from_payload(
+                query_payload.get("order_status")
+            )
+            if stored_evidence != evidence:
+                raise StateConflict("terminal order evidence is immutable")
+            old_snapshot_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_snapshots
+                WHERE snapshot_hash = ?
+                """,
+                (query_row["account_snapshot_hash"],),
+            ).fetchone()
+            if old_snapshot_row is None:
+                raise StorageError("terminal query lost its prior account snapshot")
+            old_snapshot_payload = _decode(
+                old_snapshot_row["payload_json"],
+                old_snapshot_row["content_hash"],
+                field="prior terminal account snapshot",
+            )
+            if not isinstance(old_snapshot_payload, dict):
+                raise StorageError("prior terminal account snapshot is invalid")
+            try:
+                old_snapshot = retained_qualification_snapshot_from_dict(
+                    old_snapshot_payload
+                )
+            except (TypeError, ValidationError, StateConflict) as error:
+                raise StorageError("prior terminal account snapshot is invalid") from error
+            self._require_query_locked(
+                connection,
+                command=command,
+                query_kind="terminal",
+                evidence=evidence,
+                snapshot=old_snapshot,
+            )
+            if (
+                account_snapshot.account.main_account_address
+                != old_snapshot.account.main_account_address
+                or account_snapshot.api_wallet_address
+                != old_snapshot.api_wallet_address
+                or account_snapshot.role_main_account_address
+                != old_snapshot.role_main_account_address
+                or account_snapshot.retained_at <= old_snapshot.retained_at
+                or account_snapshot.account.server_time_ms
+                <= old_snapshot.account.server_time_ms
+                or evidence.status_timestamp_ms is None
+                or account_snapshot.account.server_time_ms
+                < evidence.status_timestamp_ms
+            ):
+                raise StateConflict(
+                    "terminal account snapshot did not strictly advance its causal fence"
+                )
+            existing_snapshot = connection.execute(
+                """
+                SELECT * FROM execution_qualification_snapshots
+                WHERE snapshot_hash = ?
+                """,
+                (account_snapshot.snapshot_hash,),
+            ).fetchone()
+            if existing_snapshot is None:
+                connection.execute(
+                    """
+                    INSERT INTO execution_qualification_snapshots (
+                        snapshot_hash, account_id, main_account_address,
+                        api_wallet_address, account_server_time_ms, retained_at,
+                        payload_json, content_hash, record_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        account_snapshot.snapshot_hash,
+                        self.execution_store.account_id,
+                        account_snapshot.account.main_account_address,
+                        account_snapshot.api_wallet_address,
+                        account_snapshot.account.server_time_ms,
+                        _time(account_snapshot.retained_at),
+                        snapshot_payload_json,
+                        snapshot_content_hash,
+                        snapshot_record_hash,
+                    ),
+                )
+            elif (
+                existing_snapshot["payload_json"] != snapshot_payload_json
+                or existing_snapshot["content_hash"] != snapshot_content_hash
+                or existing_snapshot["record_hash"] != snapshot_record_hash
+            ):
+                raise StorageError("refreshed terminal account snapshot differs")
+            refreshed_payload = dict(query_payload)
+            refreshed_payload["account_snapshot_hash"] = account_snapshot.snapshot_hash
+            refreshed_json, refreshed_hash = _payload(refreshed_payload)
+            material = {
+                "evidence_hash": evidence.evidence_hash,
+                "command_id": checked_command,
+                "query_kind": "terminal",
+                "order_identity_hash": evidence.order_identity_hash,
+                "account_snapshot_hash": account_snapshot.snapshot_hash,
+                "observed_at": query_row["observed_at"],
+                "content_hash": refreshed_hash,
+            }
+            changed = connection.execute(
+                """
+                UPDATE execution_qualification_queries SET
+                    account_snapshot_hash = ?, payload_json = ?,
+                    content_hash = ?, record_hash = ?
+                WHERE command_id = ? AND query_kind = 'terminal'
+                  AND evidence_hash = ? AND account_snapshot_hash = ?
+                """,
+                (
+                    account_snapshot.snapshot_hash,
+                    refreshed_json,
+                    refreshed_hash,
+                    _record_hash("query", material),
+                    checked_command,
+                    evidence.evidence_hash,
+                    old_snapshot.snapshot_hash,
+                ),
+            )
+            if changed.rowcount != 1:
+                raise StateConflict("terminal account snapshot refresh raced")
+            self.execution_store._append_event_locked(  # type: ignore[attr-defined]
+                connection,
+                command_id=None,
+                event_type="qualification_terminal_snapshot_refreshed",
+                occurred_at=checked_at,
+                payload={
+                    "qualification_command_id": checked_command,
+                    "terminal_evidence_hash": evidence.evidence_hash,
+                    "prior_snapshot_hash": old_snapshot.snapshot_hash,
+                    "refreshed_snapshot_hash": account_snapshot.snapshot_hash,
+                    "order_status_requeried": False,
+                },
+            )
+        return account_snapshot
+
     def advance_canary_open_queries(
         self,
         command_id: str,
@@ -4159,6 +4895,155 @@ class QualificationStore:
                     _time(checked_at),
                     _time(checked_at),
                     _record_hash("step", self._step_material(step)),
+                ),
+            )
+            self._write_command_locked(
+                connection,
+                command,
+                state="queued",
+                current_phase="cancel",
+                at=checked_at,
+                workflow=next_workflow,
+            )
+            self._write_outbox_locked(
+                connection,
+                outbox,
+                state="queued",
+                at=checked_at,
+                worker_id=None,
+                fencing_token=outbox.fencing_token,
+                claimed_at=None,
+                lease_expires_at=None,
+                current_attempt_id=None,
+                attempt_count=outbox.attempt_count,
+            )
+        return next_workflow, action
+
+    def advance_and_queue_canary_cancel(
+        self,
+        command_id: str,
+        *,
+        current_workflow: QualificationWorkflow,
+        by_cloid: QualificationOrderStatusEvidence,
+        by_oid: QualificationOrderStatusEvidence,
+        at: datetime,
+    ) -> tuple[QualificationWorkflow, QualificationCancelAction | None]:
+        """Atomically consume paired reads and queue any required live cancel.
+
+        A verified open order must never be committed as ``OPEN_VERIFIED`` in
+        one transaction and left without its cancel step by a process crash.
+        Non-cancelable terminal/unresolved query results use the ordinary
+        advance transition because no live remainder can be canceled.
+        """
+
+        checked_command = _identifier(command_id, "command_id")
+        checked_at = _utc(at, "at")
+        reviewed = record_canary_open_queries(
+            current_workflow,
+            by_cloid,
+            by_oid,
+            at=checked_at,
+        )
+        try:
+            next_workflow, action = prepare_canary_cancel(
+                reviewed,
+                at=checked_at,
+            )
+        except StateConflict:
+            return (
+                self.advance_canary_open_queries(
+                    checked_command,
+                    current_workflow=current_workflow,
+                    by_cloid=by_cloid,
+                    by_oid=by_oid,
+                    at=checked_at,
+                ),
+                None,
+            )
+        action_json, action_content_hash = _payload(action.as_dict())
+        with self.execution_store._transaction() as connection:  # type: ignore[attr-defined]
+            command_row = connection.execute(
+                "SELECT * FROM execution_qualification_commands WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            outbox_row = connection.execute(
+                "SELECT * FROM execution_qualification_outbox WHERE command_id = ?",
+                (checked_command,),
+            ).fetchone()
+            place_row = connection.execute(
+                """
+                SELECT * FROM execution_qualification_steps
+                WHERE command_id = ? AND phase = 'place'
+                """,
+                (checked_command,),
+            ).fetchone()
+            if command_row is None or outbox_row is None or place_row is None:
+                raise RecordNotFound("canary query/cancel state is incomplete")
+            command = self._command_from_row(command_row)
+            outbox = self._outbox_from_row(outbox_row)
+            place_step = self._step_from_row(place_row)
+            self._require_exact_workflow(command, current_workflow)
+            existing_cancel = connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_steps
+                WHERE command_id = ? AND phase = 'cancel'
+                """,
+                (checked_command,),
+            ).fetchone()
+            if (
+                command.kind is not QualificationIntentKind.GTC_PLACE_QUERY_CANCEL
+                or command.state != "reconciling"
+                or command.current_phase != "place"
+                or outbox.state != "reconciling"
+                or place_step.state not in {"response_received", "unknown"}
+                or existing_cancel is not None
+                or outbox.attempt_count != 1
+            ):
+                raise StateConflict(
+                    "canary paired reads and cancel are not atomically queueable"
+                )
+            self._require_query_locked(
+                connection,
+                command=command,
+                query_kind="open_by_cloid",
+                evidence=by_cloid,
+            )
+            self._require_query_locked(
+                connection,
+                command=command,
+                query_kind="open_by_oid",
+                evidence=by_oid,
+            )
+            self._write_step_locked(
+                connection, place_step, state="reconciled", at=checked_at
+            )
+            cancel_step = QualificationStepRecord(
+                command_id=checked_command,
+                phase=QualificationAttemptPhase.CANCEL,
+                action_hash=action.action_hash,
+                action_json=action_json,
+                expires_at_ms=action.expires_at_ms,
+                state="ready",
+                created_at=checked_at,
+                updated_at=checked_at,
+            )
+            connection.execute(
+                """
+                INSERT INTO execution_qualification_steps (
+                    command_id, phase, action_hash, action_json,
+                    action_content_hash, expires_at_ms, state, created_at,
+                    updated_at, record_hash
+                ) VALUES (?, 'cancel', ?, ?, ?, ?, 'ready', ?, ?, ?)
+                """,
+                (
+                    checked_command,
+                    action.action_hash,
+                    action_json,
+                    action_content_hash,
+                    action.expires_at_ms,
+                    _time(checked_at),
+                    _time(checked_at),
+                    _record_hash("step", self._step_material(cancel_step)),
                 ),
             )
             self._write_command_locked(

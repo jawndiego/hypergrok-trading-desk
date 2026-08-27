@@ -5,6 +5,14 @@
 flush ruleset
 
 table inet trading_desk_filter {
+    # Observe IPv6 as it arrives from the Mac before the kernel rejects
+    # forwarding. With IPv6 forwarding disabled, it does not reach the
+    # forward-chain drop counter below.
+    chain prerouting_observe {
+        type filter hook prerouting priority filter; policy accept;
+        iifname "wg-exec" meta nfproto ipv6 counter
+    }
+
     chain input {
         type filter hook input priority filter; policy drop;
         iifname "lo" accept
@@ -25,6 +33,9 @@ table inet trading_desk_filter {
         iifname "wg-exec" oifname "__REVIEWED_WAN_INTERFACE__" ip saddr __REVIEWED_ROUTER_IPV4_NETWORK__ tcp dport 443 ct state new,established accept
         iifname "wg-exec" oifname "__REVIEWED_WAN_INTERFACE__" ip saddr __REVIEWED_ROUTER_IPV4_NETWORK__ udp dport 123 ct state new,established accept
         iifname "__REVIEWED_WAN_INTERFACE__" oifname "wg-exec" ip daddr __REVIEWED_ROUTER_IPV4_NETWORK__ ct state established,related accept
+        # Make denied IPv4 forwarded traffic observable during attended leak
+        # tests: alternate DNS, DoT, QUIC and unreviewed ports.
+        iifname "wg-exec" counter drop
     }
 
     chain output {

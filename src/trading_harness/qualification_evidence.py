@@ -41,6 +41,10 @@ from .hyperliquid_account import (
     METADATA_SNAPSHOT_HASH_DOMAIN,
     HyperliquidAccountTransportError,
     HyperliquidAccountSnapshot,
+    MarginSummary,
+    PerpInstrument,
+    PerpMetadataSnapshot,
+    StandardAccountMode,
     fetch_account_snapshot,
 )
 from .market_data import MarketDataTransportError, get_market_brief, public_info_endpoint
@@ -1447,6 +1451,192 @@ def verify_qualification_evidence_review_artifact(
     return artifact_hash
 
 
+def qualification_evidence_review_artifact_from_dict(
+    value: Mapping[str, object],
+    *,
+    at: datetime,
+    maximum_age_ms: int = MAX_EVIDENCE_AGE_MS,
+) -> TestnetQualificationEvidenceArtifact:
+    """Rehydrate one freshly verified, flat pre-write review artifact.
+
+    The review schema intentionally admits no positions or open orders, which
+    keeps this parser narrower than a general account-snapshot deserializer.
+    Verification runs before construction and the exact reconstructed document
+    must round-trip byte-for-byte through the canonical serializer.
+    """
+
+    # A Mapping may be a mutable/custom view whose values change between the
+    # freshness check and reconstruction. Canonically detach it exactly once,
+    # then use only that immutable-by-convention JSON snapshot below.
+    try:
+        detached = json.loads(canonical_json(value))
+    except (TypeError, ValueError, RecursionError) as error:
+        raise QualificationEvidenceArtifactError(
+            "qualification artifact cannot be canonically detached"
+        ) from error
+    root = _mapping(detached, "qualification artifact")
+    verify_qualification_evidence_review_artifact(
+        root,
+        at=at,
+        maximum_age_ms=maximum_age_ms,
+    )
+    retained_payload = _mapping(root["retained_snapshot"], "retained_snapshot")
+    account_payload = _mapping(
+        retained_payload["account_snapshot"],
+        "retained_snapshot.account_snapshot",
+    )
+    metadata_payload = _mapping(account_payload["metadata"], "account.metadata")
+    raw_instruments = metadata_payload["instruments"]
+    if not isinstance(raw_instruments, list):  # verified above; defensive boundary
+        raise QualificationEvidenceArtifactError("metadata instruments are invalid")
+    instruments = tuple(
+        PerpInstrument(
+            symbol=str(item["symbol"]),
+            asset_id=int(item["asset_id"]),
+            sz_decimals=int(item["sz_decimals"]),
+            max_leverage=_canonical_decimal_text(
+                item["max_leverage"], "instrument.max_leverage", positive=True
+            ),
+            margin_mode=str(item["margin_mode"]),
+            margin_table_id=item["margin_table_id"],
+            is_delisted=bool(item["is_delisted"]),
+            metadata_hash=str(item["metadata_hash"]),
+        )
+        for item in raw_instruments
+        if isinstance(item, dict)
+    )
+    if len(instruments) != len(raw_instruments):
+        raise QualificationEvidenceArtifactError("metadata instruments are invalid")
+
+    def summary(field: str) -> MarginSummary:
+        payload = _mapping(account_payload[field], f"account.{field}")
+        return MarginSummary(
+            account_value=_canonical_decimal_text(
+                payload["account_value"], f"account.{field}.account_value"
+            ),
+            total_notional_position=_canonical_decimal_text(
+                payload["total_notional_position"],
+                f"account.{field}.total_notional_position",
+            ),
+            total_raw_usd=_canonical_decimal_text(
+                payload["total_raw_usd"], f"account.{field}.total_raw_usd"
+            ),
+            total_margin_used=_canonical_decimal_text(
+                payload["total_margin_used"],
+                f"account.{field}.total_margin_used",
+            ),
+        )
+
+    account = HyperliquidAccountSnapshot(
+        network="testnet",
+        source_url=TESTNET_QUALIFICATION_INFO_ENDPOINT,
+        main_account_address=str(account_payload["main_account_address"]),
+        account_mode=StandardAccountMode(str(account_payload["account_mode"])),
+        server_time_ms=int(account_payload["server_time_ms"]),
+        received_at_ms=int(account_payload["received_at_ms"]),
+        age_ms=int(account_payload["age_ms"]),
+        margin_summary=summary("margin_summary"),
+        cross_margin_summary=summary("cross_margin_summary"),
+        cross_maintenance_margin_used=_canonical_decimal_text(
+            account_payload["cross_maintenance_margin_used"],
+            "account.cross_maintenance_margin_used",
+            nonnegative=True,
+        ),
+        withdrawable=_canonical_decimal_text(
+            account_payload["withdrawable"],
+            "account.withdrawable",
+            nonnegative=True,
+        ),
+        positions=(),
+        open_orders=(),
+        metadata=PerpMetadataSnapshot(
+            collateral_token=metadata_payload["collateral_token"],
+            instruments=instruments,
+            metadata_hash=str(metadata_payload["metadata_hash"]),
+        ),
+        snapshot_hash=str(account_payload["snapshot_hash"]),
+    )
+    role_payload = _mapping(retained_payload["user_role"], "user_role")
+    retained = RetainedQualificationSnapshot(
+        account=account,
+        api_wallet_address=str(retained_payload["api_wallet_address"]),
+        role=str(role_payload["role"]),
+        role_main_account_address=str(role_payload["main_account_address"]),
+        role_response_json=canonical_json(role_payload["response"]),
+        role_response_hash=str(role_payload["response_hash"]),
+        retained_at=_datetime_from_ms(int(root["collected_at_ms"])),
+        snapshot_hash=str(retained_payload["snapshot_hash"]),
+    )
+    market_payload = _mapping(root["market_snapshot"], "market_snapshot")
+    market = QualificationMarketSnapshot(
+        symbol=str(market_payload["symbol"]),
+        observed_at_ms=int(market_payload["observed_at_ms"]),
+        received_at_ms=int(market_payload["received_at_ms"]),
+        best_bid=_canonical_decimal_text(
+            market_payload["best_bid"], "market.best_bid", positive=True
+        ),
+        best_ask=_canonical_decimal_text(
+            market_payload["best_ask"], "market.best_ask", positive=True
+        ),
+        midpoint=_canonical_decimal_text(
+            market_payload["midpoint"], "market.midpoint", positive=True
+        ),
+        bid_depth_25bps=_canonical_decimal_text(
+            market_payload["bid_depth_25bps"],
+            "market.bid_depth_25bps",
+            nonnegative=True,
+        ),
+        ask_depth_25bps=_canonical_decimal_text(
+            market_payload["ask_depth_25bps"],
+            "market.ask_depth_25bps",
+            nonnegative=True,
+        ),
+        source_hash=str(market_payload["source_hash"]),
+    )
+    reads_payload = root["reads"]
+    if not isinstance(reads_payload, list):  # verified above
+        raise QualificationEvidenceArtifactError("qualification reads are invalid")
+    reads = tuple(
+        QualificationInfoReadEvidence(
+            read_id=str(item["read_id"]),
+            request_json=canonical_json(item["request"]),
+            received_at_ms=int(item["received_at_ms"]),
+            canonical_response_hash=str(item["canonical_response_hash"]),
+        )
+        for item in reads_payload
+        if isinstance(item, dict)
+    )
+    if len(reads) != len(reads_payload):
+        raise QualificationEvidenceArtifactError("qualification reads are invalid")
+    binding_payload = _mapping(root["asset_binding"], "asset_binding")
+    binding = QualificationAssetBinding(
+        symbol=str(binding_payload["symbol"]),
+        asset_id=int(binding_payload["asset_id"]),
+        sz_decimals=int(binding_payload["sz_decimals"]),
+        account_metadata_hash=str(binding_payload["account_metadata_hash"]),
+        instrument_metadata_hash=str(binding_payload["instrument_metadata_hash"]),
+        canonical_universe_hash=str(binding_payload["canonical_universe_hash"]),
+        meta_response_hash=str(binding_payload["meta_response_hash"]),
+        meta_and_asset_contexts_response_hash=str(
+            binding_payload["meta_and_asset_contexts_response_hash"]
+        ),
+    )
+    artifact = TestnetQualificationEvidenceArtifact(
+        retained_snapshot=retained,
+        market_snapshot=market,
+        asset_binding=binding,
+        reads=reads,
+        collected_at_ms=int(root["collected_at_ms"]),
+        artifact_hash=str(root["artifact_hash"]),
+    )
+    artifact.verify_integrity()
+    if canonical_json(artifact.as_dict()) != canonical_json(root):
+        raise QualificationEvidenceArtifactError(
+            "rehydrated qualification artifact differs from reviewed bytes"
+        )
+    return artifact
+
+
 def _artifact_bytes(artifact: TestnetQualificationEvidenceArtifact) -> bytes:
     if type(artifact) is not TestnetQualificationEvidenceArtifact:
         raise TypeError("artifact must be exact TESTNET qualification evidence")
@@ -1617,19 +1807,15 @@ def export_qualification_evidence_review_artifact(
     return output_path
 
 
-def verify_exported_qualification_evidence_review_artifact(
+def _read_exported_qualification_evidence_review_artifact(
     source: str | os.PathLike[str],
-    *,
-    at: datetime,
-    maximum_age_ms: int = MAX_EVIDENCE_AGE_MS,
-) -> str:
-    """Read and freshly verify one owner-only canonical artifact without mutation."""
+) -> dict[str, object]:
+    """Safely read one owner-only canonical artifact without mutation."""
 
     path = Path(source)
     if not path.name or path.name in {".", ".."}:
         raise ValidationError("source must name one qualification artifact")
     parent = _canonical_private_parent(path)
-    _utc(at, "at")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         parent_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
@@ -1716,6 +1902,34 @@ def verify_exported_qualification_evidence_review_artifact(
         raise QualificationEvidenceArtifactError(
             "artifact bytes are not the unique canonical encoding"
         )
+    return value
+
+
+def load_exported_qualification_evidence_review_artifact(
+    source: str | os.PathLike[str],
+    *,
+    at: datetime,
+    maximum_age_ms: int = MAX_EVIDENCE_AGE_MS,
+) -> TestnetQualificationEvidenceArtifact:
+    """Safely read, freshly verify and exactly rehydrate one review artifact."""
+
+    value = _read_exported_qualification_evidence_review_artifact(source)
+    return qualification_evidence_review_artifact_from_dict(
+        value,
+        at=at,
+        maximum_age_ms=maximum_age_ms,
+    )
+
+
+def verify_exported_qualification_evidence_review_artifact(
+    source: str | os.PathLike[str],
+    *,
+    at: datetime,
+    maximum_age_ms: int = MAX_EVIDENCE_AGE_MS,
+) -> str:
+    """Read and freshly verify one owner-only canonical artifact without mutation."""
+
+    value = _read_exported_qualification_evidence_review_artifact(source)
     return verify_qualification_evidence_review_artifact(
         value,
         at=at,
@@ -1739,6 +1953,8 @@ __all__ = (
     "TestnetQualificationEvidenceArtifact",
     "collect_testnet_qualification_evidence",
     "export_qualification_evidence_review_artifact",
+    "load_exported_qualification_evidence_review_artifact",
+    "qualification_evidence_review_artifact_from_dict",
     "verify_exported_qualification_evidence_review_artifact",
     "verify_qualification_evidence_review_artifact",
 )

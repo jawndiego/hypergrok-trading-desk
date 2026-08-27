@@ -45,6 +45,7 @@ from .errors import StateConflict, ValidationError
 from .hyperliquid_account import (
     HyperliquidAccountSnapshot,
     PositionSide,
+    hyperliquid_account_snapshot_from_dict,
     verify_account_snapshot_integrity,
 )
 from .hyperliquid_wire import (
@@ -456,6 +457,43 @@ def retain_qualification_snapshot(
         ),
     )
     result.verify_integrity()
+    return result
+
+
+def retained_qualification_snapshot_from_dict(
+    value: Mapping[str, object],
+) -> RetainedQualificationSnapshot:
+    """Rehydrate one exact retained snapshot for durable restart recovery."""
+
+    try:
+        detached = json.loads(canonical_json(value))
+    except (TypeError, ValueError, RecursionError) as error:
+        raise ValidationError("retained qualification snapshot is not canonical") from error
+    if not isinstance(detached, dict):
+        raise ValidationError("retained qualification snapshot must be an object")
+    role = detached.get("user_role")
+    account = detached.get("account_snapshot")
+    if not isinstance(role, dict) or not isinstance(account, dict):
+        raise ValidationError("retained qualification snapshot fields are invalid")
+    try:
+        retained_at = datetime.fromisoformat(
+            str(detached["retained_at"]).replace("Z", "+00:00")
+        )
+        result = RetainedQualificationSnapshot(
+            account=hyperliquid_account_snapshot_from_dict(account),
+            api_wallet_address=detached["api_wallet_address"],
+            role=role["role"],
+            role_main_account_address=role["main_account_address"],
+            role_response_json=canonical_json(role["response"]),
+            role_response_hash=role["response_hash"],
+            retained_at=retained_at,
+            snapshot_hash=detached["snapshot_hash"],
+        )
+        result.verify_integrity()
+    except (KeyError, TypeError, ValueError, ValidationError, StateConflict) as error:
+        raise ValidationError("retained qualification snapshot is invalid") from error
+    if canonical_json(result.as_dict()) != canonical_json(detached):
+        raise ValidationError("retained qualification snapshot fields differ")
     return result
 
 
@@ -2688,6 +2726,7 @@ __all__ = (
     "record_primary_attempt",
     "retain_qualification_market",
     "retain_qualification_snapshot",
+    "retained_qualification_snapshot_from_dict",
     "start_qualification_workflow",
     "verify_cloid_oid_query_pair",
     "verify_qualification_order_status_binding",

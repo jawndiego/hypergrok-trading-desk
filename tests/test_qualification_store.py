@@ -485,6 +485,34 @@ class QualificationStoreTests(ExecutionStoreTestCase):
         self.assertTrue(terminal.reservation_released)
         self.assertEqual(self.store.get_reserved_exposure(), (0, 0))
 
+    def test_admitted_but_never_claimed_action_expires_terminal_unsent(self) -> None:
+        _, intent, _, _, command = self.admission_fixture()
+        self.assertEqual(
+            self.store.get_reserved_exposure(),
+            (intent.reserved_loss, intent.reserved_notional),
+        )
+
+        self.assertEqual(
+            self.qualification.normalize_expired_claims(at=at(10_600)),
+            1,
+        )
+
+        terminal = self.qualification.get_command(command.command_id)
+        outbox = self.qualification.get_outbox(command.command_id)
+        step = self.qualification.get_step(
+            command.command_id, QualificationAttemptPhase.PLACE
+        )
+        self.assertEqual((terminal.state, outbox.state), ("halted", "halted"))
+        self.assertEqual(step.state, "terminal_unsent")
+        self.assertTrue(terminal.reservation_released)
+        self.assertEqual(self.store.get_reserved_exposure(), (0, 0))
+        with self.assertRaises(StateConflict):
+            self.qualification.claim(
+                command.command_id,
+                worker_id="late-worker",
+                at=at(10_700),
+            )
+
     def test_recovery_atomically_preempts_attempt_and_retains_reservation(self) -> None:
         # Preserve a real normal-command parent for the incident, then finish
         # it before admitting the qualification command.

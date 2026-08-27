@@ -43,8 +43,10 @@
 - Added a separately namespaced schema-v11 TESTNET qualification core for
   retained account/agent evidence, a fixed minimum GTC canary, bound cancel,
   full-residual attended close, atomic reservation, per-step single-use
-  authority and crash normalization. No signer, sender, credential or CLI path
-  exposes it yet.
+  authority and crash normalization. Added the pinned SDK signer/recovery
+  adapter, dormant one-shot sender, bearer-sensitive envelope receipts and a
+  role-bound terminal CLI; submission and the complete live lifecycle remain
+  compiled off and unqualified.
 - Added credential-free, plan-gated macOS APFS quota, final-path pre/post-init
   ACL, exact offline install and storage-headroom guard artifacts. No machine
   mutation or service activation is implied.
@@ -55,8 +57,10 @@
   sacrificial probe evidence.
 - Added a deterministic Lima 2.2/VZ VM-plan renderer pinned to socket_vmnet
   1.2.2 and a dated Ubuntu 24.04 ARM64 image. It models one default usernet WAN
-  plus one host-only ingress NIC and remains blocked on a signed apt snapshot,
-  VM creation and guest preflight.
+  plus one host-only ingress NIC. Offline host attestations, the signed image
+  and Noble indexes, and a 116-package closure are locked and replayable;
+  trusted-tool installation, VM creation, guest apply and preflight remain
+  blocked.
 - Disabled ambient urllib proxy discovery for exact Hyperliquid info/exchange
   clients and made executor config reject proxy, CA-bundle and TLS-key-log
   environment variables before state, credentials or network access.

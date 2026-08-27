@@ -1,9 +1,9 @@
 # Local Ubuntu VM router for TESTNET qualification
 
 Status: **repository-rendered guest configuration plus a pinned, plan-only
-Lima/VZ VM bundle; signed package snapshot, VM apply and boot orchestration
-remain unapplied/unqualified; not VPN-qualified or a capital security
-boundary**.
+Lima/VZ VM bundle; immutable public-input replay is implemented, while host
+installation, VM apply and boot orchestration remain unapplied/unqualified;
+not VPN-qualified or a capital security boundary**.
 
 This design keeps the signer/executor on macOS, where the reviewed System
 Keychain and UID/ACL model exist, and puts only network routing in a dedicated
@@ -79,6 +79,7 @@ The output directory must not already exist. It contains:
 | `70-trading-desk-router.conf` | `/etc/sysctl.d/70-trading-desk-router.conf` |
 | `trading-desk-router-check` | `/usr/local/libexec/trading-desk-router-check` |
 | `mac-wireguard.conf.fragment` | attended paste into an app-generated Mac tunnel |
+| `local-nat-lab-test-plan` | plan-only attended test commands; never executes them |
 | `bundle-manifest.json` | retained deployment evidence |
 
 The manifest states explicitly that public egress does not change, host direct
@@ -115,13 +116,50 @@ python3 scripts/render_ubuntu_router_vm.py \
 limactl validate /absolute/new/router-vm-plan/lima.yaml
 ```
 
-The output is apply-disabled and contains no key. It disables host mounts,
+The output is apply-disabled and contains no private key. It disables host mounts,
 containerd, Rosetta, host DNS/proxy propagation, SSH-agent forwarding and port
-forwards. Its package lock remains
-`awaiting_signed_apt_snapshot_and_vm_guest_preflight`: the candidate Ubuntu
-snapshot and archive keyring must prove every exact package version before a
-bootstrap/apply procedure may be added. `bootstrap-public.sh` therefore accepts
-only `--plan`.
+forwards. Package-lock schema v3 binds a separate commission lock containing:
+
+- the four signed Noble `InRelease` files and exact `main/binary-arm64`
+  `Packages.xz` hash/size pairs at snapshot `20260814T203500Z`;
+- the signed dated cloud-image checksum, image and 663-package base manifest;
+- the complete 116-package hard-dependency closure for the eight direct
+  router packages with `--no-install-recommends`; and
+- one added package (`wireguard-tools`) with no upgrade or removal, plus its
+  exact repository path, size and SHA-256.
+
+The bundle also retains offline SLSA provenance bundles and a pinned Sigstore
+trusted root for Lima 2.2.0 and socket_vmnet 1.2.2. Their exact repositories,
+tag refs, workflow identities, source commits, GitHub-hosted runner claim,
+archive hashes and installed-binary hashes are locked. The UEC cloud-image key
+is separately pinned to fingerprint
+`D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81`; it is not falsely attributed to
+the Noble archive keyring, which contains the distinct archive key used for
+the snapshot `InRelease` signatures.
+
+`commission-public.py --verify-inputs` can replay all of those public inputs
+without network access when given an exact mode-`0700` evidence directory and
+operator-trusted absolute `gh` and `gpgv` executables. It verifies the full
+image payload, signatures, signed index bindings, package closure, Debian
+archive framing, safe host tar members and offline attestations. Success still
+prints `apply_enabled=false`: the verifier has no install, VM, network or key
+operation. `bootstrap-public.sh` likewise accepts only `--plan`.
+
+```sh
+python3 /absolute/router-vm-plan/commission-public.py --plan
+python3 /absolute/router-vm-plan/commission-public.py \
+  --verify-inputs \
+  --evidence-dir /absolute/mode-0700/public-inputs \
+  --gh /absolute/real/non-symlink/gh \
+  --gpgv /absolute/real/non-symlink/gpgv
+```
+
+The plan prints the exact 16-file public evidence inventory. Verify mode rejects
+missing/extra files, symlinks, unsafe ownership/modes, an unsafe verifier path,
+signature/attestation disagreement, an index or payload hash mismatch,
+dependency ambiguity and any package-transaction widening. `gh` uses only the
+embedded offline bundles and trusted root; credential/token variables and
+ambient config/cache locations are not passed to it.
 
 ## VM network contract
 
@@ -136,6 +174,13 @@ realizes these as one implicit usernet WAN plus one explicit host-only ingress:
    public router profile. The rendered netplan fixes the reviewed host-only
    endpoint address and keeps the WAN on IPv4 DHCP; the endpoint must not
    depend on an unrecorded DHCP lease after reboot.
+
+For this sole checked-in mode, the host-only contract is fixed: the Mac source
+is `192.168.106.1/32` and the guest endpoint is `192.168.106.2/24`. The router
+renderer rejects any other pair so its output cannot silently disagree with
+the VM plan. The implicit Lima user-mode NIC is the separate WAN; adding
+`user-v2`, `vzNAT`, another socket_vmnet network or any third non-loopback NIC
+invalidates qualification.
 
 Do not bind-mount the repository or any `/var/db/trading-desk` path. Disable
 shared folders, clipboard exchange and guest-agent file transfer after initial
@@ -178,15 +223,18 @@ sequence has been removed because it bypassed the reviewed locks.
 
 The next attended change must be a separately reviewed apply artifact that:
 
-1. installs the exact hash- and signature-checked Lima and socket_vmnet
-   binaries, creates a dedicated mode-`0700` `/var/db/trading-desk-lima`,
+1. replays `commission-public.py --verify-inputs`, then installs the already
+   verified archives without substituting bytes; installs the exact
+   hash-checked Lima and root-owned socket_vmnet binaries; creates a dedicated mode-`0700`
+   `/var/db/trading-desk-lima`,
    installs only the rendered `networks.yaml`, and proves `default.yaml` and
    `override.yaml` are absent;
 2. runs the rendered `host-preflight.sh --check` and retains the exact
    `limactl validate --fill` digest before every create/start;
-3. proves the candidate signed Ubuntu snapshot, archive keyring hash and every
-   locked package version, then changes the package lock from
-   `review_pending_live_apt_policy` to `verified` through review;
+3. replays the locked signed Ubuntu snapshot/cloud-image/dependency evidence,
+   then proves from a console-side `apt-get --simulate` that the actual guest
+   proposes exactly `wireguard-tools` and no upgrade/removal before any package
+   mutation is separately authorized;
 4. creates the VM without mounts, forwarded agent, proxy/DNS inheritance or a
    third NIC, then runs `guest-preflight.sh --pre-key` from its console;
 5. installs the separately rendered guest router bundle, applies netplan from
@@ -206,7 +254,9 @@ route.
 ## Venue-credential-free qualification
 
 No venue credential, executor state or queued command is needed for these
-checks. Retain command output and packet captures.
+checks. Retain command output and packet captures. The rendered
+`local-nat-lab-test-plan --plan` prints the reviewed command inventory but does
+not execute any test or mutate the host.
 
 1. Run `sudo /usr/local/libexec/trading-desk-router-check` after the Mac peer
    has a recent handshake. It performs bounded local configuration checks for
@@ -218,8 +268,15 @@ checks. Retain command output and packet captures.
 4. Confirm the observed public IP is still the home/office IP. A different IP
    would contradict `local_nat_lab` and requires review.
 5. Confirm native IPv6, alternate DNS, DoT, QUIC/UDP 443 and unreviewed ports
-   fail. The local profile deliberately permits TCP 443 to any destination and
-   NTP/UDP 123; exact application URLs and TLS hostname checks remain separate.
+   fail. For IPv6, record the `wg-exec` pre-routing IPv6 ingress counter before
+   and after, keep kernel IPv6 forwarding at zero, and prove the WAN has neither
+   an IPv6 default route nor a global IPv6 address. IPv6 is rejected before the
+   forward hook and is not expected to increment its drop counter. For the
+   IPv4 alternate-DNS, DoT, QUIC and unreviewed-port probes, record the explicit
+   `wg-exec` forward drop counter before and after; a UDP client exit code alone
+   is not evidence. The local profile deliberately permits TCP 443 to any
+   destination and NTP/UDP 123; exact application URLs and TLS hostname checks
+   remain separate.
 6. Stop `wg-quick@wg-exec`, stop the VM, kill the hypervisor, renew DHCP,
    sleep/wake and reboot both sides. Record when macOS falls back to a physical
    route; this is expected evidence that host bypass remains unprevented.
@@ -236,6 +293,42 @@ fallback remains possible. A successful request alone does not prove VM
 traversal. Do not describe router health as an entry gate until separately
 reviewed application and host enforcement implement one.
 
+## Current stop line and shortest attended sequence
+
+Today the safe sequence stops after rendering and verifying both manifests,
+running `bootstrap-public.sh --plan` and `host-preflight.sh --plan`, and
+optionally replaying the exact public evidence with
+`commission-public.py --verify-inputs`. There is no reviewed command that
+installs Lima/socket_vmnet, creates or starts the VM, installs guest packages,
+activates nftables/WireGuard or changes Mac routes. A successful public-input
+replay deliberately does not cross that stop line. Do not improvise those
+apply steps from this document.
+
+The exact remaining apply blockers are intentional: the repository does not
+provision or seal the operator-trusted `gh`/`gpgv` verifier executables; it has
+no reviewed root installer for the verified host archives, socket_vmnet
+sudoers/launchd material or dedicated `LIMA_HOME`; it has not run the effective
+Lima validation against those installed bytes; and it has no guest-console
+first-boot APT/timer freeze or `apt-get --simulate`/install transcript. VM
+create/start, package mutation and network/key activation therefore remain
+disabled even after a green immutable input replay.
+
+After a separately reviewed apply artifact consumes (without weakening) the
+immutable-input gate, the shortest attended sequence is: replay archive hashes,
+signatures, closure and attestations; create
+the dedicated `LIMA_HOME`; retain `limactl validate --fill`; create the exact
+two-NIC VM; pass guest pre-key and post-netplan checks; generate each router-only
+key on its owning machine; render and verify the router bundle; install it from
+the VM console; activate the Mac tunnel; then execute and retain the rendered
+local test plan. This qualifies the local failure/routing lab only.
+
+A real remote VPN exit is a separate topology: it needs a second VM-to-remote
+WireGuard peer, default-drop VM output restricted to that peer and tunnel,
+tunnel-only DNS/NTP, and NAT only onto the remote interface. The repository has
+none of those artifacts. A macOS PF/Network Extension kill switch also remains
+absent, so even that future remote peer would not by itself prevent host route
+bypass.
+
 ## First TESTNET transaction boundary
 
 The local router can carry read-only TESTNET traffic after its local checks. It
@@ -243,8 +336,10 @@ may carry attended functional transactions only after the separate
 commissioning gaps close, and it never qualifies always-on egress isolation.
 The first harness order write remains blocked by
 `docs/testnet_commissioning.md`. The qualification-only GTC/cancel durable core
-exists, but its signer, sender, result transitions and direct-terminal CLI do
-not. Do not substitute the armed three-leg bracket as an easier first write.
+plus dormant signer/sender/result transitions and a role-bound terminal CLI
+exist offline, but submission authority, a complete live lifecycle worker and
+live integration remain absent. Do not substitute the armed three-leg bracket
+as an easier first write.
 
 After the local lab is stable, preserve the Mac-to-VM `wg-exec` interface and
 add a separately reviewed VM-to-remote-gateway tunnel. That later design can
@@ -252,6 +347,16 @@ provide a static exit IP without moving the signer out of macOS.
 
 ## References
 
+- Ubuntu snapshot service:
+  <https://ubuntu.com/server/docs/how-to/software/snapshot-service/>
+- Ubuntu cloud-image checksum/signing-key verification:
+  <https://ubuntu.com/docs/public-images/public-images-how-to/verify-image-checksum/>
+- GitHub offline artifact-attestation verification:
+  <https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/verify-attestations-offline>
+- Lima default user-mode network:
+  <https://lima-vm.io/docs/config/network/user/>
+- Lima VMNet/socket_vmnet networks:
+  <https://lima-vm.io/docs/config/network/vmnet/>
 - Ubuntu default-gateway WireGuard model:
   <https://ubuntu.com/server/docs/how-to/wireguard-vpn/vpn-as-the-default-gateway/>
 - WireGuard key generation and persistent keepalive:

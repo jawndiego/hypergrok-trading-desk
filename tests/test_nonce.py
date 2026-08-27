@@ -153,6 +153,19 @@ class PersistentNonceTests(unittest.TestCase):
                 restarted.qualification_reservation(binding.binding_hash),
                 reservation,
             )
+            self.assertEqual(
+                restarted.find_qualification_reservation(
+                    command_id=binding.command_id,
+                    phase=binding.phase,
+                ),
+                reservation,
+            )
+            self.assertIsNone(
+                restarted.find_qualification_reservation(
+                    command_id="qualification-absent",
+                    phase="place",
+                )
+            )
             with self.assertRaisesRegex(StorageError, "already reserved"):
                 restarted.allocate_qualification(binding)
             self.assertEqual(restarted.last_allocated(), reservation.nonce)

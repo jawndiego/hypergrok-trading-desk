@@ -24,6 +24,11 @@ This repository builds an agent-runtime-neutral trading research and execution h
 - Use exact `Decimal`/integer monetary arithmetic; reject binary floats for prices, sizes, fees, and limits.
 - Admission must atomically reserve risk, consume a single-use command authorization, update policy counters, and create the durable outbox row before network I/O.
 - Unknown outcomes remain reserved and are reconciled; never blindly resend.
+- A full signed qualification envelope is a bearer-sensitive venue relay
+  capability even though it contains no private key and lacks harness durable
+  submission authority. Keep its artifact and completion receipt only in the
+  executor-owned nonce parent with exact mode/owner and no named ACL; require
+  `F_FULLFSYNC`, exclusive publication and receipt completion before loading.
 - After exposure exists, only the account-safety policy may authorize bounded cancel/protect/flatten actions through the same serialized executor.
 - The agent/MCP identity must never open or receive filesystem access to the
   executor's execution, nonce, daily-loss or control-socket state. Agent quotes
@@ -58,12 +63,24 @@ This repository builds an agent-runtime-neutral trading research and execution h
   and injected signature-recovery interfaces plus offline
   transport/query/terminal/crash transitions exist, including terminal-flat
   reservation release. The exact SDK 0.24.0 TESTNET signer and independent
-  EIP-712 recovery verifier exist behind a schema-v2 global nonce authority;
-  no direct-terminal CLI exists. A one-shot exact-TESTNET HTTP sender contract,
-  injected credential-free advisory WebSocket decoder/client and bounded local
-  accept-then-drop/crash harness exist. The sender remains unreachable because
-  qualification submission authority is compiled off; no live WebSocket
-  adapter or live response-loss forwarder has been promoted.
+  EIP-712 recovery verifier exist behind a schema-v2 global nonce authority.
+  A separate `trading-harness-qualification` terminal surface provides
+  control-UID collect/verify/attended authorization and executor-UID
+  status/recover/reconciliation commands. Its `run` command fails at the
+  compiled submission gate before config, state, Keychain or network access;
+  split prepare/sign commands are not public. A one-shot exact-TESTNET HTTP
+  sender contract, injected credential-free advisory WebSocket decoder/client
+  and bounded local accept-then-drop/crash harness exist. The sender remains
+  unreachable because qualification submission authority is compiled off; no
+  complete live place/query/cancel worker, live WebSocket adapter or live
+  response-loss forwarder has been promoted.
+- Treat an expired proven-unsent cancel as a hard halt with reservation
+  retained. No fresh same-CLOID cancel reauthorization exists yet; never add a
+  blind retry or call the current one-phase `run` contract live-ready.
+- Do not promote qualification submission until the executor performs a final
+  fresh stable `userRole(api_wallet)` mapping check after claim and immediately
+  before key use/send, bound into attempt evidence; the agent wire does not
+  encode the intended main account.
 - Credential-free macOS plans live under `deploy/macos/testnet`. They are
   plan-only by default and do not authorize APFS creation, ACL mutation,
   application installation, `init`, launchd, credentials or venue calls.
@@ -75,8 +92,15 @@ This repository builds an agent-runtime-neutral trading research and execution h
   Until those gates pass, keep venue and HMAC secrets offline.
 - The repo-composable VM plan lives under `deploy/ubuntu-router/lima` and is
   rendered by `scripts/render_ubuntu_router_vm.py`. It pins Lima, socket_vmnet
-  and a dated Ubuntu image, but VM apply remains absent and the signed apt
-  snapshot plus guest preflight must pass before router keys are generated.
+  and a dated Ubuntu image. Its schema-v3 commission lock binds offline host
+  attestations, the signed Noble snapshot/cloud manifest and the 116-package
+  no-recommends dependency closure. `commission-public.py` may only plan or
+  verify those public bytes; host install, VM/package apply and network/key
+  mutation remain absent and guest preflight must pass before keys exist.
+- The VM and router renderers share the fixed `192.168.106.1/32` Mac to
+  `192.168.106.2/24` guest ingress contract. The rendered
+  `local-nat-lab-test-plan` is print-only: PF enforcement, a remote VPN exit,
+  test execution and VM apply all remain absent.
 - The router VM is network-only. It receives no API-wallet, account config,
   execution state, Keychain access, repository/shared-folder mount, approval
   secret, agent runtime or venue authority.

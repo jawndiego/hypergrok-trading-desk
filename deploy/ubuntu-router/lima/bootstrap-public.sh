@@ -15,8 +15,23 @@ printf '%s\n' \
     'apply_enabled=false' \
     'network_changes_performed=false' \
     'packages_installed=false' \
+    'host_tool_downloads_performed=false' \
+    'host_tool_install_apply_enabled=false' \
+    'host_tool_attestation_required=true' \
+    'lima_source_url=__PINNED_LIMA_SOURCE_URL__' \
+    'lima_archive_sha256=__PINNED_LIMA_ARCHIVE_SHA256__' \
+    'lima_attestation_repository=__PINNED_LIMA_ATTESTATION_REPOSITORY__' \
+    'socket_vmnet_source_url=__PINNED_SOCKET_VMNET_SOURCE_URL__' \
+    'socket_vmnet_archive_sha256=__PINNED_SOCKET_VMNET_ARCHIVE_SHA256__' \
+    'socket_vmnet_attestation_repository=__PINNED_SOCKET_VMNET_ATTESTATION_REPOSITORY__' \
     'apt_install_source_status=__APT_INSTALL_SOURCE_STATUS__' \
+    'apt_snapshot_url=__APT_SNAPSHOT_URL__' \
+    'apt_signed_by_path=__APT_SIGNED_BY_PATH__' \
+    'apt_keyring_sha256=__APT_KEYRING_SHA256_VALUE__' \
+    'commission_lock_sha256=__COMMISSION_LOCK_SHA256__' \
+    'immutable_public_input_verifier=commission-public.py --plan|--verify-inputs' \
+    'apt_snapshot_gate_passed=false' \
     'router_keys_generated=false' \
     'venue_credentials_touched=false' \
-    'evidence_status=awaiting_signed_apt_snapshot_and_guest_package_install'
+    'evidence_status=awaiting_immutable_public_input_replay_and_guest_preflight'
 __PINNED_GUEST_PACKAGE_PLAN__

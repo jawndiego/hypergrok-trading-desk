@@ -4,7 +4,8 @@ Status: **offline engine, schema-v11 qualification core/result coordinator,
 credential-free signer-envelope, pinned SDK 0.24.0 signer and independent
 recovery verifier, dormant one-shot sender, advisory WebSocket decoder and
 local response-drop/crash harness, machine plans and guest/VM renderers
-implemented; CLI integration, live adapters, machine apply, network and live
+and role-bound qualification terminal orchestration implemented; submission
+and full-lifecycle promotion, live adapters, machine apply, network and live
 qualification incomplete; first harness order write remains blocked**.
 
 This document records the remaining work from a reviewed source commit to the
@@ -35,11 +36,20 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   verifier are golden-tested. Its exact TESTNET one-shot HTTP sender acquires
   authority only from the durable store and atomically records response or
   unknown transitions, but submission authority remains compiled off, so the
-  sender is unreachable and has no credential or CLI surface.
+  terminal `run` path cannot reach the sender or a credential.
+- `trading-harness-qualification` is a separate non-MCP entry point. Control
+  UID 452 may collect/verify an owner-only review artifact and perform fresh
+  same-process `/dev/tty` approval-HMAC authorization. Executor UID 451 may
+  inspect, normalize and reconcile persisted qualification state. Public split
+  prepare/sign commands are absent. `run` remains dormant and fails before
+  reading config or state while submission is compiled off.
 - Credential-free final-path APFS/ACL/install and storage-guard artifacts exist
   under `deploy/macos/testnet`; none has been applied.
 - A pinned Lima/VZ VM plan exists under `deploy/ubuntu-router/lima`; its apply
-  path is absent and the signed apt snapshot remains review-pending.
+  path is absent. The signed snapshot/cloud-image inputs, offline host
+  attestations and 116-package no-recommends closure are locked with a
+  read-only replay verifier; host/guest installation and preflight remain
+  unapplied.
 
 These facts do not make the machine transaction-ready.
 
@@ -72,9 +82,10 @@ their owning machines because their derived public keys are renderer inputs.
    `deploy/macos/testnet` with the sealed runtime and pack. Prove UID 501 and all
    service identities cannot modify or replace source, runtime or venv paths.
 6. **Ubuntu router lab.** First render and verify the pinned Lima/VZ VM plan,
-   complete the signed apt snapshot lock and guest preflight, then provision
-   the exact two-NIC VM. Generate the VM
-   and Mac WireGuard private keys only on their owning machines, derive and
+   replay the immutable public-input lock, then use a separately reviewed
+   apply artifact to install the host tools and provision the exact two-NIC VM.
+   Pass guest preflight before generating the VM and Mac WireGuard private keys
+   on their owning machines, derive and
    attest the public keys, then render and qualify `local_nat_lab` using
    `docs/ubuntu_vm_router.md`. It does not change the public IP and does not
    prevent host bypass. Do not call it VPN-qualified. A separately reviewed
@@ -104,9 +115,9 @@ following are code gaps, not operator commands waiting to be discovered:
 
 | Required qualification behavior | Current gap |
 | --- | --- |
-| Far non-marketable GTC canary, exact query and cancel | Typed envelope, pinned SDK signing/independent recovery, dormant one-shot HTTP sender and durable response/crash-unknown, action-bound paired-query and cancel transitions exist offline; submission-authority promotion and direct-terminal CLI are absent |
-| Retained pre-write account/metadata/order snapshot | Exact retained evidence and tamper checks exist; live `userRole` reader and attended artifact export are absent |
-| Ordinary attended reduce-only close, including an unexpected GTC-canary fill | Full-residual envelope/result/query, pinned SDK signer/recovery and terminal-flat source-reservation release exist offline; submission promotion and CLI are absent; general bracket-parent close is intentionally unsupported |
+| Far non-marketable GTC canary, exact query and cancel | Typed envelope, pinned SDK signing/independent recovery, dormant one-shot HTTP sender, durable response/crash-unknown, action-bound paired-query/cancel transitions and a role-bound CLI exist offline; submission-authority promotion, one bounded live place/query/cancel/terminal run loop and fresh read-proven-open same-CLOID cancel reauthorization remain absent. An expired unsent cancel retains reservation and halts; it is never blindly retried |
+| Retained pre-write account/metadata/order snapshot | Exact retained evidence/tamper checks, a stable two-read `userRole` collector and control-owned attended artifact export are implemented but not live-qualified. The distinct post-claim, immediately-pre-key/send `userRole` recheck and attempt binding remain absent |
+| Ordinary attended reduce-only close, including an unexpected GTC-canary fill | Full-residual envelope/result/query, pinned SDK signer/recovery, attended CLI authorization/reconciliation and terminal-flat source-reservation release exist offline; submission promotion and live exercise remain absent; general bracket-parent close is intentionally unsupported |
 | WebSocket disconnect/fill/recovery exercise | An injected, credential-free exact TESTNET client/decoder accepts only `orderUpdates` and `userEvents` (`channel: user`) and forces a REST request begun after the causal boundary whose receipt/server watermark covers the event after connect, every advisory event and every disconnect because the official feed has no gap-free sequence; timestamp-less events require strict server-time advance; no live connector, durable event integration or attended exercise exists |
 | Forward request but drop the real response | A bounded loopback HTTP harness proves accept-then-drop, crash normalization, reservation retention and no resend; no live forwarding proxy or attended real-request exercise exists |
 | Router health as an admission capability | No application router-health field or pre-admission guard exists |

@@ -42,10 +42,10 @@ staged under an explicit `profitability_qualified: false` grant.
 | Isolated credential provider | Schema-v3 native role readers, sealed provisioner and nonprinting UID probe implemented; exact pack install and live pre/post-reboot probe evidence pending; no key present |
 | Always-on serialized executor runtime | Implemented with fenced lease, daily-loss sync, strict recovery priority and graceful drain |
 | Direct attended control CLI | Implemented; confirmation is read from `/dev/tty`, never MCP/chat/stdin |
-| TESTNET qualification canary/close core | Typed GTC/query/cancel and full-residual close semantics, pinned SDK 0.24.0 signing/independent recovery, dormant one-shot sender, advisory WS decoder, schema-v11 authority state and schema-v2 global nonce binding implemented; submission authority stays compiled off; no credential or CLI exposure |
+| TESTNET qualification canary/close core | Typed GTC/query/cancel and full-residual close semantics, pinned SDK 0.24.0 signing/independent recovery, dormant one-shot sender, advisory WS decoder, schema-v11 authority state, schema-v2 global nonce binding and a role-bound terminal qualification surface implemented; submission authority stays compiled off and no complete live lifecycle worker is promoted |
 | macOS storage/ACL/install plan | Credential-free, rollback-safe plan/apply artifacts implemented; not applied; encryption, reboot and exhaustion evidence pending |
-| Local Ubuntu VM egress router | Secret-free router and Lima/VZ plan renderers implemented; package snapshot, VM creation and live qualification pending; not VPN-qualified |
-| Live Hyperliquid testnet | **No account configured; first responsible write remains blocked because qualification CLI and commissioning gates are incomplete** |
+| Local Ubuntu VM egress router | Secret-free router/Lima plans and immutable public-input replay implemented; host/guest apply, VM creation and live qualification pending; not VPN-qualified |
+| Live Hyperliquid testnet | **No account configured; first responsible write remains blocked because submission/lifecycle promotion and commissioning gates are incomplete** |
 | Live Hyperliquid mainnet | **Hard-disabled in store, signer and transport** |
 
 The research/MCP executor remains disabled. Environment variables cannot turn

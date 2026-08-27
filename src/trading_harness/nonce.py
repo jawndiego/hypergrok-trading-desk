@@ -838,6 +838,53 @@ class PersistentNonceAllocator:
             raise StorageError("qualification nonce reservation was not found")
         return _qualification_reservation_from_row(row)
 
+    def find_qualification_reservation(
+        self,
+        *,
+        command_id: str,
+        phase: str,
+    ) -> QualificationNonceReservation | None:
+        """Find the unique committed nonce for a phase without allocating.
+
+        The qualification CLI uses this before any restart-time Keychain read.
+        A reservation without a receipt-complete signed-envelope artifact is
+        proven unable to usefully resume and must halt rather than re-sign.
+        """
+
+        checked_command = _identifier(command_id, "command_id")
+        if phase not in {"place", "cancel", "close"}:
+            raise ValidationError("qualification phase is invalid")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect(verification_only=True)
+            rows = connection.execute(
+                """
+                SELECT * FROM hyperliquid_qualification_nonce_reservations
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked_command, phase),
+            ).fetchall()
+        except sqlite3.Error as error:
+            raise StorageError(
+                f"qualification nonce lookup failed: {type(error).__name__}"
+            ) from error
+        finally:
+            if connection is not None:
+                connection.close()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise StorageError("qualification nonce reservation is not unique")
+        reservation = _qualification_reservation_from_row(rows[0])
+        if (
+            reservation.binding.command_id != checked_command
+            or reservation.binding.phase != phase
+            or reservation.binding.signer_address != self._signer_address
+            or reservation.binding.network is not self._network
+        ):
+            raise StorageError("qualification nonce reservation scope differs")
+        return reservation
+
     def last_allocated(self) -> int | None:
         """Read the last committed nonce without advancing it."""
 

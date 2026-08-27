@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -17,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 LIMA_ROOT = ROOT / "deploy" / "ubuntu-router" / "lima"
 RENDERER_PATH = ROOT / "scripts" / "render_ubuntu_router_vm.py"
 PLACEHOLDER_RE = re.compile(r"__[A-Z0-9_]+__")
+COMMISSIONER_PATH = LIMA_ROOT / "commission-public.py"
+SOURCE_MANIFEST = ROOT / "MANIFEST.in"
 
 module_spec = importlib.util.spec_from_file_location(
     "render_ubuntu_router_vm", RENDERER_PATH
@@ -24,7 +27,6 @@ module_spec = importlib.util.spec_from_file_location(
 assert module_spec is not None and module_spec.loader is not None
 vm_renderer = importlib.util.module_from_spec(module_spec)
 module_spec.loader.exec_module(vm_renderer)
-
 
 def example_spec() -> dict[str, object]:
     return json.loads(
@@ -49,7 +51,39 @@ def write_json(path: Path, value: object) -> None:
     )
 
 
+def load_commissioner_namespace() -> dict[str, object]:
+    namespace: dict[str, object] = {
+        "__file__": str(COMMISSIONER_PATH),
+        "__name__": "commission_public_test",
+    }
+    exec(
+        compile(
+            COMMISSIONER_PATH.read_text(encoding="utf-8"),
+            str(COMMISSIONER_PATH),
+            "exec",
+        ),
+        namespace,
+    )
+    return namespace
+
+
 class UbuntuRouterVMArtifactTests(unittest.TestCase):
+    def test_commission_dependency_parser_is_fail_closed(self) -> None:
+        namespace = load_commissioner_namespace()
+        parse = namespace["_dependency_alternatives"]
+        compare = namespace["_version_compare"]
+        error = namespace["VerificationError"]
+        self.assertTrue(callable(parse))
+        self.assertTrue(callable(compare))
+        self.assertTrue(isinstance(error, type))
+        self.assertLess(compare("1.0~rc1", "1.0"), 0)
+        self.assertGreater(compare("1:1.0", "2.0"), 0)
+        self.assertEqual(compare("1.0-1", "1.0-1"), 0)
+        with self.assertRaisesRegex(error, "architecture/profile-qualified"):
+            parse("example [amd64]")
+        with self.assertRaisesRegex(error, "architecture/profile-qualified"):
+            parse("example <stage1>")
+
     def test_repository_artifacts_are_public_and_apply_disabled(self) -> None:
         expected = {
             "vm-spec.json.example",
@@ -60,19 +94,26 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
             "bootstrap-public.sh",
             "host-preflight.sh",
             "guest-preflight.sh",
+            "commission-public.py",
+            "commission-lock.json",
+            "ubuntu-cloud-image-signing-key.gpg",
+            "lima-2.2.0-attestation.jsonl",
+            "socket-vmnet-1.2.2-attestation.jsonl",
+            "sigstore-trusted-root.jsonl",
         }
-        self.assertEqual(expected, {path.name for path in LIMA_ROOT.iterdir()})
-        combined = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in sorted(LIMA_ROOT.iterdir())
+        root_files = [path for path in LIMA_ROOT.iterdir() if path.is_file()]
+        self.assertEqual(expected, {path.name for path in root_files})
+        combined = b"\n".join(
+            path.read_bytes()
+            for path in sorted(root_files)
         )
-        self.assertNotRegex(combined, r"(?im)^\s*PrivateKey\s*=")
+        self.assertIsNone(re.search(rb"(?im)^\s*PrivateKey\s*=", combined))
         for forbidden in (
-            "api_wallet",
-            "approval_secret",
-            "/exchange",
-            "/Users/",
-            "$HOME",
+            b"api_wallet",
+            b"approval_secret",
+            b"/exchange",
+            b"/Users/",
+            b"$HOME",
         ):
             self.assertNotIn(forbidden, combined)
 
@@ -94,6 +135,28 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
         self.assertNotIn("limactl create", host_preflight)
         self.assertNotIn("limactl start", host_preflight)
 
+        commissioner_text = COMMISSIONER_PATH.read_text(encoding="utf-8")
+        commissioner_help = subprocess.run(
+            [sys.executable, str(COMMISSIONER_PATH), "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        self.assertNotIn("--apply", commissioner_help)
+        self.assertNotIn("sudo", commissioner_text)
+        self.assertNotIn("apt-get", commissioner_text)
+        self.assertNotIn("limactl create", commissioner_text)
+        self.assertNotIn("wg genkey", commissioner_text)
+        plan = subprocess.run(
+            [sys.executable, str(COMMISSIONER_PATH), "--plan"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("apply_enabled=false", plan.stdout)
+        self.assertIn("dependency_closure_package_count=116", plan.stdout)
+        self.assertIn("immutable_input_verification_available=true", plan.stdout)
+
         renderer = RENDERER_PATH.read_text(encoding="utf-8")
         for forbidden in (
             "import subprocess",
@@ -108,6 +171,21 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
             self.assertNotIn(forbidden, renderer)
         self.assertNotIn("--apply", vm_renderer._parser().format_help())
 
+    def test_sdist_manifest_covers_every_non_example_commission_artifact(self) -> None:
+        manifest_lines = set(
+            SOURCE_MANIFEST.read_text(encoding="utf-8").splitlines()
+        )
+        self.assertIn("recursive-include deploy *.example", manifest_lines)
+        self.assertIn(
+            "recursive-include deploy/ubuntu-router/lima "
+            "*.gpg *.json *.jsonl *.py *.sh",
+            manifest_lines,
+        )
+        covered_suffixes = {".gpg", ".json", ".jsonl", ".py", ".sh"}
+        for path in LIMA_ROOT.iterdir():
+            if path.is_file() and not path.name.endswith(".example"):
+                self.assertIn(path.suffix, covered_suffixes, path.name)
+
     def test_official_host_image_and_package_versions_are_bound(self) -> None:
         image = verified_image_lock()
         self.assertEqual("verified", image["review_status"])
@@ -120,12 +198,17 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
         packages = json.loads(
             (LIMA_ROOT / "package-lock.json").read_text(encoding="utf-8")
         )
+        self.assertEqual(3, packages["schema_version"])
         self.assertEqual("verified", packages["review_status"])
         self.assertEqual(
-            "review_pending_live_apt_policy",
+            "signed_snapshot_and_dependency_closure_locked_apply_disabled",
             packages["apt_install_source"]["review_status"],
         )
         self.assertEqual("2.2.0", packages["host_tools"]["lima"]["version"])
+        self.assertEqual(
+            "lima-vm/lima",
+            packages["host_tools"]["lima"]["attestation_repository"],
+        )
         self.assertEqual(
             "bbdef91774885a0d05f7b048c4eb89ae2bcf3a0c252ae7ca7934e63df76d93c3",
             packages["host_tools"]["lima"]["sha256"],
@@ -133,6 +216,10 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
         self.assertEqual(
             "c7bf62308fbcfdc29bdfb8373c9b1951f7ac2396446e4390919796a94972e6dc",
             packages["host_tools"]["socket_vmnet"]["sha256"],
+        )
+        self.assertEqual(
+            "lima-vm/socket_vmnet",
+            packages["host_tools"]["socket_vmnet"]["attestation_repository"],
         )
         self.assertEqual(
             "6.8.0-137.137",
@@ -151,6 +238,33 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
             "80a36b0a6de2f69f49d2df75ef473ccde121e9e190b9ea01d20a4f63778d5c31",
             packages["apt_install_source"]["keyring_sha256"],
         )
+        self.assertEqual(
+            "08d20373ea31ee116bc75c616ca5aaac1a9467eebaf8df45d4092b315edcee7c",
+            packages["apt_install_source"]["commission_lock_sha256"],
+        )
+
+        commission = json.loads(
+            (LIMA_ROOT / "commission-lock.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            "signed_snapshot_and_dependency_closure_locked_apply_disabled",
+            commission["review_status"],
+        )
+        self.assertEqual(116, commission["install_transaction"]["closure_package_count"])
+        self.assertEqual(
+            ["wireguard-tools"],
+            commission["install_transaction"]["packages_added"],
+        )
+        self.assertEqual([], commission["install_transaction"]["packages_upgraded"])
+        self.assertEqual([], commission["install_transaction"]["packages_removed"])
+        self.assertEqual(
+            "F6ECB3762474EDA9D21B7022871920D1991BC93C",
+            commission["snapshot"]["archive_signing_fingerprint"],
+        )
+        self.assertEqual(
+            "D2EB44626FDDC30B513D5BB71A5D6C4C7DB87C81",
+            commission["cloud_image"]["signing_key_fingerprint"],
+        )
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -163,11 +277,11 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
                 root / "plan",
             )
             self.assertEqual(
-                "awaiting_signed_apt_snapshot_and_vm_guest_preflight",
+                "awaiting_immutable_public_input_replay_and_vm_guest_preflight",
                 manifest["evidence_status"],
             )
             self.assertEqual(
-                "review_pending_live_apt_policy",
+                "signed_snapshot_and_dependency_closure_locked_apply_disabled",
                 manifest["pins"]["apt_install_source_status"],
             )
             self.assertIs(False, manifest["apply_enabled"])
@@ -200,6 +314,12 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                 "bootstrap-public.sh",
                 "host-preflight.sh",
                 "guest-preflight.sh",
+                "commission-public.py",
+                "commission-lock.json",
+                "ubuntu-cloud-image-signing-key.gpg",
+                "lima-2.2.0-attestation.jsonl",
+                "socket-vmnet-1.2.2-attestation.jsonl",
+                "sigstore-trusted-root.jsonl",
                 "vm-spec.json",
                 "image-lock.json",
                 "package-lock.json",
@@ -215,6 +335,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                         "bootstrap-public.sh",
                         "host-preflight.sh",
                         "guest-preflight.sh",
+                        "commission-public.py",
                     }
                     else 0o600
                 )
@@ -230,7 +351,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                 )
 
             self.assertEqual(
-                "awaiting_signed_apt_snapshot_and_vm_guest_preflight",
+                "awaiting_immutable_public_input_replay_and_vm_guest_preflight",
                 manifest["evidence_status"],
             )
             self.assertIs(False, manifest["apply_enabled"])
@@ -251,6 +372,16 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                 manifest["host_contract"]["lima_home_path"],
             )
             self.assertIs(False, manifest["host_contract"]["create_start_authorized"])
+            self.assertEqual(
+                {
+                    "apply_authorized": False,
+                    "commission_lock_sha256": "08d20373ea31ee116bc75c616ca5aaac1a9467eebaf8df45d4092b315edcee7c",
+                    "dependency_closure_package_count": 116,
+                    "immutable_public_inputs_locked": True,
+                    "immutable_public_inputs_verified": False,
+                },
+                manifest["commission_contract"],
+            )
             self.assertEqual(
                 "44a93c5ffe995d717296e0c90574bc3252c33020f6811824f29dc1de6016f0f9",
                 manifest["host_contract"]["effective_config_sha256"],
@@ -273,7 +404,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
             )
 
             rendered = "\n".join(
-                (first / name).read_text(encoding="utf-8")
+                (first / name).read_bytes().decode("utf-8", errors="ignore")
                 for name in expected_files
                 if name != "bundle-manifest.json"
             )
@@ -310,6 +441,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
             self.assertNotIn("bridged", networks)
 
             bootstrap = first / "bootstrap-public.sh"
+            commission_public = first / "commission-public.py"
             host_preflight = first / "host-preflight.sh"
             preflight = first / "guest-preflight.sh"
             subprocess.run(
@@ -338,16 +470,40 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
             )
             self.assertIn("apply_enabled=false", plan.stdout)
             self.assertIn(
-                "apt_install_source_status=review_pending_live_apt_policy",
+                "apt_install_source_status=signed_snapshot_and_dependency_closure_locked_apply_disabled",
                 plan.stdout,
             )
             self.assertIn("router_keys_generated=false", plan.stdout)
+            self.assertIn("host_tool_install_apply_enabled=false", plan.stdout)
+            self.assertIn("host_tool_attestation_required=true", plan.stdout)
+            self.assertIn("lima_attestation_repository=lima-vm/lima", plan.stdout)
             self.assertIn(
-                "evidence_status=awaiting_signed_apt_snapshot_and_guest_package_install",
+                "socket_vmnet_attestation_repository=lima-vm/socket_vmnet",
+                plan.stdout,
+            )
+            self.assertIn(
+                "apt_snapshot_url=https://snapshot.ubuntu.com/ubuntu/20260814T203500Z/",
+                plan.stdout,
+            )
+            self.assertIn("apt_snapshot_gate_passed=false", plan.stdout)
+            self.assertIn("commission_lock_sha256=08d20373", plan.stdout)
+            self.assertIn(
+                "evidence_status=awaiting_immutable_public_input_replay_and_guest_preflight",
                 plan.stdout,
             )
             self.assertIn("package=wireguard-tools=", plan.stdout)
             self.assertIn("package=ubuntu-keyring=2023.11.28.1", plan.stdout)
+            commission_plan = subprocess.run(
+                [str(commission_public), "--plan"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("apply_enabled=false", commission_plan.stdout)
+            self.assertIn(
+                "host_attestation_mode=offline_bundles_with_pinned_sigstore_root",
+                commission_plan.stdout,
+            )
             host_plan = subprocess.run(
                 [str(host_preflight), "--plan"],
                 check=True,
@@ -468,10 +624,22 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
             vm_renderer.validate_image_lock(image)
 
         packages = verified_package_lock()
+        packages["schema_version"] = 2
+        with self.assertRaisesRegex(ValueError, "exactly 3"):
+            vm_renderer.validate_package_lock(packages)
+
+        packages = verified_package_lock()
         packages["host_tools"]["lima"]["source_url"] = (
             "https://example.com/lima-2.2.0-Darwin-arm64.tar.gz"
         )
         with self.assertRaisesRegex(ValueError, "official release"):
+            vm_renderer.validate_package_lock(packages)
+
+        packages = verified_package_lock()
+        packages["host_tools"]["lima"]["attestation_repository"] = (
+            "lima-vm/socket_vmnet"
+        )
+        with self.assertRaisesRegex(ValueError, "attestation repository"):
             vm_renderer.validate_package_lock(packages)
 
         packages = verified_package_lock()
@@ -488,11 +656,17 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
 
         packages = verified_package_lock()
         packages["apt_install_source"]["review_status"] = "verified"
-        packages["apt_install_source"]["keyring_sha256"] = (
-            "REVIEW_REQUIRED_GUEST_OBSERVED_KEYRING_SHA256"
-        )
-        with self.assertRaisesRegex(ValueError, "is not reviewed"):
+        with self.assertRaisesRegex(ValueError, "review status"):
             vm_renderer.validate_package_lock(packages)
+
+        commission = json.loads(
+            (LIMA_ROOT / "commission-lock.json").read_text(encoding="utf-8")
+        )
+        commission["authorization"]["vm_create_enabled"] = True
+        with self.assertRaisesRegex(ValueError, "authorizes mutation"):
+            vm_renderer.validate_commission_lock(
+                commission, verified_image_lock(), verified_package_lock()
+            )
 
     def test_refuses_symlinked_inputs_existing_outputs_and_duplicate_keys(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
