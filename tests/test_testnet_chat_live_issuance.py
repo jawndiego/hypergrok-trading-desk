@@ -102,6 +102,11 @@ class LiveIssuanceBoundaryTests(unittest.TestCase):
             ),
             patch.object(
                 state_binding_module,
+                "expected_state_sidecar_acl",
+                return_value=expected_acl,
+            ),
+            patch.object(
+                state_binding_module,
                 "_descriptor_stat",
                 side_effect=descriptor_stat,
             ),
@@ -131,6 +136,11 @@ class LiveIssuanceBoundaryTests(unittest.TestCase):
             patch.object(
                 state_binding_module,
                 "expected_state_parent_acl",
+                return_value=expected_acl,
+            ),
+            patch.object(
+                state_binding_module,
+                "expected_state_sidecar_acl",
                 return_value=expected_acl,
             ),
             patch.object(
@@ -338,19 +348,22 @@ class LiveIssuanceBoundaryTests(unittest.TestCase):
             scoped.chmod(0o700)
             quote_root.chmod(0o700)
             quote_scoped.chmod(0o700)
-            directory_acl = live_module._expected_acl(
+            def expected_acl(uid: int, *, right: str) -> tuple[str, ...]:
+                return (f"fixture-user:{uid}:allow:{right}",)
+
+            directory_acl = expected_acl(
                 config.control_uid,
                 right=live_module.TESTNET_CHAT_EVIDENCE_DIRECTORY_ACL_RIGHT,
             )
-            file_acl = live_module._expected_acl(
+            file_acl = expected_acl(
                 config.control_uid,
                 right=live_module.TESTNET_CHAT_EVIDENCE_FILE_ACL_RIGHT,
             )
-            quote_directory_acl = live_module._expected_acl(
+            quote_directory_acl = expected_acl(
                 config.research_uid,
                 right=live_module.TESTNET_CHAT_QUOTE_DIRECTORY_ACL_RIGHT,
             )
-            quote_file_acl = live_module._expected_acl(
+            quote_file_acl = expected_acl(
                 config.research_uid,
                 right=live_module.TESTNET_CHAT_EVIDENCE_FILE_ACL_RIGHT,
             )
@@ -390,6 +403,11 @@ class LiveIssuanceBoundaryTests(unittest.TestCase):
                     live_module,
                     "_effective_uid",
                     side_effect=lambda: role["uid"],
+                ),
+                patch.object(
+                    live_module,
+                    "_expected_acl",
+                    side_effect=expected_acl,
                 ),
                 patch.object(
                     live_module,
