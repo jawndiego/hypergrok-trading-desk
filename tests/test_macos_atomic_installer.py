@@ -107,6 +107,11 @@ class AtomicFirstInstallContractTests(unittest.TestCase):
             build.rindex("verify_release_payload"),
         )
 
+    def test_reused_rights_probe_sources_return_explicit_success(self) -> None:
+        prepare = shell_function(installer_text(), "prepare_probe_sources")
+        self.assertIn('[ -z "$PROBE_TMP" ] || return 0', prepare)
+        self.assertNotIn('[ -z "$PROBE_TMP" ] || return\n', prepare)
+
     def test_markers_bind_incomplete_and_ready_states_before_promotion(self) -> None:
         text = installer_text()
         receipt = shell_function(text, "release_receipt")

@@ -604,7 +604,7 @@ expect_denied() {
 }
 
 prepare_probe_sources() {
-  [ -z "$PROBE_TMP" ] || return
+  [ -z "$PROBE_TMP" ] || return 0
   PROBE_TMP=$(/usr/bin/mktemp -d /private/tmp/trading-desk-install-probe.XXXXXX)
   /usr/sbin/chown root:wheel "$PROBE_TMP"
   /bin/chmod 0711 "$PROBE_TMP"
