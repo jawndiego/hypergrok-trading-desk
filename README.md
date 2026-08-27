@@ -42,10 +42,10 @@ staged under an explicit `profitability_qualified: false` grant.
 | Isolated credential provider | Schema-v3 native role readers, sealed provisioner and nonprinting UID probe implemented; exact pack install and live pre/post-reboot probe evidence pending; no key present |
 | Always-on serialized executor runtime | Implemented with fenced lease, daily-loss sync, strict recovery priority and graceful drain |
 | Direct attended control CLI | Implemented; confirmation is read from `/dev/tty`, never MCP/chat/stdin |
-| TESTNET qualification canary/close core | Typed GTC/query/cancel and full-residual close semantics plus schema-v11 durable authority/reservation state implemented; no signer, sender or CLI exposure |
+| TESTNET qualification canary/close core | Typed GTC/query/cancel and full-residual close semantics, pinned SDK 0.24.0 signing/independent recovery, dormant one-shot sender, advisory WS decoder, schema-v11 authority state and schema-v2 global nonce binding implemented; submission authority stays compiled off; no credential or CLI exposure |
 | macOS storage/ACL/install plan | Credential-free, rollback-safe plan/apply artifacts implemented; not applied; encryption, reboot and exhaustion evidence pending |
 | Local Ubuntu VM egress router | Secret-free router and Lima/VZ plan renderers implemented; package snapshot, VM creation and live qualification pending; not VPN-qualified |
-| Live Hyperliquid testnet | **No account configured; first responsible write remains blocked because the qualification signer/sender/CLI and commissioning gates are incomplete** |
+| Live Hyperliquid testnet | **No account configured; first responsible write remains blocked because qualification CLI and commissioning gates are incomplete** |
 | Live Hyperliquid mainnet | **Hard-disabled in store, signer and transport** |
 
 The research/MCP executor remains disabled. Environment variables cannot turn
@@ -401,10 +401,11 @@ account (see the [full qualification checklist](docs/testnet_qualification.md)):
 9. final flat account with no orphan orders.
 
 This is a target checklist, not the current CLI surface. The GTC canary,
-cancel and ordinary-close semantics now have an isolated durable core, but
-their SDK signer, sender, transport-result transitions, terminal reservation
-release and direct-terminal CLI remain disabled. WebSocket monitoring and
-response-drop injection also remain implementation gaps tracked in
+cancel and ordinary-close semantics now have an isolated durable core plus a
+pinned SDK signer and independent recovery verifier, but their direct-terminal
+CLI remains disabled. A credential-free advisory WebSocket decoder and local
+accept-then-drop/crash harness exist, but live WebSocket adaptation and
+real-request response-drop forwarding remain commissioning gaps tracked in
 [`docs/testnet_commissioning.md`](docs/testnet_commissioning.md); the first
 harness order write remains blocked until they are closed.
 

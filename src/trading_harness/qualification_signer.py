@@ -57,6 +57,8 @@ QUALIFICATION_SIGNATURE_VERIFIER_IMPLEMENTATION = (
 _ADDRESS_RE = re.compile(r"^0x[0-9a-f]{40}$")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _SIGNATURE_COMPONENT_RE = re.compile(r"^0x[1-9a-f][0-9a-f]{0,63}$")
+_SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+_SECP256K1_HALF_ORDER = _SECP256K1_ORDER // 2
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MAX_EXPIRY_HORIZON_MS = 15_000
@@ -228,6 +230,10 @@ class QualificationSignature:
             raise ValidationError("qualification signature.r is non-canonical")
         if not isinstance(self.s, str) or not _SIGNATURE_COMPONENT_RE.fullmatch(self.s):
             raise ValidationError("qualification signature.s is non-canonical")
+        if int(self.r, 16) >= _SECP256K1_ORDER:
+            raise ValidationError("qualification signature.r is outside secp256k1")
+        if int(self.s, 16) > _SECP256K1_HALF_ORDER:
+            raise ValidationError("qualification signature.s is not canonical low-s")
         if type(self.v) is not int or self.v not in {27, 28}:
             raise ValidationError("qualification signature.v must be 27 or 28")
 
@@ -660,8 +666,8 @@ def freeze_signed_qualification_envelope(
         <= expires_after_ms - signed_at_ms
         <= policy.maximum_expiry_horizon_ms
         and signed_at_ms - _NONCE_PAST_WINDOW_MS
-        <= nonce
-        <= signed_at_ms + _NONCE_FUTURE_WINDOW_MS
+        < nonce
+        < signed_at_ms + _NONCE_FUTURE_WINDOW_MS
     ):
         raise StateConflict("qualification nonce or expiry is outside signer policy")
     signature.verify_integrity()

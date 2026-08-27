@@ -440,9 +440,16 @@ class PluginWiringTests(unittest.TestCase):
             project["project"]["optional-dependencies"]["mcp"],
             ["mcp==2.0.0"],
         )
+        from trading_harness.qualification_sdk import (
+            QUALIFICATION_SDK_DEPENDENCIES,
+        )
+
         self.assertEqual(
             project["project"]["optional-dependencies"]["execution"],
-            ["hyperliquid-python-sdk==0.24.0"],
+            [
+                f"{distribution}=={version}"
+                for distribution, version in QUALIFICATION_SDK_DEPENDENCIES.items()
+            ],
         )
         self.assertEqual(
             project["project"]["scripts"]["trading-harness-mcp"],

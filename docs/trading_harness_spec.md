@@ -301,18 +301,62 @@ commands, per-phase signing/submission authority, query evidence and atomic
 notional/loss reservation. Qualification commands serialize against normal
 entry and incident recovery and MUST keep any sending/unknown attempt reserved.
 They MUST NOT be represented as a three-leg bracket or a fabricated recovery
-incident. The dedicated credential-free signer-envelope contract requires an
-injected exact signature-recovery verifier and rechecks TESTNET
-account/API-wallet/action/nonce/wire bindings before persistence. The
+incident. The dedicated signer-envelope contract rechecks TESTNET
+account/API-wallet/action/nonce/wire bindings before persistence. Its pinned
+SDK 0.24.0 adapter accepts only an already-loaded exact `LocalAccount`, signs
+with `vaultAddress = null` and `is_mainnet = false`, and cross-checks official
+recovery against an independently reconstructed msgpack/EIP-712 preimage. A
+schema-v2 global nonce database atomically binds each qualification allocation
+to its action and signing authority while sharing the normal/recovery nonce
+watermark. Schema v1 fails closed pending an explicit migration. The
 schema-v11 coordinator durably records one-shot response/unknown results,
 point-of-no-return crash unknowns, paired CLOID/OID queries, the bound cancel,
 attended full-residual close and causally ordered terminal-flat reservation
-release. These offline paths grant no venue capability: no reviewed pinned
-production verifier is wired, qualification submission authority remains
-compiled off, and a later SDK 0.24.0 golden-tested verifier/signing adapter,
-one-shot sender and direct-`/dev/tty` executor CLI must be reviewed before the
+release. These offline paths grant no venue capability: qualification
+submission authority remains compiled off. The qualification sender can only
+obtain that exact durable authority internally; if a future reviewed build
+promotes it, the sender posts the frozen wire once to the compiled TESTNET
+`/exchange` URL from Hyperliquid's official
+[API](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api) and
+[exchange endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint)
+contracts, with bounded TLS/HTTP/body handling, no redirects, proxies or
+retry, canonical response hashing, and atomic response/unknown transition. In
+addition to per-socket timeouts, one exclusive main-thread wall-clock alarm
+bounds DNS, TLS, response reading and canonical response processing together;
+the sender fails before authority if that deadline mechanism is unavailable or
+an existing alarm/timer would be displaced.
+Every failure after authority is unknown; an uncommitted process/store failure
+is recovered only by point-of-no-return crash normalization and cannot resend.
+A direct-`/dev/tty` executor CLI must be reviewed before the
 first live canary. No verifier may be selected by caller, config or MCP, and no
 qualification action may become an MCP tool.
+
+The credential-free qualification WebSocket contract uses only the official
+TESTNET `wss://api.hyperliquid-testnet.xyz/ws` endpoint and the documented
+`orderUpdates` and `userEvents` subscriptions (`userEvents` arrives on channel
+`user`). These values and shapes are pinned from Hyperliquid's
+[WebSocket overview](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket),
+[subscription contract](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions)
+and the reviewed SDK 0.24.0 wheel. Hyperliquid exposes no gap-free sequence or
+subscribed-user field on these event payloads. The decoder is therefore
+single-user and generation bound, is never authoritative, and requires an
+exact REST snapshot after both
+subscription acknowledgements, after every advisory order/user event, and
+after every disconnect or malformed frame. The REST request must start after
+the connection/ack/event/disconnect that raised the gate, its local receipt
+must follow that start, and its venue server watermark must cover every
+available event timestamp; an event time can only tighten, never relax,
+recovery causality. For timestamp-less `nonUserCancel` and liquidation
+variants, a causally later REST request plus a strictly advancing per-user
+server watermark is required, but the frame still cannot prove inclusion and
+remains advisory. Every observation carries the
+exact lowercase subscribed user; each payload-bearing observation hash binds
+that user as well as generation/channel/payload. Fault observations are
+ephemeral reconciliation signals and have no durable hash yet. It has no
+default live connector,
+automatic reconnect, credentials, WebSocket post action or state-mutation
+authority. The contract is pinned to the official subscription documentation
+and SDK 0.24.0 message routing; later schema changes require review.
 
 ## 3. Why HyperGrok Is Unsafe for Mainnet As-Is
 

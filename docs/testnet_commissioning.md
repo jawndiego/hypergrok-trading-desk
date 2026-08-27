@@ -1,10 +1,11 @@
 # TESTNET commissioning and first-write gap register
 
 Status: **offline engine, schema-v11 qualification core/result coordinator,
-credential-free signer-envelope/injected recovery-verifier contract, machine
-plans and guest/VM renderers implemented; pinned production verifier, SDK
-signer/sender/CLI integration, machine apply, network and live qualification
-incomplete; first harness order write remains blocked**.
+credential-free signer-envelope, pinned SDK 0.24.0 signer and independent
+recovery verifier, dormant one-shot sender, advisory WebSocket decoder and
+local response-drop/crash harness, machine plans and guest/VM renderers
+implemented; CLI integration, live adapters, machine apply, network and live
+qualification incomplete; first harness order write remains blocked**.
 
 This document records the remaining work from a reviewed source commit to the
 first responsible harness-originated Hyperliquid TESTNET order. It is not
@@ -29,9 +30,12 @@ The normative live sequence remains `docs/testnet_qualification.md`.
 - A separate TESTNET-only qualification core durably represents the retained
   account/agent snapshot, fixed GTC canary, bound cancel and full-residual
   attended close. Its credential-free envelope/injected recovery-verifier
-  contract and offline one-shot/result/query/terminal/crash transitions exist,
-  but no reviewed pinned verifier is wired, submission authority remains
-  compiled off and it has no SDK signer, sender, credential or CLI.
+  contract and offline one-shot/result/query/terminal/crash transitions exist.
+  Its exact SDK 0.24.0 signer and independently reconstructed EIP-712 recovery
+  verifier are golden-tested. Its exact TESTNET one-shot HTTP sender acquires
+  authority only from the durable store and atomically records response or
+  unknown transitions, but submission authority remains compiled off, so the
+  sender is unreachable and has no credential or CLI surface.
 - Credential-free final-path APFS/ACL/install and storage-guard artifacts exist
   under `deploy/macos/testnet`; none has been applied.
 - A pinned Lima/VZ VM plan exists under `deploy/ubuntu-router/lima`; its apply
@@ -100,11 +104,11 @@ following are code gaps, not operator commands waiting to be discovered:
 
 | Required qualification behavior | Current gap |
 | --- | --- |
-| Far non-marketable GTC canary, exact query and cancel | Typed envelope plus durable response/crash-unknown, action-bound paired-query and cancel transitions exist offline; pinned production signature recovery, SDK signing, one-shot HTTP sender, submission-authority promotion and direct-terminal CLI are absent |
+| Far non-marketable GTC canary, exact query and cancel | Typed envelope, pinned SDK signing/independent recovery, dormant one-shot HTTP sender and durable response/crash-unknown, action-bound paired-query and cancel transitions exist offline; submission-authority promotion and direct-terminal CLI are absent |
 | Retained pre-write account/metadata/order snapshot | Exact retained evidence and tamper checks exist; live `userRole` reader and attended artifact export are absent |
-| Ordinary attended reduce-only close, including an unexpected GTC-canary fill | Full-residual envelope/result/query and terminal-flat source-reservation release exist offline; SDK signer/sender/submission promotion and CLI are absent; general bracket-parent close is intentionally unsupported |
-| WebSocket disconnect/fill/recovery exercise | No WebSocket client or monitor is implemented; current runtime is REST polling |
-| Forward request but drop the real response | No bounded qualification fault injection exists |
+| Ordinary attended reduce-only close, including an unexpected GTC-canary fill | Full-residual envelope/result/query, pinned SDK signer/recovery and terminal-flat source-reservation release exist offline; submission promotion and CLI are absent; general bracket-parent close is intentionally unsupported |
+| WebSocket disconnect/fill/recovery exercise | An injected, credential-free exact TESTNET client/decoder accepts only `orderUpdates` and `userEvents` (`channel: user`) and forces a REST request begun after the causal boundary whose receipt/server watermark covers the event after connect, every advisory event and every disconnect because the official feed has no gap-free sequence; timestamp-less events require strict server-time advance; no live connector, durable event integration or attended exercise exists |
+| Forward request but drop the real response | A bounded loopback HTTP harness proves accept-then-drop, crash normalization, reservation retention and no resend; no live forwarding proxy or attended real-request exercise exists |
 | Router health as an admission capability | No application router-health field or pre-admission guard exists |
 | Executor free-space shutdown threshold | External fail-closed guard and launchd templates exist; root-owned config, real APFS `statvfs`, shutdown and restart behavior are not installed/qualified |
 | Signed qualification artifact | No artifact builder/signing workflow exists; the deliverable is still manual |

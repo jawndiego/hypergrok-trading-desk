@@ -201,6 +201,19 @@ class QualificationSignerContractTests(unittest.TestCase):
                 policy(),
                 **{**common, "expires_after_ms": int(at(20_000).timestamp() * 1_000)},
             )
+        for boundary_nonce in (
+            signed_ms - 2 * 86_400_000,
+            signed_ms + 86_400_000,
+        ):
+            with self.subTest(boundary_nonce=boundary_nonce):
+                with self.assertRaises(StateConflict):
+                    freeze_signed_qualification_envelope(
+                        intent,
+                        action,
+                        auth,
+                        policy(),
+                        **{**common, "nonce": boundary_nonce},
+                    )
 
         signed = envelope(intent, action, QualificationAttemptPhase.PLACE)
         with self.assertRaises(StateConflict):
@@ -217,8 +230,8 @@ class QualificationSignerContractTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             replace(signed, signing_implementation="different-v1").verify_integrity()
 
-    def test_contract_has_no_key_sdk_nonce_allocator_transport_or_sender(self) -> None:
-        source = inspect.getsource(signer_module) + inspect.getsource(transport_module)
+    def test_signer_has_no_key_sdk_nonce_allocator_transport_or_sender(self) -> None:
+        source = inspect.getsource(signer_module)
         for forbidden in (
             "private_key",
             "credential_provider",
@@ -229,6 +242,18 @@ class QualificationSignerContractTests(unittest.TestCase):
             "submit_signed_action",
         ):
             self.assertNotIn(forbidden, source)
+
+        # The separately reviewed transport contract now contains the dormant
+        # one-shot HTTP sender, but it still cannot load or produce a signature.
+        transport_source = inspect.getsource(transport_module)
+        for forbidden in (
+            "private_key",
+            "credential_provider",
+            "NonceAllocator",
+            "sign_l1_action",
+            "hyperliquid.utils",
+        ):
+            self.assertNotIn(forbidden, transport_source)
 
 
 if __name__ == "__main__":

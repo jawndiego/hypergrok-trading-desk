@@ -9,12 +9,14 @@ chosen nonce before any caller can transmit a signed action.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 import re
 import sqlite3
 
+from .canonical import domain_hash
 from .errors import StorageError, ValidationError
 from .executor_state_binding import (
     MAX_PRIVATE_STATE_FILE_BYTES,
@@ -28,9 +30,17 @@ from .sqlite_snapshot import sqlite_verification_snapshot
 
 Clock = Callable[[], datetime]
 _SIGNER_RE = re.compile(r"^0x[0-9a-f]{40}$")
+_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _MAX_FUTURE_DRIFT_MS = 86_400_000
-NONCE_SCHEMA_VERSION = 1
-_SCHEMA_NAME = "bound_hyperliquid_signer_nonces"
+NONCE_SCHEMA_VERSION = 2
+_SCHEMA_NAME = "bound_hyperliquid_signer_nonces_and_qualification_reservations"
+QUALIFICATION_NONCE_BINDING_HASH_DOMAIN = (
+    "trading-harness/hyperliquid-qualification-nonce-binding/v1"
+)
+QUALIFICATION_NONCE_RESERVATION_HASH_DOMAIN = (
+    "trading-harness/hyperliquid-qualification-nonce-reservation/v1"
+)
 
 _SCHEMA_STATEMENTS = (
     """
@@ -44,7 +54,7 @@ _SCHEMA_STATEMENTS = (
     CREATE TABLE IF NOT EXISTS hyperliquid_nonce_bindings (
         signer_address TEXT NOT NULL,
         network TEXT NOT NULL CHECK(network IN ('mainnet', 'testnet')),
-        schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+        schema_version INTEGER NOT NULL CHECK(schema_version = 2),
         binding_hash TEXT NOT NULL,
         PRIMARY KEY (signer_address, network)
     ) STRICT
@@ -55,6 +65,26 @@ _SCHEMA_STATEMENTS = (
         network TEXT NOT NULL CHECK(network IN ('mainnet', 'testnet')),
         last_nonce INTEGER NOT NULL CHECK(last_nonce >= 0),
         PRIMARY KEY (signer_address, network)
+    ) STRICT
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS hyperliquid_qualification_nonce_reservations (
+        reservation_hash TEXT PRIMARY KEY,
+        binding_hash TEXT NOT NULL UNIQUE,
+        signer_address TEXT NOT NULL,
+        network TEXT NOT NULL CHECK(network = 'testnet'),
+        nonce INTEGER NOT NULL CHECK(nonce >= 0),
+        command_id TEXT NOT NULL,
+        phase TEXT NOT NULL CHECK(phase IN ('place', 'cancel', 'close')),
+        action_hash TEXT NOT NULL,
+        signing_authority_hash TEXT NOT NULL UNIQUE,
+        authority_issued_at_ms INTEGER NOT NULL CHECK(authority_issued_at_ms >= 0),
+        lease_expires_at_ms INTEGER NOT NULL CHECK(lease_expires_at_ms >= 0),
+        action_expires_at_ms INTEGER NOT NULL CHECK(action_expires_at_ms >= 0),
+        expires_after_ms INTEGER NOT NULL CHECK(expires_after_ms >= 0),
+        allocated_at_ms INTEGER NOT NULL CHECK(allocated_at_ms >= 0),
+        UNIQUE (signer_address, network, nonce),
+        UNIQUE (command_id, phase)
     ) STRICT
     """,
 )
@@ -73,6 +103,22 @@ _EXPECTED_COLUMNS = {
         "signer_address",
         "network",
         "last_nonce",
+    ),
+    "hyperliquid_qualification_nonce_reservations": (
+        "reservation_hash",
+        "binding_hash",
+        "signer_address",
+        "network",
+        "nonce",
+        "command_id",
+        "phase",
+        "action_hash",
+        "signing_authority_hash",
+        "authority_issued_at_ms",
+        "lease_expires_at_ms",
+        "action_expires_at_ms",
+        "expires_after_ms",
+        "allocated_at_ms",
     ),
 }
 
@@ -109,6 +155,196 @@ def _normalized_sql(value: object) -> str:
         return ""
     normalized = " ".join(value.rstrip(";").split()).lower()
     return normalized.replace("create table if not exists ", "create table ", 1)
+
+
+def _identifier(value: object, field: str) -> str:
+    if not isinstance(value, str) or not _IDENTIFIER_RE.fullmatch(value):
+        raise ValidationError(f"{field} is not a canonical identifier")
+    return value
+
+
+def _hash(value: object, field: str) -> str:
+    if not isinstance(value, str) or not _HASH_RE.fullmatch(value):
+        raise ValidationError(f"{field} must be a lowercase SHA-256 digest")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class QualificationNonceBinding:
+    """Exact TESTNET action and lease that one durable nonce may sign."""
+
+    signer_address: str
+    network: HyperliquidNetwork
+    command_id: str
+    phase: str
+    action_hash: str
+    signing_authority_hash: str
+    authority_issued_at_ms: int
+    lease_expires_at_ms: int
+    action_expires_at_ms: int
+    expires_after_ms: int
+    binding_hash: str
+
+    def material(self) -> dict[str, object]:
+        return {
+            "schema_version": "hyperliquid.qualification_nonce_binding.v1",
+            "signer_address": self.signer_address,
+            "network": self.network.value,
+            "command_id": self.command_id,
+            "phase": self.phase,
+            "action_hash": self.action_hash,
+            "signing_authority_hash": self.signing_authority_hash,
+            "authority_issued_at_ms": self.authority_issued_at_ms,
+            "lease_expires_at_ms": self.lease_expires_at_ms,
+            "action_expires_at_ms": self.action_expires_at_ms,
+            "expires_after_ms": self.expires_after_ms,
+        }
+
+    def verify_integrity(self) -> None:
+        if not isinstance(self.signer_address, str) or not _SIGNER_RE.fullmatch(
+            self.signer_address
+        ):
+            raise ValidationError("qualification nonce signer address is invalid")
+        if self.network is not HyperliquidNetwork.TESTNET:
+            raise ValidationError("qualification nonce binding is TESTNET-only")
+        _identifier(self.command_id, "command_id")
+        if self.phase not in {"place", "cancel", "close"}:
+            raise ValidationError("qualification nonce phase is invalid")
+        _hash(self.action_hash, "action_hash")
+        _hash(self.signing_authority_hash, "signing_authority_hash")
+        for field in (
+            "authority_issued_at_ms",
+            "lease_expires_at_ms",
+            "action_expires_at_ms",
+            "expires_after_ms",
+        ):
+            if type(getattr(self, field)) is not int or getattr(self, field) < 0:
+                raise ValidationError(f"{field} must be a non-negative integer")
+        if not (
+            self.authority_issued_at_ms < self.expires_after_ms
+            <= self.lease_expires_at_ms
+            and self.expires_after_ms <= self.action_expires_at_ms
+        ):
+            raise ValidationError("qualification nonce expiry ordering is invalid")
+        _hash(self.binding_hash, "binding_hash")
+        if domain_hash(
+            QUALIFICATION_NONCE_BINDING_HASH_DOMAIN, self.material()
+        ) != self.binding_hash:
+            raise ValidationError("qualification nonce binding hash differs")
+
+
+def build_qualification_nonce_binding(
+    *,
+    signer_address: str,
+    command_id: str,
+    phase: str,
+    action_hash: str,
+    signing_authority_hash: str,
+    authority_issued_at_ms: int,
+    lease_expires_at_ms: int,
+    action_expires_at_ms: int,
+    expires_after_ms: int,
+) -> QualificationNonceBinding:
+    provisional = QualificationNonceBinding(
+        signer_address=signer_address,
+        network=HyperliquidNetwork.TESTNET,
+        command_id=command_id,
+        phase=phase,
+        action_hash=action_hash,
+        signing_authority_hash=signing_authority_hash,
+        authority_issued_at_ms=authority_issued_at_ms,
+        lease_expires_at_ms=lease_expires_at_ms,
+        action_expires_at_ms=action_expires_at_ms,
+        expires_after_ms=expires_after_ms,
+        binding_hash="0" * 64,
+    )
+    result = QualificationNonceBinding(
+        signer_address=provisional.signer_address,
+        network=provisional.network,
+        command_id=provisional.command_id,
+        phase=provisional.phase,
+        action_hash=provisional.action_hash,
+        signing_authority_hash=provisional.signing_authority_hash,
+        authority_issued_at_ms=provisional.authority_issued_at_ms,
+        lease_expires_at_ms=provisional.lease_expires_at_ms,
+        action_expires_at_ms=provisional.action_expires_at_ms,
+        expires_after_ms=provisional.expires_after_ms,
+        binding_hash=domain_hash(
+            QUALIFICATION_NONCE_BINDING_HASH_DOMAIN, provisional.material()
+        ),
+    )
+    result.verify_integrity()
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class QualificationNonceReservation:
+    """Committed global nonce watermark plus its immutable qualification binding."""
+
+    binding: QualificationNonceBinding
+    nonce: int
+    allocated_at_ms: int
+    reservation_hash: str
+
+    def material(self) -> dict[str, object]:
+        return {
+            "schema_version": "hyperliquid.qualification_nonce_reservation.v1",
+            "binding": self.binding.material(),
+            "binding_hash": self.binding.binding_hash,
+            "nonce": self.nonce,
+            "allocated_at_ms": self.allocated_at_ms,
+        }
+
+    def verify_integrity(self) -> None:
+        if type(self.binding) is not QualificationNonceBinding:
+            raise TypeError("binding must be exact QualificationNonceBinding")
+        self.binding.verify_integrity()
+        if type(self.nonce) is not int or self.nonce < 0:
+            raise ValidationError("qualification reserved nonce is invalid")
+        if type(self.allocated_at_ms) is not int or self.allocated_at_ms < 0:
+            raise ValidationError("qualification nonce allocation time is invalid")
+        if not (
+            self.binding.authority_issued_at_ms
+            <= self.allocated_at_ms
+            < self.binding.expires_after_ms
+        ):
+            raise ValidationError(
+                "qualification nonce was allocated outside its authority"
+            )
+        _hash(self.reservation_hash, "reservation_hash")
+        if domain_hash(
+            QUALIFICATION_NONCE_RESERVATION_HASH_DOMAIN, self.material()
+        ) != self.reservation_hash:
+            raise ValidationError("qualification nonce reservation hash differs")
+
+
+def _qualification_reservation_from_row(
+    row: sqlite3.Row,
+) -> QualificationNonceReservation:
+    try:
+        binding = QualificationNonceBinding(
+            signer_address=row["signer_address"],
+            network=HyperliquidNetwork(row["network"]),
+            command_id=row["command_id"],
+            phase=row["phase"],
+            action_hash=row["action_hash"],
+            signing_authority_hash=row["signing_authority_hash"],
+            authority_issued_at_ms=row["authority_issued_at_ms"],
+            lease_expires_at_ms=row["lease_expires_at_ms"],
+            action_expires_at_ms=row["action_expires_at_ms"],
+            expires_after_ms=row["expires_after_ms"],
+            binding_hash=row["binding_hash"],
+        )
+        reservation = QualificationNonceReservation(
+            binding=binding,
+            nonce=row["nonce"],
+            allocated_at_ms=row["allocated_at_ms"],
+            reservation_hash=row["reservation_hash"],
+        )
+        reservation.verify_integrity()
+    except (TypeError, ValueError, ValidationError) as error:
+        raise StorageError("persisted qualification nonce is invalid") from error
+    return reservation
 
 
 class PersistentNonceAllocator:
@@ -216,6 +452,7 @@ class PersistentNonceAllocator:
                     try:
                         self._verify_integrity(connection)
                         self._verify_schema(connection)
+                        self._verify_qualification_reservations(connection)
                         self._bind_or_verify(connection, allow_create=False)
                     finally:
                         connection.close()
@@ -231,6 +468,13 @@ class PersistentNonceAllocator:
                 (NONCE_SCHEMA_VERSION,),
             ).fetchone()
             if row is None:
+                prior = connection.execute(
+                    "SELECT version FROM nonce_schema_migrations ORDER BY version"
+                ).fetchall()
+                if prior:
+                    raise StorageError(
+                        "existing nonce schema requires an explicit migration to version 2"
+                    )
                 connection.execute(
                     """
                     INSERT INTO nonce_schema_migrations (version, name, checksum)
@@ -241,6 +485,7 @@ class PersistentNonceAllocator:
             elif row["name"] != _SCHEMA_NAME or row["checksum"] != _SCHEMA_CHECKSUM:
                 raise StorageError("nonce migration checksum does not match")
             self._verify_schema(connection)
+            self._verify_qualification_reservations(connection)
             self._bind_or_verify(connection, allow_create=True)
             connection.commit()
         except (sqlite3.Error, StorageError) as error:
@@ -328,6 +573,37 @@ class PersistentNonceAllocator:
         ):
             raise StorageError("nonce migration history does not match")
 
+    @staticmethod
+    def _verify_qualification_reservations(
+        connection: sqlite3.Connection,
+    ) -> None:
+        rows = connection.execute(
+            """
+            SELECT * FROM hyperliquid_qualification_nonce_reservations
+            ORDER BY signer_address, network, nonce
+            """
+        ).fetchall()
+        for row in rows:
+            reservation = _qualification_reservation_from_row(row)
+            watermark = connection.execute(
+                """
+                SELECT last_nonce FROM hyperliquid_signer_nonces
+                WHERE signer_address = ? AND network = ?
+                """,
+                (
+                    reservation.binding.signer_address,
+                    reservation.binding.network.value,
+                ),
+            ).fetchone()
+            if (
+                watermark is None
+                or type(watermark["last_nonce"]) is not int
+                or watermark["last_nonce"] < reservation.nonce
+            ):
+                raise StorageError(
+                    "qualification nonce exceeds its global durable watermark"
+                )
+
     def _bind_or_verify(
         self, connection: sqlite3.Connection, *, allow_create: bool
     ) -> None:
@@ -388,32 +664,7 @@ class PersistentNonceAllocator:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                """
-                SELECT last_nonce
-                FROM hyperliquid_signer_nonces
-                WHERE signer_address = ? AND network = ?
-                """,
-                (self._signer_address, self._network.value),
-            ).fetchone()
-            previous = None if row is None else row["last_nonce"]
-            if previous is not None and (
-                type(previous) is not int or previous < 0
-            ):
-                raise StorageError("persisted nonce is invalid")
-            if previous is not None and previous > now_ms + _MAX_FUTURE_DRIFT_MS:
-                raise StorageError("persisted nonce is implausibly far ahead of the clock")
-            nonce = now_ms if previous is None else max(previous + 1, now_ms)
-            connection.execute(
-                """
-                INSERT INTO hyperliquid_signer_nonces (
-                    signer_address, network, last_nonce
-                ) VALUES (?, ?, ?)
-                ON CONFLICT(signer_address, network) DO UPDATE SET
-                    last_nonce = excluded.last_nonce
-                """,
-                (self._signer_address, self._network.value, nonce),
-            )
+            nonce = self._allocate_locked(connection, now_ms)
             connection.commit()
             return nonce
         except (sqlite3.Error, StorageError) as error:
@@ -428,6 +679,164 @@ class PersistentNonceAllocator:
             ) from error
         finally:
             connection.close()
+
+    def _allocate_locked(self, connection: sqlite3.Connection, now_ms: int) -> int:
+        row = connection.execute(
+            """
+            SELECT last_nonce
+            FROM hyperliquid_signer_nonces
+            WHERE signer_address = ? AND network = ?
+            """,
+            (self._signer_address, self._network.value),
+        ).fetchone()
+        previous = None if row is None else row["last_nonce"]
+        if previous is not None and (type(previous) is not int or previous < 0):
+            raise StorageError("persisted nonce is invalid")
+        if previous is not None and previous > now_ms + _MAX_FUTURE_DRIFT_MS:
+            raise StorageError("persisted nonce is implausibly far ahead of the clock")
+        nonce = now_ms if previous is None else max(previous + 1, now_ms)
+        connection.execute(
+            """
+            INSERT INTO hyperliquid_signer_nonces (
+                signer_address, network, last_nonce
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(signer_address, network) DO UPDATE SET
+                last_nonce = excluded.last_nonce
+            """,
+            (self._signer_address, self._network.value, nonce),
+        )
+        return nonce
+
+    def allocate_qualification(
+        self, binding: QualificationNonceBinding
+    ) -> QualificationNonceReservation:
+        """Atomically advance the global nonce and bind it to one qualification.
+
+        A repeated action/authority never returns the prior nonce and never
+        allocates another.  A later signing failure intentionally leaves this
+        committed reservation in place, burning the nonce across restarts.
+        """
+
+        if type(binding) is not QualificationNonceBinding:
+            raise TypeError("binding must be exact QualificationNonceBinding")
+        binding.verify_integrity()
+        if (
+            binding.signer_address != self._signer_address
+            or binding.network is not self._network
+            or self._network is not HyperliquidNetwork.TESTNET
+        ):
+            raise StorageError(
+                "qualification nonce binding differs from allocator identity"
+            )
+        now_ms = _utc_ms(self._clock)
+        if now_ms < 0:
+            raise ValidationError("nonce clock predates the Unix epoch")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            duplicate = connection.execute(
+                """
+                SELECT 1 FROM hyperliquid_qualification_nonce_reservations
+                WHERE binding_hash = ? OR signing_authority_hash = ?
+                   OR (command_id = ? AND phase = ?)
+                LIMIT 1
+                """,
+                (
+                    binding.binding_hash,
+                    binding.signing_authority_hash,
+                    binding.command_id,
+                    binding.phase,
+                ),
+            ).fetchone()
+            if duplicate is not None:
+                raise StorageError(
+                    "qualification nonce binding was already reserved"
+                )
+            nonce = self._allocate_locked(connection, now_ms)
+            provisional = QualificationNonceReservation(
+                binding=binding,
+                nonce=nonce,
+                allocated_at_ms=now_ms,
+                reservation_hash="0" * 64,
+            )
+            reservation = QualificationNonceReservation(
+                binding=binding,
+                nonce=nonce,
+                allocated_at_ms=now_ms,
+                reservation_hash=domain_hash(
+                    QUALIFICATION_NONCE_RESERVATION_HASH_DOMAIN,
+                    provisional.material(),
+                ),
+            )
+            reservation.verify_integrity()
+            connection.execute(
+                """
+                INSERT INTO hyperliquid_qualification_nonce_reservations (
+                    reservation_hash, binding_hash, signer_address, network,
+                    nonce, command_id, phase, action_hash,
+                    signing_authority_hash, authority_issued_at_ms,
+                    lease_expires_at_ms, action_expires_at_ms,
+                    expires_after_ms, allocated_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    reservation.reservation_hash,
+                    binding.binding_hash,
+                    binding.signer_address,
+                    binding.network.value,
+                    reservation.nonce,
+                    binding.command_id,
+                    binding.phase,
+                    binding.action_hash,
+                    binding.signing_authority_hash,
+                    binding.authority_issued_at_ms,
+                    binding.lease_expires_at_ms,
+                    binding.action_expires_at_ms,
+                    binding.expires_after_ms,
+                    reservation.allocated_at_ms,
+                ),
+            )
+            connection.commit()
+            return reservation
+        except (sqlite3.Error, StorageError) as error:
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                pass
+            if isinstance(error, StorageError):
+                raise
+            raise StorageError(
+                f"qualification nonce allocation failed: {type(error).__name__}"
+            ) from error
+        finally:
+            connection.close()
+
+    def qualification_reservation(
+        self, binding_hash: str
+    ) -> QualificationNonceReservation:
+        """Read and reverify one committed qualification reservation."""
+
+        checked_hash = _hash(binding_hash, "binding_hash")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = self._connect()
+            row = connection.execute(
+                """
+                SELECT * FROM hyperliquid_qualification_nonce_reservations
+                WHERE binding_hash = ?
+                """,
+                (checked_hash,),
+            ).fetchone()
+        except sqlite3.Error as error:
+            raise StorageError(
+                f"qualification nonce read failed: {type(error).__name__}"
+            ) from error
+        finally:
+            if connection is not None:
+                connection.close()
+        if row is None:
+            raise StorageError("qualification nonce reservation was not found")
+        return _qualification_reservation_from_row(row)
 
     def last_allocated(self) -> int | None:
         """Read the last committed nonce without advancing it."""
@@ -456,4 +865,12 @@ class PersistentNonceAllocator:
         return value
 
 
-__all__ = ("PersistentNonceAllocator",)
+__all__ = (
+    "NONCE_SCHEMA_VERSION",
+    "QUALIFICATION_NONCE_BINDING_HASH_DOMAIN",
+    "QUALIFICATION_NONCE_RESERVATION_HASH_DOMAIN",
+    "PersistentNonceAllocator",
+    "QualificationNonceBinding",
+    "QualificationNonceReservation",
+    "build_qualification_nonce_binding",
+)

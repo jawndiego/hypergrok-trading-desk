@@ -22,7 +22,26 @@ classifiers = [
 
 [project.optional-dependencies]
 mcp = ["mcp==2.0.0"]
-execution = ["hyperliquid-python-sdk==0.24.0"]
+execution = [
+  "hyperliquid-python-sdk==0.24.0",
+  "eth-account==0.13.7",
+  "eth-abi==6.0.0",
+  "eth-hash==0.8.0",
+  "eth-keyfile==0.8.1",
+  "eth-keys==0.8.0",
+  "eth-rlp==3.0.0",
+  "eth-typing==6.0.0",
+  "eth-utils==5.3.1",
+  "hexbytes==2.0.0",
+  "msgpack==1.2.1",
+  "bitarray==3.10.1",
+  "ckzg==2.1.8",
+  "cytoolz==1.1.0",
+  "parsimonious==0.10.0",
+  "pycryptodome==3.23.0",
+  "rlp==5.0.0",
+  "toolz==1.1.0",
+]
 
 [project.scripts]
 trading-harness = "trading_harness.cli:main"

@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+import hashlib
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -11,7 +12,11 @@ from unittest.mock import patch
 
 from trading_harness.errors import StorageError, ValidationError
 from trading_harness.hyperliquid_wire import HyperliquidNetwork
-from trading_harness.nonce import PersistentNonceAllocator
+from trading_harness.nonce import (
+    NONCE_SCHEMA_VERSION,
+    PersistentNonceAllocator,
+    build_qualification_nonce_binding,
+)
 
 
 SIGNER = "0x" + "1" * 40
@@ -20,6 +25,235 @@ NOW = datetime(2026, 8, 24, 16, 0, tzinfo=timezone.utc)
 
 
 class PersistentNonceTests(unittest.TestCase):
+    @staticmethod
+    def qualification_binding(index: int = 0):
+        now_ms = int(NOW.timestamp() * 1000)
+        return build_qualification_nonce_binding(
+            signer_address=SIGNER,
+            command_id=f"qualification-{index}",
+            phase="place",
+            action_hash=hashlib.sha256(f"action-{index}".encode()).hexdigest(),
+            signing_authority_hash=hashlib.sha256(
+                f"authority-{index}".encode()
+            ).hexdigest(),
+            authority_issued_at_ms=now_ms - 1,
+            lease_expires_at_ms=now_ms + 15_000,
+            action_expires_at_ms=now_ms + 10_000,
+            expires_after_ms=now_ms + 5_000,
+        )
+
+    def test_fresh_database_is_exact_schema_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nonce.sqlite3"
+            PersistentNonceAllocator(
+                path,
+                signer_address=SIGNER,
+                network=HyperliquidNetwork.TESTNET,
+            )
+            with closing(sqlite3.connect(path)) as connection:
+                rows = connection.execute(
+                    "SELECT version FROM nonce_schema_migrations ORDER BY version"
+                ).fetchall()
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+            self.assertEqual(rows, [(NONCE_SCHEMA_VERSION,)])
+            self.assertIn(
+                "hyperliquid_qualification_nonce_reservations", tables
+            )
+
+    def test_existing_schema_v1_requires_explicit_migration_without_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nonce-v1.sqlite3"
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute("PRAGMA journal_mode = WAL")
+                connection.execute(
+                    """
+                    CREATE TABLE nonce_schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        checksum TEXT NOT NULL
+                    ) STRICT
+                    """
+                )
+                connection.execute(
+                    "INSERT INTO nonce_schema_migrations VALUES (1, 'old', 'old')"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE hyperliquid_nonce_bindings (
+                        signer_address TEXT NOT NULL,
+                        network TEXT NOT NULL,
+                        schema_version INTEGER NOT NULL,
+                        binding_hash TEXT NOT NULL,
+                        PRIMARY KEY (signer_address, network)
+                    ) STRICT
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE hyperliquid_signer_nonces (
+                        signer_address TEXT NOT NULL,
+                        network TEXT NOT NULL,
+                        last_nonce INTEGER NOT NULL,
+                        PRIMARY KEY (signer_address, network)
+                    ) STRICT
+                    """
+                )
+            with self.assertRaisesRegex(StorageError, "explicit migration"):
+                PersistentNonceAllocator(
+                    path,
+                    signer_address=SIGNER,
+                    network=HyperliquidNetwork.TESTNET,
+                )
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT version FROM nonce_schema_migrations"
+                    ).fetchall(),
+                    [(1,)],
+                )
+                self.assertIsNone(
+                    connection.execute(
+                        """
+                        SELECT name FROM sqlite_master
+                        WHERE name = 'hyperliquid_qualification_nonce_reservations'
+                        """
+                    ).fetchone()
+                )
+
+    def test_qualification_reservation_is_immutable_and_duplicate_fails_after_restart(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nonce.sqlite3"
+            allocator = PersistentNonceAllocator(
+                path,
+                signer_address=SIGNER,
+                network=HyperliquidNetwork.TESTNET,
+                clock=lambda: NOW,
+            )
+            binding = self.qualification_binding()
+            reservation = allocator.allocate_qualification(binding)
+            self.assertEqual(
+                allocator.qualification_reservation(binding.binding_hash),
+                reservation,
+            )
+            restarted = PersistentNonceAllocator(
+                path,
+                signer_address=SIGNER,
+                network=HyperliquidNetwork.TESTNET,
+                clock=lambda: NOW,
+                must_exist=True,
+            )
+            self.assertEqual(
+                restarted.qualification_reservation(binding.binding_hash),
+                reservation,
+            )
+            with self.assertRaisesRegex(StorageError, "already reserved"):
+                restarted.allocate_qualification(binding)
+            self.assertEqual(restarted.last_allocated(), reservation.nonce)
+
+    def test_restart_rejects_tampered_reservation_and_rolled_back_watermark(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nonce.sqlite3"
+            allocator = PersistentNonceAllocator(
+                path,
+                signer_address=SIGNER,
+                network=HyperliquidNetwork.TESTNET,
+                clock=lambda: NOW,
+            )
+            reservation = allocator.allocate_qualification(
+                self.qualification_binding()
+            )
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "UPDATE hyperliquid_signer_nonces SET last_nonce = ?",
+                    (reservation.nonce - 1,),
+                )
+            with self.assertRaisesRegex(StorageError, "global durable watermark"):
+                PersistentNonceAllocator(
+                    path,
+                    signer_address=SIGNER,
+                    network=HyperliquidNetwork.TESTNET,
+                    clock=lambda: NOW,
+                    must_exist=True,
+                )
+
+            with closing(sqlite3.connect(path)) as connection, connection:
+                connection.execute(
+                    "UPDATE hyperliquid_signer_nonces SET last_nonce = ?",
+                    (reservation.nonce,),
+                )
+                connection.execute(
+                    """
+                    UPDATE hyperliquid_qualification_nonce_reservations
+                    SET action_hash = ?
+                    """,
+                    ("0" * 64,),
+                )
+            with self.assertRaisesRegex(StorageError, "persisted qualification nonce"):
+                PersistentNonceAllocator(
+                    path,
+                    signer_address=SIGNER,
+                    network=HyperliquidNetwork.TESTNET,
+                    clock=lambda: NOW,
+                    must_exist=True,
+                )
+
+    def test_normal_and_qualification_lanes_share_one_concurrent_watermark(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nonce.sqlite3"
+            allocator = PersistentNonceAllocator(
+                path,
+                signer_address=SIGNER,
+                network=HyperliquidNetwork.TESTNET,
+                clock=lambda: NOW,
+            )
+
+            def allocate(index: int) -> int:
+                if index % 2:
+                    return allocator.allocate()
+                return allocator.allocate_qualification(
+                    self.qualification_binding(index)
+                ).nonce
+
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                values = list(pool.map(allocate, range(200)))
+            self.assertEqual(len(values), len(set(values)))
+            self.assertEqual(max(values) - min(values), 199)
+            self.assertEqual(allocator.last_allocated(), max(values))
+
+    def test_mainnet_allocator_cannot_reserve_qualification_nonce(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            allocator = PersistentNonceAllocator(
+                Path(directory) / "nonce.sqlite3",
+                signer_address=SIGNER,
+                network=HyperliquidNetwork.MAINNET,
+                clock=lambda: NOW,
+            )
+            with self.assertRaisesRegex(StorageError, "allocator identity"):
+                allocator.allocate_qualification(self.qualification_binding())
+
+    def test_qualification_allocation_outside_bound_time_rolls_back_watermark(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            allocator = PersistentNonceAllocator(
+                Path(directory) / "nonce.sqlite3",
+                signer_address=SIGNER,
+                network=HyperliquidNetwork.TESTNET,
+                clock=lambda: NOW + timedelta(seconds=5),
+            )
+            with self.assertRaisesRegex(ValidationError, "outside its authority"):
+                allocator.allocate_qualification(self.qualification_binding())
+            self.assertIsNone(allocator.last_allocated())
+
     def test_existing_only_reopen_verifies_then_allows_allocation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "nonce.sqlite3"

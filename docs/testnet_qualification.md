@@ -1,8 +1,9 @@
 # Hyperliquid testnet qualification
 
-Status: **offline capital core, credential-free signer-envelope/injected
-recovery-verifier contract and schema-v11 result/workflow persistence
-implemented; pinned production verifier, SDK signer, sender, CLI,
+Status: **offline capital core, credential-free signer-envelope, pinned SDK
+0.24.0 signer/independent recovery verifier, dormant one-shot sender,
+advisory WebSocket decoder/local response-drop harness and schema-v11
+result/workflow persistence implemented; CLI and live adapters,
 commissioning and live-workflow gaps remain; live venue qualification not run**.
 
 The TESTNET execution functions are real and armed when the isolated worker is
@@ -121,28 +122,37 @@ or empty-database recreation.
 On this new machine, run `init` only after proving no harness state exists. If
 any v1-bound or other nonempty state is discovered, preserve its main and
 sidecar files and stop for a separately reviewed migration.
+The single global nonce database now initializes only at schema v2 and binds
+qualification nonces atomically to their action and signing authority. An
+existing nonce schema-v1 database fails closed pending an explicit migration;
+no such migration exists, and no nonce database exists on this machine.
 
 ## Known blockers before the live sequence
 
 The target live sequence below is intentionally stronger than the currently
 exposed CLI. Do not skip its first steps by sending the already-armed bracket.
 The GTC/cancel/close semantics, dedicated signer-envelope validator and durable
-schema-v11 result coordinator now exist. The validator accepts only the fixed
-injected recovery-verifier interface; no reviewed pinned production verifier
-is wired or golden-tested yet. They expose no SDK signing, sender, credential
-or CLI capability, and submission authority remains compiled off. The
-following live integrations and observable tests remain:
+schema-v11 result coordinator now exist. The exact pinned SDK 0.24.0 signer and
+independently reconstructed EIP-712 recovery verifier are golden-tested for all
+three action shapes and use the schema-v2 global nonce authority. They expose
+no credential or CLI capability, and submission authority remains compiled
+off. The following live integrations and observable tests remain:
 
-- a fixed, non-configurable SDK 0.24.0 golden-tested signature-recovery
-  implementation, dedicated SDK signing adapter, one-shot sender and TTY CLI
-  for the narrow attended TESTNET-only GTC canary/query/cancel core;
+- a direct TTY CLI for the narrow attended TESTNET-only GTC
+  canary/query/cancel core;
 - a live `userRole` reader and operator-facing retained
   account/metadata/order artifact export;
-- live SDK signer/sender integration for the ordinary attended bounded
-  reduce-only canary close; its offline terminal-flat release is implemented;
-- WebSocket monitoring and disconnect/fill/REST recovery;
-- bounded fault injection that forwards one exact request while dropping its
-  response;
+- live attended integration for the ordinary bounded reduce-only canary close;
+  its signer and offline terminal-flat release are implemented;
+- a live adapter and durable integration for the credential-free advisory
+  WebSocket client/decoder, followed by an attended disconnect/fill/REST
+  recovery exercise; official `orderUpdates`/`userEvents` carry no gap-free
+  sequence, so the offline monitor deliberately requires REST after connect,
+  every event and every disconnect; timestamp-less variants remain advisory
+  even after a later REST request with a strictly advancing server watermark;
+- attended fault injection that forwards one real exact request while dropping
+  its response; the bounded loopback accept/drop/crash/no-resend harness passes
+  offline but is not evidence of a live forwarded request;
 - optional application-level router health if router readiness is to be an
   admission gate rather than an OS-only failure boundary.
 - installed and empirically qualified free-space shutdown guards plus a

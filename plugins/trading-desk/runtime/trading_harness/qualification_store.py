@@ -2217,6 +2217,120 @@ class QualificationStore:
                 authority_hash=authority_hash,
             )
 
+    def require_current_signing_authority(
+        self,
+        command_id: str,
+        *,
+        intent: QualificationIntent,
+        action: QualificationAction,
+        authority: QualificationSigningAuthority,
+        worker_id: str,
+        fencing_token: int,
+        at: datetime,
+    ) -> QualificationSigningAuthority:
+        """Read-only proof that a key-use authority is durable and current.
+
+        Constructing ``QualificationSigningAuthority`` by value is not
+        sufficient.  The production signer calls this method before allocating
+        a nonce or using its wallet, and the check runs against one consistent,
+        query-only SQLite snapshot of the live claim and authority row.
+        """
+
+        checked_command = _identifier(command_id, "command_id")
+        checked_worker = _identifier(worker_id, "worker_id")
+        if type(intent) is not QualificationIntent:
+            raise TypeError("intent must be exact QualificationIntent")
+        if not isinstance(action, (QualificationOrderAction, QualificationCancelAction)):
+            raise TypeError("action must be a typed QualificationAction")
+        if type(authority) is not QualificationSigningAuthority:
+            raise TypeError("authority must be exact QualificationSigningAuthority")
+        if type(fencing_token) is not int or fencing_token <= 0:
+            raise ValidationError("fencing_token must be positive")
+        intent.verify_integrity()
+        action.verify_integrity()
+        authority.verify_integrity()
+        checked_at = _utc(at, "at")
+        connection = self.execution_store._connect()  # type: ignore[attr-defined]
+        try:
+            connection.execute("PRAGMA query_only = ON")
+            if connection.execute("PRAGMA query_only").fetchone()[0] != 1:
+                raise StorageError("qualification authority check is not query-only")
+            connection.execute("BEGIN")
+            command, outbox, step = self._require_claim_locked(
+                connection,
+                command_id=checked_command,
+                worker_id=checked_worker,
+                fencing_token=fencing_token,
+                at=checked_at,
+            )
+            authority_rows = connection.execute(
+                """
+                SELECT * FROM execution_qualification_signing_authorities
+                WHERE command_id = ? AND phase = ?
+                """,
+                (checked_command, step.phase.value),
+            ).fetchall()
+            if len(authority_rows) != 1:
+                raise StateConflict(
+                    "durable qualification signing authority is not unique"
+                )
+            authority_row = authority_rows[0]
+            self._verify_signing_authority_row(authority_row)
+            active_attempt = connection.execute(
+                """
+                SELECT 1 FROM execution_qualification_attempts
+                WHERE command_id = ? AND phase = ? LIMIT 1
+                """,
+                (checked_command, step.phase.value),
+            ).fetchone()
+            critical = connection.execute(
+                """
+                SELECT 1 FROM execution_incidents
+                WHERE severity = 'critical' AND state != 'closed' LIMIT 1
+                """
+            ).fetchone()
+            if (
+                command.intent_hash != intent.intent_hash
+                or command.intent_json != canonical_json(intent.as_dict())
+                or command.current_phase != authority.phase.value
+                or self.execution_store.account_id != intent.account_id
+                or intent.account_id != action.account_id
+                or intent.main_account_address != action.main_account_address
+                or step.state != "claimed"
+                or step.phase is not authority.phase
+                or step.action_hash != action.action_hash
+                or step.action_json != canonical_json(action.as_dict())
+                or outbox.current_attempt_id is not None
+                or active_attempt is not None
+                or critical is not None
+                or authority.command_id != checked_command
+                or authority.action_hash != action.action_hash
+                or authority.worker_id != checked_worker
+                or authority.fencing_token != fencing_token
+                or authority.authority_hash != authority_row["authority_hash"]
+                or authority_row["action_hash"] != action.action_hash
+                or authority_row["worker_id"] != checked_worker
+                or int(authority_row["fencing_token"]) != fencing_token
+                or _parse_time(authority_row["issued_at"], "issued_at")
+                != authority.issued_at
+                or _parse_time(
+                    authority_row["lease_expires_at"], "lease_expires_at"
+                )
+                != authority.lease_expires_at
+                or not authority.issued_at <= checked_at < authority.lease_expires_at
+                or outbox.lease_expires_at != authority.lease_expires_at
+                or _milliseconds(checked_at) >= step.expires_at_ms
+            ):
+                raise StateConflict(
+                    "qualification signing authority is not durably current"
+                )
+            return authority
+        finally:
+            try:
+                connection.rollback()
+            finally:
+                connection.close()
+
     @staticmethod
     def _attempt_material(
         *,
