@@ -127,7 +127,7 @@ later resize changes the tested resource boundary.
    `/opt/trading-desk/libexec/trading-keychain-reader-executor-v1` and
    `/opt/trading-desk/libexec/trading-keychain-reader-control-v1` as
    `root:trading-executor`/`root:trading-control`, mode `0510`. The installer is
-   bound to application commit `2b29ab7823132a1e1b58f4a376320368f76d865c`
+   bound to application commit `a0f82d5928e57c43e511127a490ecbcf48110684`
    and its exact archive, schema-v3 wheel, dependency manifest and readers.
    Apply is valid only from the separately sealed replacement pack after its
    binding commit passes exact-head CI. The separate
