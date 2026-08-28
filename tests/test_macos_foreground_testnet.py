@@ -256,7 +256,14 @@ class ForegroundCommissionerTests(unittest.TestCase):
             "--apply-postinit",
             "trading-public-collector 453 453",
             "trading-router-operator 454 454",
-            "AuthenticationAuthority ';DisabledUser;'",
+            "Password '*'",
+            "assert_disabled_password_account",
+            "directory-service record read failed",
+            "AuthenticationAuthority: ;DisabledUser;",
+            "assert_generated_uid_unique",
+            "REVIEWED_DARWIN_SUPPLEMENTARY_GROUPS=12,61,100,701",
+            "supplementary_group_principals=",
+            "supplementary_group_model=matches-existing-trading-role-baseline",
             "NFSHomeDirectory /var/empty",
             "UserShell /usr/bin/false",
             "user:trading-executor allow search",
@@ -289,8 +296,8 @@ class ForegroundCommissionerTests(unittest.TestCase):
             "PrimaryGroupID 454",
             'NFSHomeDirectory "$LIMA_HOME"',
             "UserShell /usr/bin/false",
-            "AuthenticationAuthority ';DisabledUser;'",
-            "router operator has unexpected supplementary groups",
+            "Password '*'",
+            "supplementary groups differ from the trading-role baseline",
             'ensure_directory "$LIMA_HOME" 454 454 700 NONE',
             'write_identity_receipt "$ROUTER_IDENTITY_RECEIPT" router trading-router-operator 454 454 "$LIMA_HOME"',
             "write_identity_receipt \"$COLLECTOR_IDENTITY_RECEIPT\" collector trading-public-collector 453 453 /var/empty",
@@ -309,7 +316,27 @@ class ForegroundCommissionerTests(unittest.TestCase):
         self.assertIn("count + 0", singleton)
         self.assertIn('[ "$count" = 1 ]', singleton)
         self.assertIn("belongs to another name", singleton)
-        self.assertIn("search result is ambiguous", singleton)
+        self.assertIn("list result is ambiguous", singleton)
+        self.assertIn('directory_id_inventory "$node" "$attribute"', singleton)
+        self.assertNotIn("dscl . -search", singleton)
+        inventory_start = source.index("directory_id_inventory()")
+        inventory_end = source.index("assert_directory_id_singleton()")
+        inventory = source[inventory_start:inventory_end]
+        self.assertIn("NF != 2", inventory)
+        self.assertIn("seen_name", inventory)
+        self.assertIn("seen_id", inventory)
+        self.assertIn("inventory is malformed or non-unique", inventory)
+        for required in (
+            'raw_group_ids=$(/usr/bin/id -G "$group_account")',
+            "group inventory failed",
+            "group inventory is malformed",
+            "primary_count != 1",
+            "seen[numeric]++",
+            "assert_primary_group_has_no_members",
+            "group has nested groups",
+            "assert_reviewed_supplementary_group_principals",
+        ):
+            self.assertIn(required, source)
         for required in (
             "assert_directory_id_singleton /Users UniqueID 453 trading-public-collector",
             "assert_directory_id_singleton /Groups PrimaryGroupID 453 trading-public-collector",
@@ -320,18 +347,114 @@ class ForegroundCommissionerTests(unittest.TestCase):
         unused_start = source.index("assert_directory_id_unused()")
         unused_end = source.index("assert_collector_identity_exact()")
         unused = source[unused_start:unused_end]
-        self.assertIn("collision search failed", unused)
+        self.assertIn("collision inventory failed", unused)
         self.assertIn('[ "$count" = 0 ]', unused)
         self.assertNotIn("|| true", unused)
+        self.assertIn('assert_directory_id_unused /Users UniqueID "$uid"', source)
+        self.assertIn(
+            'assert_directory_id_unused /Groups PrimaryGroupID "$gid"',
+            source,
+        )
+        self.assertIn(
+            'prepare_new_identity_birth "$COLLECTOR_BIRTH_MARKER" collector trading-public-collector 453 453 /var/empty',
+            source,
+        )
+        self.assertIn(
+            'prepare_new_identity_birth "$ROUTER_BIRTH_MARKER" router trading-router-operator 454 454 "$LIMA_HOME"',
+            source,
+        )
+        self.assertIsNone(re.search(r"dscl \. -list [^\n]+\|\| true", source))
+        self.assertNotIn(
+            '/usr/bin/dscl . -read "/Users/$disabled_account" AuthenticationAuthority',
+            source,
+        )
+
+    def test_identity_birth_is_marked_and_publishes_uid_last(self) -> None:
+        source = COMMISSIONER.read_text(encoding="utf-8")
         for required in (
-            "assert_directory_id_unused /Users UniqueID 453",
-            "assert_directory_id_unused /Groups PrimaryGroupID 453",
-            "assert_directory_id_unused /Users UniqueID 454",
-            "assert_directory_id_unused /Groups PrimaryGroupID 454",
+            "COLLECTOR_BIRTH_MARKER=",
+            "ROUTER_BIRTH_MARKER=",
+            "kind=identity-birth-marker",
+            "publish_numeric_uid_last=true",
+            "identity birth marker differs",
+            "unmarked unresolved user record exists",
+            "unmarked unresolved group record exists",
+            "assert_directory_id_available_to_name",
+            "assert_unresolved_user_prefix",
+            "assert_resumable_identity_prefix",
         ):
             self.assertIn(required, source)
-        self.assertIsNone(
-            re.search(r"dscl \. -search [^\n]+\|\| true", source)
+
+        collector = source[
+            source.index("apply_identity()") : source.index("apply_router_identity()")
+        ]
+        self.assertLess(
+            collector.index("prepare_new_identity_birth"),
+            collector.index("/Groups/trading-public-collector PrimaryGroupID 453"),
+        )
+        self.assertLess(
+            collector.index("assert_unresolved_user_prefix"),
+            collector.index("/Users/trading-public-collector UniqueID 453"),
+        )
+        router = source[
+            source.index("apply_router_identity()") : source.index("write_acl_templates()")
+        ]
+        self.assertLess(
+            router.index("prepare_new_identity_birth"),
+            router.index("/Groups/trading-router-operator PrimaryGroupID 454"),
+        )
+        self.assertLess(
+            router.index("assert_unresolved_user_prefix"),
+            router.index("/Users/trading-router-operator UniqueID 454"),
+        )
+
+    def test_final_identity_receipts_bind_uuid_and_gate_later_phases(self) -> None:
+        source = COMMISSIONER.read_text(encoding="utf-8")
+        for required in (
+            "schema_version=3",
+            "user_generated_uid=",
+            "group_generated_uid=",
+            "authentication_authority=",
+            "hidden=1",
+            "primary_group_members=none",
+            "primary_group_nested_groups=none",
+            "assert_identity_receipt_exact",
+            "assert_router_home_exact",
+            "RESEARCH_USER_GENERATED_UID=",
+            "EXECUTOR_USER_GENERATED_UID=",
+            "CONTROL_USER_GENERATED_UID=",
+            "F142D892-254A-4D6A-AD46-642636A3779F",
+            "DEB0100A-9EA4-4A8C-9FC0-42C4DD26C16A",
+            "9A28F3AD-315C-4913-BBC8-5B95DED8588E",
+            "7EB35DF7-1E26-4AD8-9E43-520F1F29CA5A",
+            "43F7DD5A-6EAF-4B1E-B9C9-4DC522F00B88",
+            "2DB06E8A-27DF-49F0-941D-E15142737975",
+            "ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000062",
+            "generated_uid_inventory",
+            "seen_uuid",
+        ):
+            self.assertIn(required, source)
+        fixed = source[
+            source.index("assert_fixed_identities()") : source.index("dscl_value()")
+        ]
+        self.assertIn("assert_collector_identity_exact", fixed)
+        self.assertIn("$COLLECTOR_IDENTITY_RECEIPT", fixed)
+        self.assertIn("assert_router_identity_exact", fixed)
+        self.assertIn("$ROUTER_IDENTITY_RECEIPT", fixed)
+        self.assertIn("assert_router_home_exact", fixed)
+        collector = source[
+            source.index("apply_identity()") : source.index("apply_router_identity()")
+        ]
+        self.assertLess(
+            collector.index("$COLLECTOR_IDENTITY_RECEIPT"),
+            collector.index("prepare_new_identity_birth"),
+        )
+        router = source[
+            source.index("apply_router_identity()") : source.index("write_acl_templates()")
+        ]
+        self.assertLess(
+            router.index("$ROUTER_IDENTITY_RECEIPT"),
+            router.index("prepare_new_identity_birth"),
         )
 
     def test_no_apfs_launchd_secret_network_init_or_venue_apply_surface(self) -> None:

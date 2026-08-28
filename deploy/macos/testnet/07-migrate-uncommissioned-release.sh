@@ -201,6 +201,8 @@ assert_uncommissioned() {
     /etc/trading-desk/testnet-foreground-postinit.receipt \
     /etc/trading-desk/testnet-foreground-collector-identity.receipt \
     /etc/trading-desk/testnet-foreground-router-identity.receipt \
+    /etc/trading-desk/.testnet-foreground-collector-birth-v2 \
+    /etc/trading-desk/.testnet-foreground-router-birth-v2 \
     /private/var/db/trading-desk-testnet-foreground \
     /private/var/db/trading-desk/control-private/chat-approval \
     /private/var/db/trading-desk-testnet-chat-socket \

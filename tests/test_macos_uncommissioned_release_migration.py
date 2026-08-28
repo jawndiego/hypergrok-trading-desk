@@ -139,6 +139,8 @@ class UncommissionedReleaseMigrationTests(unittest.TestCase):
             "trading-router-operator 454",
             "/etc/trading-desk/testnet-foreground-profile.json",
             "/etc/trading-desk/testnet-executor.toml",
+            "/etc/trading-desk/.testnet-foreground-collector-birth-v2",
+            "/etc/trading-desk/.testnet-foreground-router-birth-v2",
             "/private/var/db/trading-desk-testnet-foreground",
             "/private/var/db/trading-desk/control-private/chat-approval",
             "/private/var/db/trading-desk-testnet-chat-socket",

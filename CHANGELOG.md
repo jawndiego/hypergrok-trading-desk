@@ -92,6 +92,10 @@
   macOS's GID-`daemon`-writable `/private/var/run`, made the collector lock
   process-lifetime single-flight, and qualified native SDK/MCP imports under
   their real service identities after normalizing immutable venv symlinks.
+- Hardened foreground macOS identity commissioning around the live Darwin
+  directory-service model: globally unique numeric IDs and GeneratedUIDs,
+  reviewed implicit-group principals/nesting, durable UUID-bound receipts,
+  and crash-resumable UID-last account birth.
 - Added a deterministic Lima 2.2/VZ VM-plan renderer pinned to socket_vmnet
   1.2.2 and a dated Ubuntu 24.04 ARM64 image. It models one default usernet WAN
   plus one host-only ingress NIC. Offline host attestations, the signed image

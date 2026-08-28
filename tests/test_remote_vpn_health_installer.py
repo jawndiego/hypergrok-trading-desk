@@ -36,7 +36,32 @@ class RemoteVpnHealthInstallerTests(unittest.TestCase):
         self.assertIn("partial install target bytes differ", source)
         self.assertIn("fcntl.fcntl(descriptor, 51)", source)
         self.assertIn("trading-router-operator", source)
-        self.assertIn("id -G trading-router-operator", source)
+        self.assertIn("supplementary_group_set trading-router-operator 454", source)
+        self.assertIn("assert_router_group_baseline", source)
+        self.assertIn("password marker is not disabled", source)
+        self.assertIn(
+            "assert_directory_id_singleton /Users UniqueID 454 trading-router-operator",
+            source,
+        )
+        self.assertIn(
+            "assert_directory_id_singleton /Groups PrimaryGroupID 454 trading-router-operator",
+            source,
+        )
+        self.assertIn("assert_primary_group_has_no_members", source)
+        self.assertIn("ROUTER_IDENTITY_RECEIPT=", source)
+        self.assertIn("schema_version=3", source)
+        self.assertIn("router identity receipt differs", source)
+        self.assertIn('raw_group_ids=$(/usr/bin/id -G "$group_account")', source)
+        self.assertIn("group inventory is malformed", source)
+        self.assertIn("REVIEWED_DARWIN_SUPPLEMENTARY_GROUPS=12,61,100,701", source)
+        self.assertIn("assert_reviewed_supplementary_group_principals", source)
+        self.assertIn("assert_generated_uid_unique", source)
+        self.assertIn("generated_uid_inventory", source)
+        self.assertIn("seen_uuid", source)
+        self.assertIn("supplementary_group_principals=", source)
+        self.assertIn("ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000062", source)
+        self.assertIn("primary_group_nested_groups=none", source)
+        self.assertIn("assert_router_home_exact", source)
         self.assertIn("sealed media SHA-256 differs", source)
         self.assertIn("evidence.json", source)
         self.assertIn("COLLECTOR_LOCK=$ROOT/collector.lock", source)

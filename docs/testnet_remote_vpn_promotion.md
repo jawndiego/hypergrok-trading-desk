@@ -125,8 +125,11 @@ for this lock because macOS grants write access there to GID `daemon`.
 
 The sample reads Mac routes, scoped DNS, full/anchor PF state and the fixed Lima
 guest checker. Lima runs only as disabled `trading-router-operator` UID/GID
-454, owner of the dedicated mode-0700 LIMA_HOME; it has no supplementary group
-or harness credential. The probe has no arguments: it resolves IPv4 through the
+454, owner of the dedicated mode-0700 LIMA_HOME; its implicit groups must equal
+the reviewed UIDs-450–452 Darwin local-account set `12,61,100,701`, with exact
+group names, GeneratedUIDs and nesting bound by the v3 identity receipt. GID
+701 is the host's everyone-nested public-folder group; any binding drift is a
+hard stop. The router has no harness credential. The probe has no arguments: it resolves IPv4 through the
 PF-confined system resolver, verifies each destination route uses the reviewed
 `utun`, validates TLS/SNI, performs exact read-only TESTNET `POST /info`, reads
 the fixed reviewed exit observer, and proves a forced-physical TCP 443 attempt

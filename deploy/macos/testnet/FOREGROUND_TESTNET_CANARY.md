@@ -42,8 +42,13 @@ root-owned `/private/var/db`, not macOS's GID-`daemon`-writable
 The Lima control plane uses a separate non-agent identity,
 `trading-router-operator` UID/GID 454. Its only home is the ACL-free,
 UID/GID-454 mode-0700 `/private/var/db/trading-desk-lima`. It has no login,
-supplementary group, harness state, Keychain slot, or venue authority. UID 453
-remains the distinct public-data collector and never owns Lima state.
+no groups beyond the exact implicit Darwin local-account baseline shared by
+UIDs 450–452 (`12,61,100,701`), and no harness state, Keychain slot, or venue
+authority. The v3 identity receipt binds every user/group GeneratedUID and the
+reviewed system-group names, UUIDs and nesting. GID 701 is the host's
+everyone-nested public-folder sharing group; changing or recycling that group
+blocks commissioning. UID 453 remains the distinct public-data collector and
+never owns Lima state.
 
 The public executor config is always
 `/etc/trading-desk/testnet-executor.toml`. It is root-owned mode 0400 and has

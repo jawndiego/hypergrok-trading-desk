@@ -270,7 +270,11 @@ This repository builds an agent-runtime-neutral trading research and execution h
   its entire process lifetime. Never recreate it in `/private/var/run` or
   release it between refresh cycles.
 - The Lima state owner is the fixed disabled `trading-router-operator`
-  UID/GID 454 with no supplementary groups or credential slots. It owns only
+  UID/GID 454 with no groups beyond the exact implicit Darwin local-account
+  baseline `12,61,100,701` shared by UIDs 450–452, and no credential slots.
+  The commissioner binds those groups' exact names, GeneratedUIDs and nesting
+  plus every role principal's globally unique GeneratedUID in its receipt; it
+  must fail if the host's sharing-group binding changes. It owns only
   the dedicated mode-0700 ACL-free LIMA_HOME; root observation code must invoke
   the exact fixed `limactl shell ... guest-check` command as 454, never as root
   or an agent/control/executor identity.

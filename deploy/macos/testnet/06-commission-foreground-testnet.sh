@@ -12,6 +12,8 @@ PREINIT_RECEIPT=/etc/trading-desk/testnet-foreground-preinit.receipt
 POSTINIT_RECEIPT=/etc/trading-desk/testnet-foreground-postinit.receipt
 COLLECTOR_IDENTITY_RECEIPT=/etc/trading-desk/testnet-foreground-collector-identity.receipt
 ROUTER_IDENTITY_RECEIPT=/etc/trading-desk/testnet-foreground-router-identity.receipt
+COLLECTOR_BIRTH_MARKER=/etc/trading-desk/.testnet-foreground-collector-birth-v2
+ROUTER_BIRTH_MARKER=/etc/trading-desk/.testnet-foreground-router-birth-v2
 
 DB_ANCESTOR=/private/var/db
 FOREGROUND_ROOT=/private/var/db/trading-desk-testnet-foreground
@@ -49,6 +51,15 @@ POSTINIT_COMMITTED=0
 POSTINIT_EXPECTED_RECEIPT=
 EXECUTION_ACL_BACKUP=
 LEARNING_ACL_BACKUP=
+BASELINE_SUPPLEMENTARY_GROUPS=
+REVIEWED_DARWIN_SUPPLEMENTARY_GROUPS=12,61,100,701
+REVIEWED_DARWIN_GROUP_PRINCIPALS='12:everyone:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:none,61:localaccounts:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D:none,100:_lpoperator:ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000064:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D+ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000062,701:com.apple.sharepoint.group.1:EE977B55-20FF-44D2-81CD-3A51B6BBC5DC:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C'
+RESEARCH_USER_GENERATED_UID=F142D892-254A-4D6A-AD46-642636A3779F
+RESEARCH_GROUP_GENERATED_UID=DEB0100A-9EA4-4A8C-9FC0-42C4DD26C16A
+EXECUTOR_USER_GENERATED_UID=9A28F3AD-315C-4913-BBC8-5B95DED8588E
+EXECUTOR_GROUP_GENERATED_UID=7EB35DF7-1E26-4AD8-9E43-520F1F29CA5A
+CONTROL_USER_GENERATED_UID=43F7DD5A-6EAF-4B1E-B9C9-4DC522F00B88
+CONTROL_GROUP_GENERATED_UID=2DB06E8A-27DF-49F0-941D-E15142737975
 
 die() {
   /bin/echo "ERROR: $*" >&2
@@ -234,6 +245,53 @@ for path in sys.argv[1:]:
 ' "$@"
 }
 
+identity_receipt_payload() {
+    role=$1
+    account=$2
+    uid=$3
+    gid=$4
+    home=$5
+    user_generated_uid=$(assert_generated_uid_unique /Users "$account")
+    group_generated_uid=$(assert_generated_uid_unique /Groups "$account")
+    authentication_variant=$(disabled_account_variant "$account")
+    /bin/echo 'schema_version=3'
+    /bin/echo "role=$role"
+    /bin/echo "account=$account"
+    /bin/echo "uid=$uid"
+    /bin/echo "gid=$gid"
+    /bin/echo "user_generated_uid=$user_generated_uid"
+    /bin/echo "group_generated_uid=$group_generated_uid"
+    /bin/echo "home=$home"
+    /bin/echo 'shell=/usr/bin/false'
+    /bin/echo 'authentication=password-star-and-false-shell'
+    /bin/echo "authentication_authority=$authentication_variant"
+    /bin/echo 'hidden=1'
+    /bin/echo "supplementary_groups=$BASELINE_SUPPLEMENTARY_GROUPS"
+    /bin/echo 'supplementary_group_model=matches-existing-trading-role-baseline'
+    /bin/echo "supplementary_group_principals=$REVIEWED_DARWIN_GROUP_PRINCIPALS"
+    /bin/echo 'primary_group_members=none'
+    /bin/echo 'primary_group_nested_groups=none'
+    /bin/echo 'credential_loaded=false'
+    /bin/echo 'network_changed=false'
+    /bin/echo 'service_started=false'
+    /bin/echo 'venue_write_attempted=false'
+    /bin/echo 'mainnet_authorized=false'
+}
+
+assert_identity_receipt_exact() {
+  target=$1
+  role=$2
+  account=$3
+  uid=$4
+  gid=$5
+  home=$6
+  assert_regular "$target" 0 0 400
+  assert_no_acl "$target"
+  expected_receipt=$(identity_receipt_payload "$role" "$account" "$uid" "$gid" "$home")
+  actual_receipt=$(/bin/cat "$target") || die "identity receipt cannot be read: $target"
+  [ "$actual_receipt" = "$expected_receipt" ] || die "identity receipt differs: $target"
+}
+
 write_identity_receipt() {
   target=$1
   role=$2
@@ -243,22 +301,7 @@ write_identity_receipt() {
   home=$6
   assert_directory /etc/trading-desk 0 0 700
   pending=$TEMP_ROOT/$role-identity.receipt
-  {
-    /bin/echo 'schema_version=1'
-    /bin/echo "role=$role"
-    /bin/echo "account=$account"
-    /bin/echo "uid=$uid"
-    /bin/echo "gid=$gid"
-    /bin/echo "home=$home"
-    /bin/echo 'shell=/usr/bin/false'
-    /bin/echo 'authentication=disabled'
-    /bin/echo 'supplementary_groups=none'
-    /bin/echo 'credential_loaded=false'
-    /bin/echo 'network_changed=false'
-    /bin/echo 'service_started=false'
-    /bin/echo 'venue_write_attempted=false'
-    /bin/echo 'mainnet_authorized=false'
-  } > "$pending"
+  identity_receipt_payload "$role" "$account" "$uid" "$gid" "$home" > "$pending"
   /usr/sbin/chown root:wheel "$pending"
   /bin/chmod 0400 "$pending"
   fullsync_paths "$pending"
@@ -271,7 +314,75 @@ write_identity_receipt() {
   fi
   assert_regular "$target" 0 0 400
   assert_no_acl "$target"
+  assert_identity_receipt_exact "$target" "$role" "$account" "$uid" "$gid" "$home"
   fullsync_paths "$target" /etc/trading-desk
+}
+
+write_or_verify_birth_marker() {
+  target=$1
+  role=$2
+  account=$3
+  uid=$4
+  gid=$5
+  home=$6
+  assert_directory /etc/trading-desk 0 0 700
+  pending=$TEMP_ROOT/$role-birth-marker
+  {
+    /bin/echo 'schema_version=2'
+    /bin/echo 'kind=identity-birth-marker'
+    /bin/echo "role=$role"
+    /bin/echo "account=$account"
+    /bin/echo "uid=$uid"
+    /bin/echo "gid=$gid"
+    /bin/echo "home=$home"
+    /bin/echo 'shell=/usr/bin/false'
+    /bin/echo 'password_marker=*'
+    /bin/echo 'publish_numeric_uid_last=true'
+    /bin/echo 'credential_loaded=false'
+    /bin/echo 'network_changed=false'
+    /bin/echo 'service_started=false'
+    /bin/echo 'venue_write_attempted=false'
+  } > "$pending"
+  /usr/sbin/chown root:wheel "$pending"
+  /bin/chmod 0400 "$pending"
+  fullsync_paths "$pending"
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    assert_regular "$target" 0 0 400
+    assert_no_acl "$target"
+    /usr/bin/cmp -s "$target" "$pending" || die "identity birth marker differs: $target"
+  else
+    /bin/mv "$pending" "$target"
+  fi
+  assert_regular "$target" 0 0 400
+  assert_no_acl "$target"
+  fullsync_paths "$target" /etc/trading-desk
+}
+
+prepare_new_identity_birth() {
+  marker=$1
+  role=$2
+  account=$3
+  uid=$4
+  gid=$5
+  home=$6
+  marker_preexisted=1
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    marker_preexisted=0
+    if /usr/bin/dscl . -read "/Users/$account" >/dev/null 2>&1; then
+      die "unmarked unresolved user record exists: $account"
+    fi
+    if /usr/bin/dscl . -read "/Groups/$account" >/dev/null 2>&1; then
+      die "unmarked unresolved group record exists: $account"
+    fi
+    assert_directory_id_unused /Users UniqueID "$uid"
+    assert_directory_id_unused /Groups PrimaryGroupID "$gid"
+  fi
+  write_or_verify_birth_marker "$marker" "$role" "$account" "$uid" "$gid" "$home"
+  if [ "$marker_preexisted" = 1 ]; then
+    assert_resumable_identity_prefix "$account" "$uid" "$gid" "$home"
+  fi
+  assert_directory_id_available_to_name /Users UniqueID "$uid" "$account"
+  assert_directory_id_available_to_name /Groups PrimaryGroupID "$gid" "$account"
 }
 
 assert_identity() {
@@ -286,15 +397,364 @@ assert_fixed_identities() {
   assert_identity trading-research 450 450
   assert_identity trading-executor 451 451
   assert_identity trading-control 452 452
-  assert_identity trading-public-collector 453 453
+  assert_platform_group_baseline
+  assert_collector_identity_exact
+  assert_identity_receipt_exact "$COLLECTOR_IDENTITY_RECEIPT" collector trading-public-collector 453 453 /var/empty
+  assert_router_identity_exact
+  assert_identity_receipt_exact "$ROUTER_IDENTITY_RECEIPT" router trading-router-operator 454 454 "$LIMA_HOME"
+  assert_router_home_exact
   [ "$(/usr/bin/id -u jawndiego)" = 501 ] || die "attended Codex bridge UID drift"
 }
 
 dscl_value() {
   node=$1
   attribute=$2
-  /usr/bin/dscl . -read "$node" "$attribute" 2>/dev/null | \
-    /usr/bin/sed -n "s/^$attribute: //p"
+  attribute_record=$(/usr/bin/dscl . -read "$node" "$attribute" 2>/dev/null) || \
+    die "$node $attribute read failed"
+  case "$attribute" in
+    IsHidden)
+      attribute_value=$(/usr/bin/printf '%s\n' "$attribute_record" | \
+        /usr/bin/sed -n -e 's/^IsHidden: //p' -e 's/^dsAttrTypeNative:IsHidden: //p')
+      ;;
+    *)
+      attribute_value=$(/usr/bin/printf '%s\n' "$attribute_record" | \
+        /usr/bin/sed -n "s/^$attribute: //p")
+      ;;
+  esac
+  [ "$(/usr/bin/printf '%s\n' "$attribute_value" | /usr/bin/awk 'NF {count += 1} END {print count + 0}')" = 1 ] || \
+    die "$node $attribute value is absent or ambiguous"
+  /usr/bin/printf '%s\n' "$attribute_value"
+}
+
+generated_uid_inventory() {
+  generated_inventory_node=$1
+  raw_generated_inventory=$(/usr/bin/dscl . -list "$generated_inventory_node" GeneratedUID 2>/dev/null) || \
+    die "$generated_inventory_node GeneratedUID inventory failed"
+  canonical_generated_inventory=$(/usr/bin/printf '%s\n' "$raw_generated_inventory" | \
+    /usr/bin/awk '
+function invalid() { failed=1; exit 1 }
+function canonical_uuid(value, pieces, count) {
+  if (length(value) != 36 || value !~ /^[0-9A-F-]+$/) return 0
+  count=split(value, pieces, "-")
+  return count == 5 && length(pieces[1]) == 8 && length(pieces[2]) == 4 && length(pieces[3]) == 4 && length(pieces[4]) == 4 && length(pieces[5]) == 12
+}
+NF != 2 { invalid() }
+{
+  if (!canonical_uuid($2)) invalid()
+  if (seen_name[$1]++ || seen_uuid[$2]++) invalid()
+  print $1 " " $2
+}
+END { if (failed || NR < 1) exit 1 }
+') || die "$generated_inventory_node GeneratedUID inventory is malformed or non-unique"
+  /usr/bin/printf '%s\n' "$canonical_generated_inventory"
+}
+
+assert_generated_uid_unique() {
+  generated_node=$1
+  generated_account=$2
+  generated_uid=$(dscl_value "$generated_node/$generated_account" GeneratedUID)
+  [ "$(canonical_uuid_set "$generated_uid")" = "$generated_uid" ] || \
+    die "$generated_account GeneratedUID is not canonical"
+  user_results=$(generated_uid_inventory /Users) || die 'user GeneratedUID inventory validation failed'
+  group_results=$(generated_uid_inventory /Groups) || die 'group GeneratedUID inventory validation failed'
+  user_matches=$(/usr/bin/printf '%s\n' "$user_results" | \
+    /usr/bin/awk -v generated_uid="$generated_uid" '$NF == generated_uid {print}')
+  group_matches=$(/usr/bin/printf '%s\n' "$group_results" | \
+    /usr/bin/awk -v generated_uid="$generated_uid" '$NF == generated_uid {print}')
+  user_count=$(/usr/bin/printf '%s\n' "$user_matches" | /usr/bin/awk 'NF {count += 1} END {print count + 0}')
+  group_count=$(/usr/bin/printf '%s\n' "$group_matches" | /usr/bin/awk 'NF {count += 1} END {print count + 0}')
+  [ "$((user_count + group_count))" = 1 ] || die "$generated_account GeneratedUID is not globally unique"
+  case "$generated_node" in
+    /Users)
+      [ "$user_count" = 1 ] && [ "$group_count" = 0 ] && \
+        [ "$(/usr/bin/printf '%s\n' "$user_matches" | /usr/bin/awk 'NF {print NF}')" = 2 ] && \
+        [ "$(/usr/bin/printf '%s\n' "$user_matches" | /usr/bin/awk 'NF {print $1}')" = "$generated_account" ] || \
+        die "$generated_account user GeneratedUID belongs to another record"
+      ;;
+    /Groups)
+      [ "$group_count" = 1 ] && [ "$user_count" = 0 ] && \
+        [ "$(/usr/bin/printf '%s\n' "$group_matches" | /usr/bin/awk 'NF {print NF}')" = 2 ] && \
+        [ "$(/usr/bin/printf '%s\n' "$group_matches" | /usr/bin/awk 'NF {print $1}')" = "$generated_account" ] || \
+        die "$generated_account group GeneratedUID belongs to another record"
+      ;;
+    *) die 'GeneratedUID node is invalid' ;;
+  esac
+  /usr/bin/printf '%s\n' "$generated_uid"
+}
+
+canonical_uuid_set() {
+  raw_uuid_set=$1
+  /usr/bin/printf '%s\n' "$raw_uuid_set" | /usr/bin/awk '
+function invalid() { failed=1; exit 1 }
+function canonical_uuid(value, pieces, count) {
+  if (length(value) != 36 || value !~ /^[0-9A-F-]+$/) return 0
+  count=split(value, pieces, "-")
+  return count == 5 && length(pieces[1]) == 8 && length(pieces[2]) == 4 && length(pieces[3]) == 4 && length(pieces[4]) == 4 && length(pieces[5]) == 12
+}
+NR != 1 { invalid() }
+{
+  for (i=1; i<=NF; i += 1) {
+    if (!canonical_uuid($i) || seen[$i]++) invalid()
+    values[++value_count]=$i
+  }
+}
+END {
+  if (failed || NR != 1 || value_count < 1) exit 1
+  for (i=2; i<=value_count; i += 1) {
+    value=values[i]
+    cursor=i - 1
+    while (cursor >= 1 && values[cursor] > value) {
+      values[cursor + 1]=values[cursor]
+      cursor -= 1
+    }
+    values[cursor + 1]=value
+  }
+  for (i=1; i<=value_count; i += 1) {
+    if (i > 1) printf "+"
+    printf "%s", values[i]
+  }
+  printf "\n"
+}'
+}
+
+reviewed_group_nested_set() {
+  reviewed_group=$1
+  reviewed_group_record=$(/usr/bin/dscl . -read "/Groups/$reviewed_group" 2>/dev/null) || \
+    die "$reviewed_group reviewed group record read failed"
+  [ -z "$(/usr/bin/printf '%s\n' "$reviewed_group_record" | /usr/bin/sed -n '/^GroupMembership:/p')" ] || \
+    die "$reviewed_group reviewed group has explicit members"
+  [ -z "$(/usr/bin/printf '%s\n' "$reviewed_group_record" | /usr/bin/sed -n '/^GroupMembers:/p')" ] || \
+    die "$reviewed_group reviewed group has explicit member UUIDs"
+  nested_lines=$(/usr/bin/printf '%s\n' "$reviewed_group_record" | /usr/bin/sed -n '/^NestedGroups:/p')
+  if [ -z "$nested_lines" ]; then
+    /bin/echo none
+    return 0
+  fi
+  [ "$(/usr/bin/printf '%s\n' "$nested_lines" | /usr/bin/awk 'NF {count += 1} END {print count + 0}')" = 1 ] || \
+    die "$reviewed_group reviewed nested-group value is ambiguous"
+  raw_nested=${nested_lines#NestedGroups: }
+  canonical_uuid_set "$raw_nested" || die "$reviewed_group reviewed nested-group value is malformed"
+}
+
+assert_reviewed_group_principal() {
+  reviewed_gid=$1
+  reviewed_name=$2
+  reviewed_uuid=$3
+  reviewed_nested=$4
+  assert_directory_id_singleton /Groups PrimaryGroupID "$reviewed_gid" "$reviewed_name"
+  [ "$(assert_generated_uid_unique /Groups "$reviewed_name")" = "$reviewed_uuid" ] || \
+    die "$reviewed_name GeneratedUID differs from the reviewed principal"
+  [ "$(reviewed_group_nested_set "$reviewed_name")" = "$reviewed_nested" ] || \
+    die "$reviewed_name nesting differs from the reviewed principal"
+}
+
+assert_reviewed_supplementary_group_principals() {
+  assert_reviewed_group_principal 12 everyone ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C none
+  assert_reviewed_group_principal 61 localaccounts ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D none
+  assert_reviewed_group_principal 100 _lpoperator ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000064 'ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D+ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000062'
+  assert_reviewed_group_principal 701 com.apple.sharepoint.group.1 EE977B55-20FF-44D2-81CD-3A51B6BBC5DC ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C
+}
+
+supplementary_group_set() {
+  group_account=$1
+  primary_gid=$2
+  raw_group_ids=$(/usr/bin/id -G "$group_account") || \
+    die "$group_account group inventory failed"
+  canonical_groups=$(/usr/bin/printf '%s\n' "$raw_group_ids" | \
+    /usr/bin/awk -v primary="$primary_gid" '
+function invalid() { failed=1; exit 1 }
+NR != 1 { invalid() }
+{
+  for (i=1; i<=NF; i += 1) {
+    if ($i !~ /^[0-9]+$/) invalid()
+    numeric=$i + 0
+    if (sprintf("%d", numeric) != $i || seen[numeric]++) invalid()
+    if (numeric == primary) primary_count += 1
+    else groups[++group_count]=numeric
+  }
+}
+END {
+  if (failed || NR != 1 || primary_count != 1) exit 1
+  for (i=2; i<=group_count; i += 1) {
+    value=groups[i]
+    cursor=i - 1
+    while (cursor >= 1 && groups[cursor] > value) {
+      groups[cursor + 1]=groups[cursor]
+      cursor -= 1
+    }
+    groups[cursor + 1]=value
+  }
+  for (i=1; i<=group_count; i += 1) {
+    if (i > 1) printf ","
+    printf "%d", groups[i]
+  }
+  printf "\n"
+}') || die "$group_account group inventory is malformed"
+  /usr/bin/printf '%s\n' "$canonical_groups"
+}
+
+assert_existing_role_identity() {
+  role_account=$1
+  role_uid=$2
+  expected_user_uuid=$3
+  expected_group_uuid=$4
+  assert_directory_id_singleton /Users UniqueID "$role_uid" "$role_account"
+  assert_directory_id_singleton /Groups PrimaryGroupID "$role_uid" "$role_account"
+  assert_identity "$role_account" "$role_uid" "$role_uid"
+  [ "$(dscl_value "/Users/$role_account" NFSHomeDirectory)" = /var/empty ] || \
+    die "$role_account home drift"
+  [ "$(dscl_value "/Users/$role_account" UserShell)" = /usr/bin/false ] || \
+    die "$role_account shell drift"
+  [ "$(dscl_value "/Users/$role_account" IsHidden)" = 1 ] || \
+    die "$role_account hidden flag drift"
+  assert_disabled_password_account "$role_account"
+  [ "$(assert_generated_uid_unique /Users "$role_account")" = "$expected_user_uuid" ] || \
+    die "$role_account user GeneratedUID drift"
+  [ "$(assert_generated_uid_unique /Groups "$role_account")" = "$expected_group_uuid" ] || \
+    die "$role_account group GeneratedUID drift"
+  assert_primary_group_has_no_members "$role_account"
+  [ "$(supplementary_group_set "$role_account" "$role_uid")" = "$REVIEWED_DARWIN_SUPPLEMENTARY_GROUPS" ] || \
+    die "$role_account supplementary groups differ from the reviewed Darwin set"
+}
+
+assert_platform_group_baseline() {
+  research_groups=$(supplementary_group_set trading-research 450)
+  executor_groups=$(supplementary_group_set trading-executor 451)
+  control_groups=$(supplementary_group_set trading-control 452)
+  [ "$research_groups" = "$REVIEWED_DARWIN_SUPPLEMENTARY_GROUPS" ] && \
+    [ "$executor_groups" = "$REVIEWED_DARWIN_SUPPLEMENTARY_GROUPS" ] && \
+    [ "$control_groups" = "$REVIEWED_DARWIN_SUPPLEMENTARY_GROUPS" ] || \
+    die 'existing trading-role supplementary groups differ from the reviewed Darwin set'
+  assert_existing_role_identity trading-research 450 "$RESEARCH_USER_GENERATED_UID" "$RESEARCH_GROUP_GENERATED_UID"
+  assert_existing_role_identity trading-executor 451 "$EXECUTOR_USER_GENERATED_UID" "$EXECUTOR_GROUP_GENERATED_UID"
+  assert_existing_role_identity trading-control 452 "$CONTROL_USER_GENERATED_UID" "$CONTROL_GROUP_GENERATED_UID"
+  assert_reviewed_supplementary_group_principals
+  BASELINE_SUPPLEMENTARY_GROUPS=$REVIEWED_DARWIN_SUPPLEMENTARY_GROUPS
+}
+
+assert_baseline_supplementary_groups() {
+  group_account=$1
+  primary_gid=$2
+  [ -n "$BASELINE_SUPPLEMENTARY_GROUPS" ] || assert_platform_group_baseline
+  actual_groups=$(supplementary_group_set "$group_account" "$primary_gid")
+  [ "$actual_groups" = "$BASELINE_SUPPLEMENTARY_GROUPS" ] || \
+    die "$group_account supplementary groups differ from the trading-role baseline"
+}
+
+disabled_account_variant() {
+  disabled_account=$1
+  user_record=$(/usr/bin/dscl . -read "/Users/$disabled_account" 2>/dev/null) || \
+    die "$disabled_account directory-service record read failed"
+  password_lines=$(/usr/bin/printf '%s\n' "$user_record" | /usr/bin/sed -n '/^Password: /p')
+  [ "$password_lines" = 'Password: *' ] || \
+    die "$disabled_account password marker is not disabled"
+  authentication_lines=$(/usr/bin/printf '%s\n' "$user_record" | /usr/bin/sed -n '/^AuthenticationAuthority:/p')
+  case "$authentication_lines" in
+    '') /bin/echo absent ;;
+    'AuthenticationAuthority: ;DisabledUser;') /bin/echo disabled-user ;;
+    *) die "$disabled_account authentication authority differs" ;;
+  esac
+}
+
+assert_disabled_password_account() {
+  disabled_account_variant "$1" >/dev/null
+}
+
+assert_primary_group_has_no_members() {
+  member_group=$1
+  group_record=$(/usr/bin/dscl . -read "/Groups/$member_group" 2>/dev/null) || \
+    die "$member_group group record read failed"
+  membership_lines=$(/usr/bin/printf '%s\n' "$group_record" | \
+    /usr/bin/sed -n '/^GroupMembership:/p')
+  member_uuid_lines=$(/usr/bin/printf '%s\n' "$group_record" | \
+    /usr/bin/sed -n '/^GroupMembers:/p')
+  nested_group_lines=$(/usr/bin/printf '%s\n' "$group_record" | \
+    /usr/bin/sed -n '/^NestedGroups:/p')
+  [ -z "$membership_lines" ] || die "$member_group group has explicit members"
+  [ -z "$member_uuid_lines" ] || die "$member_group group has explicit member UUIDs"
+  [ -z "$nested_group_lines" ] || die "$member_group group has nested groups"
+}
+
+assert_resumable_identity_prefix() {
+  prefix_account=$1
+  prefix_uid=$2
+  prefix_gid=$3
+  prefix_home=$4
+
+  group_names=$(/usr/bin/dscl . -list /Groups 2>/dev/null) || \
+    die 'group-name inventory failed during identity resume'
+  group_name_count=$(/usr/bin/printf '%s\n' "$group_names" | \
+    /usr/bin/awk -v account="$prefix_account" '$1 == account && NF == 1 {count += 1} END {print count + 0}')
+  [ "$group_name_count" -le 1 ] || die "$prefix_account group name is not unique"
+  if [ "$group_name_count" = 1 ]; then
+    group_record=$(/usr/bin/dscl . -read "/Groups/$prefix_account" 2>/dev/null) || \
+      die "$prefix_account partial group record cannot be read"
+    group_id_lines=$(/usr/bin/printf '%s\n' "$group_record" | /usr/bin/sed -n '/^PrimaryGroupID:/p')
+    case "$group_id_lines" in
+      ''|"PrimaryGroupID: $prefix_gid") ;;
+      *) die "$prefix_account partial group ID differs" ;;
+    esac
+    assert_primary_group_has_no_members "$prefix_account"
+    assert_generated_uid_unique /Groups "$prefix_account" >/dev/null
+  fi
+
+  user_names=$(/usr/bin/dscl . -list /Users 2>/dev/null) || \
+    die 'user-name inventory failed during identity resume'
+  user_name_count=$(/usr/bin/printf '%s\n' "$user_names" | \
+    /usr/bin/awk -v account="$prefix_account" '$1 == account && NF == 1 {count += 1} END {print count + 0}')
+  [ "$user_name_count" -le 1 ] || die "$prefix_account user name is not unique"
+  [ "$user_name_count" = 1 ] || return 0
+
+  user_record=$(/usr/bin/dscl . -read "/Users/$prefix_account" 2>/dev/null) || \
+    die "$prefix_account partial user record cannot be read"
+  shell_lines=$(/usr/bin/printf '%s\n' "$user_record" | /usr/bin/sed -n '/^UserShell:/p')
+  password_lines=$(/usr/bin/printf '%s\n' "$user_record" | /usr/bin/sed -n '/^Password:/p')
+  home_lines=$(/usr/bin/printf '%s\n' "$user_record" | /usr/bin/sed -n '/^NFSHomeDirectory:/p')
+  primary_lines=$(/usr/bin/printf '%s\n' "$user_record" | /usr/bin/sed -n '/^PrimaryGroupID:/p')
+  hidden_lines=$(/usr/bin/printf '%s\n' "$user_record" | \
+    /usr/bin/sed -n -e '/^IsHidden:/p' -e '/^dsAttrTypeNative:IsHidden:/p')
+  unique_lines=$(/usr/bin/printf '%s\n' "$user_record" | /usr/bin/sed -n '/^UniqueID:/p')
+  authentication_lines=$(/usr/bin/printf '%s\n' "$user_record" | /usr/bin/sed -n '/^AuthenticationAuthority:/p')
+  unexpected_security=$(/usr/bin/printf '%s\n' "$user_record" | \
+    /usr/bin/sed -n -E '/^(AltSecurityIdentities|AuthenticationHint|ShadowHashData|SMBHome|SMBScriptPath|SMBSID|dsAttrTypeNative:(ShadowHashData|KerberosKeys)):/p')
+  case "$shell_lines" in ''|'UserShell: /usr/bin/false') ;; *) die "$prefix_account partial shell differs" ;; esac
+  case "$password_lines" in ''|'Password: *') ;; *) die "$prefix_account partial password marker differs" ;; esac
+  case "$home_lines" in ''|"NFSHomeDirectory: $prefix_home") ;; *) die "$prefix_account partial home differs" ;; esac
+  case "$primary_lines" in ''|"PrimaryGroupID: $prefix_gid") ;; *) die "$prefix_account partial primary group differs" ;; esac
+  case "$hidden_lines" in ''|'IsHidden: 1'|'dsAttrTypeNative:IsHidden: 1') ;; *) die "$prefix_account partial hidden flag differs" ;; esac
+  case "$unique_lines" in ''|"UniqueID: $prefix_uid") ;; *) die "$prefix_account partial UID differs" ;; esac
+  case "$authentication_lines" in ''|'AuthenticationAuthority: ;DisabledUser;') ;; *) die "$prefix_account partial authentication authority differs" ;; esac
+  [ -z "$unexpected_security" ] || die "$prefix_account partial user has an unexpected security attribute"
+
+  missing_prefix=0
+  for prefix_value in "$shell_lines" "$password_lines" "$home_lines" "$primary_lines" "$hidden_lines" "$unique_lines"
+  do
+    if [ -z "$prefix_value" ]; then
+      missing_prefix=1
+    elif [ "$missing_prefix" = 1 ]; then
+      die "$prefix_account partial user attributes are not an exact creation prefix"
+    fi
+  done
+  assert_generated_uid_unique /Users "$prefix_account" >/dev/null
+}
+
+directory_id_inventory() {
+  inventory_node=$1
+  inventory_attribute=$2
+  raw_inventory=$(/usr/bin/dscl . -list "$inventory_node" "$inventory_attribute" 2>/dev/null) || \
+    die "$inventory_node $inventory_attribute list failed"
+  canonical_inventory=$(/usr/bin/printf '%s\n' "$raw_inventory" | \
+    /usr/bin/awk '
+function invalid() { failed=1; exit 1 }
+NF != 2 { invalid() }
+{
+  if ($2 !~ /^-?[0-9]+$/ || sprintf("%d", $2 + 0) != $2) invalid()
+  if (seen_name[$1]++ || seen_id[$2]++) invalid()
+  print $1 " " $2
+}
+END { if (failed || NR < 1) exit 1 }
+') || die "$inventory_node $inventory_attribute inventory is malformed or non-unique"
+  /usr/bin/printf '%s\n' "$canonical_inventory"
 }
 
 assert_directory_id_singleton() {
@@ -302,21 +762,40 @@ assert_directory_id_singleton() {
   attribute=$2
   numeric_id=$3
   expected_name=$4
-  results=$(/usr/bin/dscl . -search "$node" "$attribute" "$numeric_id" 2>/dev/null) || die "$node $attribute search failed"
-  count=$(/bin/echo "$results" | /usr/bin/awk 'NF {count += 1} END {print count + 0}')
+  results=$(directory_id_inventory "$node" "$attribute") || die "$node $attribute inventory failed"
+  matches=$(/bin/echo "$results" | /usr/bin/awk -v numeric_id="$numeric_id" '$2 == numeric_id {print}')
+  count=$(/bin/echo "$matches" | /usr/bin/awk 'NF {count += 1} END {print count + 0}')
   [ "$count" = 1 ] || die "$node $attribute $numeric_id is not unique"
-  [ "$(/bin/echo "$results" | /usr/bin/awk 'NF {print $1}')" = "$expected_name" ] || die "$node $attribute $numeric_id belongs to another name"
-  [ "$(/bin/echo "$results" | /usr/bin/awk 'NF {print $2}')" = "$numeric_id" ] || die "$node $attribute search value differs"
-  [ "$(/bin/echo "$results" | /usr/bin/awk 'NF {print NF}')" = 2 ] || die "$node $attribute search result is ambiguous"
+  [ "$(/bin/echo "$matches" | /usr/bin/awk 'NF {print $1}')" = "$expected_name" ] || die "$node $attribute $numeric_id belongs to another name"
+  [ "$(/bin/echo "$matches" | /usr/bin/awk 'NF {print NF}')" = 2 ] || die "$node $attribute list result is ambiguous"
 }
 
 assert_directory_id_unused() {
   node=$1
   attribute=$2
   numeric_id=$3
-  results=$(/usr/bin/dscl . -search "$node" "$attribute" "$numeric_id" 2>/dev/null) || die "$node $attribute collision search failed"
-  count=$(/bin/echo "$results" | /usr/bin/awk 'NF {count += 1} END {print count + 0}')
-  [ "$count" = 0 ] || die "$node $attribute $numeric_id is already assigned: $results"
+  results=$(directory_id_inventory "$node" "$attribute") || die "$node $attribute collision inventory failed"
+  matches=$(/bin/echo "$results" | /usr/bin/awk -v numeric_id="$numeric_id" '$2 == numeric_id {print}')
+  count=$(/bin/echo "$matches" | /usr/bin/awk 'NF {count += 1} END {print count + 0}')
+  [ "$count" = 0 ] || die "$node $attribute $numeric_id is already assigned: $matches"
+}
+
+assert_directory_id_available_to_name() {
+  node=$1
+  attribute=$2
+  numeric_id=$3
+  expected_name=$4
+  results=$(directory_id_inventory "$node" "$attribute") || \
+    die "$node $attribute availability inventory failed"
+  matches=$(/bin/echo "$results" | /usr/bin/awk -v numeric_id="$numeric_id" '$2 == numeric_id {print}')
+  count=$(/bin/echo "$matches" | /usr/bin/awk 'NF {count += 1} END {print count + 0}')
+  [ "$count" -le 1 ] || die "$node $attribute $numeric_id is not unique"
+  if [ "$count" = 1 ]; then
+    [ "$(/bin/echo "$matches" | /usr/bin/awk 'NF {print $1}')" = "$expected_name" ] || \
+      die "$node $attribute $numeric_id belongs to another name"
+    [ "$(/bin/echo "$matches" | /usr/bin/awk 'NF {print NF}')" = 2 ] || \
+      die "$node $attribute availability result is ambiguous"
+  fi
 }
 
 assert_collector_identity_exact() {
@@ -328,13 +807,12 @@ assert_collector_identity_exact() {
   [ "$(dscl_value /Users/trading-public-collector NFSHomeDirectory)" = /var/empty ] || die 'collector home drift'
   [ "$(dscl_value /Users/trading-public-collector UserShell)" = /usr/bin/false ] || die 'collector shell drift'
   [ "$(dscl_value /Users/trading-public-collector IsHidden)" = 1 ] || die 'collector hidden flag drift'
-  [ "$(dscl_value /Users/trading-public-collector AuthenticationAuthority)" = ';DisabledUser;' ] || die 'collector authentication is not disabled'
+  assert_disabled_password_account trading-public-collector
+  assert_generated_uid_unique /Users trading-public-collector >/dev/null
+  assert_generated_uid_unique /Groups trading-public-collector >/dev/null
   [ "$(dscl_value /Groups/trading-public-collector PrimaryGroupID)" = 453 ] || die 'collector group ID drift'
-  if /usr/bin/dscl . -read /Groups/trading-public-collector GroupMembership >/dev/null 2>&1; then
-    die 'collector group has explicit members'
-  fi
-  group_ids=$(/usr/bin/id -G trading-public-collector)
-  [ "$group_ids" = 453 ] || die 'collector has unexpected supplementary groups'
+  assert_primary_group_has_no_members trading-public-collector
+  assert_baseline_supplementary_groups trading-public-collector 453
 }
 
 assert_router_identity_exact() {
@@ -346,13 +824,36 @@ assert_router_identity_exact() {
   [ "$(dscl_value /Users/trading-router-operator NFSHomeDirectory)" = "$LIMA_HOME" ] || die 'router operator home drift'
   [ "$(dscl_value /Users/trading-router-operator UserShell)" = /usr/bin/false ] || die 'router operator shell drift'
   [ "$(dscl_value /Users/trading-router-operator IsHidden)" = 1 ] || die 'router operator hidden flag drift'
-  [ "$(dscl_value /Users/trading-router-operator AuthenticationAuthority)" = ';DisabledUser;' ] || die 'router operator authentication is not disabled'
+  assert_disabled_password_account trading-router-operator
+  assert_generated_uid_unique /Users trading-router-operator >/dev/null
+  assert_generated_uid_unique /Groups trading-router-operator >/dev/null
   [ "$(dscl_value /Groups/trading-router-operator PrimaryGroupID)" = 454 ] || die 'router operator group ID drift'
-  if /usr/bin/dscl . -read /Groups/trading-router-operator GroupMembership >/dev/null 2>&1; then
-    die 'router operator group has explicit members'
-  fi
-  group_ids=$(/usr/bin/id -G trading-router-operator)
-  [ "$group_ids" = 454 ] || die 'router operator has unexpected supplementary groups'
+  assert_primary_group_has_no_members trading-router-operator
+  assert_baseline_supplementary_groups trading-router-operator 454
+}
+
+assert_router_home_exact() {
+  [ "$(/bin/realpath "$LIMA_HOME")" = "$LIMA_HOME" ] || die 'router operator home is non-canonical'
+  assert_directory "$LIMA_HOME" 454 454 700
+  assert_no_acl "$LIMA_HOME"
+}
+
+assert_unresolved_user_prefix() {
+  prefix_account=$1
+  prefix_uid=$2
+  prefix_gid=$3
+  prefix_home=$4
+  [ "$(dscl_value "/Users/$prefix_account" UserShell)" = /usr/bin/false ] || \
+    die "$prefix_account partial shell differs"
+  [ "$(dscl_value "/Users/$prefix_account" NFSHomeDirectory)" = "$prefix_home" ] || \
+    die "$prefix_account partial home differs"
+  [ "$(dscl_value "/Users/$prefix_account" PrimaryGroupID)" = "$prefix_gid" ] || \
+    die "$prefix_account partial primary group differs"
+  [ "$(dscl_value "/Users/$prefix_account" IsHidden)" = 1 ] || \
+    die "$prefix_account partial hidden flag differs"
+  assert_disabled_password_account "$prefix_account"
+  assert_generated_uid_unique /Users "$prefix_account" >/dev/null
+  assert_directory_id_available_to_name /Users UniqueID "$prefix_uid" "$prefix_account"
 }
 
 assert_root_apply() {
@@ -413,30 +914,32 @@ apply_identity() {
   assert_identity trading-research 450 450
   assert_identity trading-executor 451 451
   assert_identity trading-control 452 452
+  assert_platform_group_baseline
   assert_system_db_ancestors
   acquire_lock
+  if [ -e "$COLLECTOR_IDENTITY_RECEIPT" ] || [ -L "$COLLECTOR_IDENTITY_RECEIPT" ]; then
+    assert_collector_identity_exact
+    assert_identity_receipt_exact "$COLLECTOR_IDENTITY_RECEIPT" collector trading-public-collector 453 453 /var/empty
+    /bin/echo 'IDENTITY_COMPLETE exact disabled, hidden, no-home UID/GID 453'
+    return 0
+  fi
   if /usr/bin/id -u trading-public-collector >/dev/null 2>&1; then
     assert_collector_identity_exact
   else
-    assert_directory_id_unused /Users UniqueID 453
-    if /usr/bin/dscl . -read /Groups/trading-public-collector >/dev/null 2>&1; then
-      [ "$(dscl_value /Groups/trading-public-collector PrimaryGroupID)" = 453 ] || die 'partial collector group differs'
-      assert_directory_id_singleton /Groups PrimaryGroupID 453 trading-public-collector
-    else
-      assert_directory_id_unused /Groups PrimaryGroupID 453
-      /usr/bin/dscl . -create /Groups/trading-public-collector
-      /usr/bin/dscl . -create /Groups/trading-public-collector PrimaryGroupID 453
-      /usr/bin/dscl . -create /Groups/trading-public-collector RealName 'Trading Desk Public Collector'
-    fi
-    /usr/bin/dscl . -create /Users/trading-public-collector
-    /usr/bin/dscl . -create /Users/trading-public-collector UniqueID 453
-    /usr/bin/dscl . -create /Users/trading-public-collector PrimaryGroupID 453
-    /usr/bin/dscl . -create /Users/trading-public-collector NFSHomeDirectory /var/empty
+    prepare_new_identity_birth "$COLLECTOR_BIRTH_MARKER" collector trading-public-collector 453 453 /var/empty
+    /usr/bin/dscl . -create /Groups/trading-public-collector PrimaryGroupID 453
+    /usr/bin/dscl . -create /Groups/trading-public-collector RealName 'Trading Desk Public Collector'
+    assert_directory_id_singleton /Groups PrimaryGroupID 453 trading-public-collector
+    assert_primary_group_has_no_members trading-public-collector
+    assert_generated_uid_unique /Groups trading-public-collector >/dev/null
     /usr/bin/dscl . -create /Users/trading-public-collector UserShell /usr/bin/false
+    /usr/bin/dscl . -create /Users/trading-public-collector Password '*'
+    /usr/bin/dscl . -create /Users/trading-public-collector NFSHomeDirectory /var/empty
+    /usr/bin/dscl . -create /Users/trading-public-collector PrimaryGroupID 453
     /usr/bin/dscl . -create /Users/trading-public-collector RealName 'Trading Desk Public Collector'
     /usr/bin/dscl . -create /Users/trading-public-collector IsHidden 1
-    /usr/bin/dscl . -create /Users/trading-public-collector AuthenticationAuthority ';DisabledUser;'
-    /usr/bin/dscl . -create /Users/trading-public-collector Password '*'
+    assert_unresolved_user_prefix trading-public-collector 453 453 /var/empty
+    /usr/bin/dscl . -create /Users/trading-public-collector UniqueID 453
     /usr/bin/dscacheutil -flushcache
     assert_collector_identity_exact
   fi
@@ -450,35 +953,39 @@ apply_router_identity() {
   assert_identity trading-research 450 450
   assert_identity trading-executor 451 451
   assert_identity trading-control 452 452
+  assert_platform_group_baseline
   assert_system_db_ancestors
   acquire_lock
+  if [ -e "$ROUTER_IDENTITY_RECEIPT" ] || [ -L "$ROUTER_IDENTITY_RECEIPT" ]; then
+    assert_router_identity_exact
+    assert_identity_receipt_exact "$ROUTER_IDENTITY_RECEIPT" router trading-router-operator 454 454 "$LIMA_HOME"
+    assert_router_home_exact
+    /bin/echo "ROUTER_IDENTITY_COMPLETE exact disabled UID/GID 454 lima_home=$LIMA_HOME"
+    return 0
+  fi
   if /usr/bin/id -u trading-router-operator >/dev/null 2>&1; then
     assert_router_identity_exact
   else
-    assert_directory_id_unused /Users UniqueID 454
-    if /usr/bin/dscl . -read /Groups/trading-router-operator >/dev/null 2>&1; then
-      [ "$(dscl_value /Groups/trading-router-operator PrimaryGroupID)" = 454 ] || die 'partial router operator group differs'
-      assert_directory_id_singleton /Groups PrimaryGroupID 454 trading-router-operator
-    else
-      assert_directory_id_unused /Groups PrimaryGroupID 454
-      /usr/bin/dscl . -create /Groups/trading-router-operator
-      /usr/bin/dscl . -create /Groups/trading-router-operator PrimaryGroupID 454
-      /usr/bin/dscl . -create /Groups/trading-router-operator RealName 'Trading Desk Router Operator'
-    fi
-    /usr/bin/dscl . -create /Users/trading-router-operator
-    /usr/bin/dscl . -create /Users/trading-router-operator UniqueID 454
-    /usr/bin/dscl . -create /Users/trading-router-operator PrimaryGroupID 454
-    /usr/bin/dscl . -create /Users/trading-router-operator NFSHomeDirectory "$LIMA_HOME"
+    prepare_new_identity_birth "$ROUTER_BIRTH_MARKER" router trading-router-operator 454 454 "$LIMA_HOME"
+    /usr/bin/dscl . -create /Groups/trading-router-operator PrimaryGroupID 454
+    /usr/bin/dscl . -create /Groups/trading-router-operator RealName 'Trading Desk Router Operator'
+    assert_directory_id_singleton /Groups PrimaryGroupID 454 trading-router-operator
+    assert_primary_group_has_no_members trading-router-operator
+    assert_generated_uid_unique /Groups trading-router-operator >/dev/null
     /usr/bin/dscl . -create /Users/trading-router-operator UserShell /usr/bin/false
+    /usr/bin/dscl . -create /Users/trading-router-operator Password '*'
+    /usr/bin/dscl . -create /Users/trading-router-operator NFSHomeDirectory "$LIMA_HOME"
+    /usr/bin/dscl . -create /Users/trading-router-operator PrimaryGroupID 454
     /usr/bin/dscl . -create /Users/trading-router-operator RealName 'Trading Desk Router Operator'
     /usr/bin/dscl . -create /Users/trading-router-operator IsHidden 1
-    /usr/bin/dscl . -create /Users/trading-router-operator AuthenticationAuthority ';DisabledUser;'
-    /usr/bin/dscl . -create /Users/trading-router-operator Password '*'
+    assert_unresolved_user_prefix trading-router-operator 454 454 "$LIMA_HOME"
+    /usr/bin/dscl . -create /Users/trading-router-operator UniqueID 454
     /usr/bin/dscacheutil -flushcache
     assert_router_identity_exact
   fi
   assert_router_identity_exact
   ensure_directory "$LIMA_HOME" 454 454 700 NONE
+  assert_router_home_exact
   fullsync_paths "$LIMA_HOME" /private/var/db
   write_identity_receipt "$ROUTER_IDENTITY_RECEIPT" router trading-router-operator 454 454 "$LIMA_HOME"
   /bin/echo "ROUTER_IDENTITY_COMPLETE exact disabled UID/GID 454 lima_home=$LIMA_HOME"
