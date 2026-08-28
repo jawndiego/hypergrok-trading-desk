@@ -2,10 +2,11 @@
 
 Status: **repository-rendered guest configuration plus a pinned Lima/VZ VM
 bundle; immutable public-input replay and venue-credential-free preparation
-through creation of one stopped VM are implemented but remain unapplied on a
-new host. VM start, guest mutation, socket_vmnet activation, router/network
-changes, live health collection and boot orchestration remain disabled and
-unqualified; this is not VPN-qualified or a capital security boundary**.
+through a hardened stopped VM are commissioned on the current host. Exactly
+one attended, physically air-gapped boot/verify/stop cycle is enabled. Guest
+package mutation, network reconnect, router activation and live health
+collection remain disabled and unqualified; this is not VPN-qualified or a
+capital security boundary**.
 
 This design keeps the signer/executor on macOS, where the reviewed System
 Keychain and UID/ACL model exist, and puts only network routing in a dedicated
@@ -320,6 +321,13 @@ Only the final literal
 reenable the Mac's network services. It does not authorize a networked guest
 boot: guest reconnect remains false because bootstrap passwordless sudo and
 per-boot provisioning still exist. Never run `limactl start` directly.
+
+If the apply phase fails, leave the physical uplinks disconnected and every
+network service disabled. The sealed `verify-stopped-after-airgap` recovery
+phase performs no start and authorizes host reconnection only after proving the
+instance is exactly `Stopped`, UID 454 has no process, no VM/socket process is
+live, and the temporary socket_vmnet runtime and sudoers file are absent. Do
+not reconnect unless that phase prints the same literal safe-to-restore line.
 
 For the reduced first canary, defer remote chat approval, launchd, sleep/reboot
 qualification and long-running PnL collection. Do not defer the physical

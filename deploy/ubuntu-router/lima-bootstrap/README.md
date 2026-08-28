@@ -43,5 +43,12 @@ vm_status=Stopped
 host_uplink_restore_safe_while_vm_stopped=true
 ```
 
+If the first-boot command fails, keep every uplink disabled and run the sealed
+controller's `verify-stopped-after-airgap` phase from the same local Terminal.
+That phase cannot start the VM; it only permits reconnection after independently
+proving the VM is stopped, UID 454 has no process, and the temporary
+socket_vmnet runtime and sudo authority are absent. Restore networking only if
+it prints the same literal `host_uplink_restore_safe_while_vm_stopped=true`.
+
 This does not authorize another guest boot. A later stopped migration must
 remove bootstrap passwordless sudo and per-boot provisioning first.

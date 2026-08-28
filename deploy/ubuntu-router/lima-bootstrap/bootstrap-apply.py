@@ -515,6 +515,41 @@ def _initialize(lock: dict[str, Any]) -> dict[str, Path]:
     return {"state": state, "quarantine": quarantine, "receipts": receipts}
 
 
+def _require_existing_state(lock: dict[str, Any]) -> dict[str, Any]:
+    state = Path(lock["paths"]["state_root"])
+    quarantine = Path(lock["paths"]["quarantine_parent"])
+    receipts = Path(lock["paths"]["hardened_vm_receipt"]).parent
+    for path in (state, quarantine, receipts):
+        _assert_real(path, kind="directory", uid=0, gid=0, mode=0o700)
+    lock_path = state / ".bootstrap.lock"
+    expected = _assert_real(
+        lock_path, kind="file", uid=0, gid=0, mode=0o600, links=1
+    )
+    descriptor = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        observed = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(observed.st_mode)
+            or observed.st_dev != expected.st_dev
+            or observed.st_ino != expected.st_ino
+            or observed.st_uid != 0
+            or observed.st_gid != 0
+            or stat.S_IMODE(observed.st_mode) != 0o600
+            or observed.st_nlink != 1
+        ):
+            raise BootstrapError("existing bootstrap lock changed during open")
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException:
+        os.close(descriptor)
+        raise
+    return {
+        "lock_descriptor": descriptor,
+        "quarantine": quarantine,
+        "receipts": receipts,
+        "state": state,
+    }
+
+
 def _dscl_value(node: str, attribute: str) -> str:
     result = subprocess.run(
         ["/usr/bin/dscl", ".", "-read", node, attribute],
@@ -2600,6 +2635,32 @@ def _check_airgap(args: argparse.Namespace) -> int:
     return 0
 
 
+def _verify_stopped_after_airgap(args: argparse.Namespace) -> int:
+    _verify_bundle(args.expected_controller_manifest_sha256)
+    lock = _load_lock()
+    _verify_system_tools(lock)
+    _assert_attended_root_tty()
+    _assert_host_identity(lock)
+    _require_existing_state(lock)
+    limactl = _limactl(lock)
+    _status(lock, limactl)
+    if _router_uid_processes():
+        raise BootstrapError("router UID still has a live process")
+    _assert_no_vm_process()
+    for live in (
+        Path(lock["paths"]["vmnet_sudoers"]),
+        Path(lock["paths"]["vmnet_runtime"]),
+    ):
+        if live.exists() or live.is_symlink():
+            raise BootstrapError("temporary VMNet authority remains live")
+    print("vm_status=Stopped")
+    print("router_uid_processes=absent")
+    print("temporary_vmnet_authority=absent")
+    print("host_uplink_restore_safe_while_vm_stopped=true")
+    print("guest_network_reconnect_authorized=false")
+    return 0
+
+
 def _adopt_completed_airgap_first_boot(args: argparse.Namespace) -> int | None:
     _verify_bundle(args.expected_controller_manifest_sha256)
     lock = _load_lock()
@@ -3068,6 +3129,8 @@ def _parser() -> argparse.ArgumentParser:
         airgap = subparsers.add_parser(name)
         airgap.add_argument("--expected-controller-manifest-sha256", required=True)
         airgap.add_argument("--attest-physical-airgap", action="store_true")
+    stopped = subparsers.add_parser("verify-stopped-after-airgap")
+    stopped.add_argument("--expected-controller-manifest-sha256", required=True)
     return parser
 
 
@@ -3080,6 +3143,8 @@ def main(argv: list[str] | None = None) -> int:
             return _check_airgap(args)
         if args.phase == "apply-airgapped-first-boot":
             return _apply_airgapped_first_boot(args)
+        if args.phase == "verify-stopped-after-airgap":
+            return _verify_stopped_after_airgap(args)
         raise BootstrapError("unknown bootstrap phase")
     except (BootstrapError, OSError, KeyError, TypeError, ValueError, plistlib.InvalidFileException) as error:
         print(f"router_bootstrap_failed: {error}", file=sys.stderr)

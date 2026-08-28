@@ -321,8 +321,90 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         launcher = (BOOTSTRAP / "bootstrap-apply-launcher.sh").read_text()
         self.assertIn("apply-hardened-vm", launcher)
         self.assertIn("apply-airgapped-first-boot", launcher)
+        self.assertIn("verify-stopped-after-airgap", launcher)
         for forbidden in ("apply-guest-package", "apply-router"):
             self.assertNotIn(forbidden, launcher)
+
+        fallback = source.split(
+            "def _verify_stopped_after_airgap", 1
+        )[1].split("def _adopt_completed_airgap_first_boot", 1)[0]
+        for required in (
+            "_status(lock, limactl)",
+            "_router_uid_processes()",
+            "_assert_no_vm_process()",
+            'Path(lock["paths"]["vmnet_sudoers"])',
+            'Path(lock["paths"]["vmnet_runtime"])',
+            "host_uplink_restore_safe_while_vm_stopped=true",
+            "guest_network_reconnect_authorized=false",
+        ):
+            self.assertIn(required, fallback)
+        for forbidden in (
+            "_initialize",
+            "_prepare_vmnet",
+            "_run_watchdog_phase",
+            "_start_vm",
+            "_run_lima_guarded",
+        ):
+            self.assertNotIn(forbidden, fallback)
+
+    def test_stopped_after_airgap_verifier_is_nonmutating_and_fail_closed(self) -> None:
+        controller = _load_module(HOST_APPLY, "bootstrap_apply_stopped_test")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            sudoers = root / "sudoers"
+            runtime = root / "runtime"
+            lock = {"paths": {"vmnet_runtime": str(runtime), "vmnet_sudoers": str(sudoers)}}
+            args = SimpleNamespace(expected_controller_manifest_sha256="a" * 64)
+
+            initialize = mock.Mock(side_effect=AssertionError("mutating initialize called"))
+            write_exact = mock.Mock(side_effect=AssertionError("write called"))
+            atomic_receipt = mock.Mock(side_effect=AssertionError("receipt write called"))
+            status = mock.Mock(return_value={})
+            processes = mock.Mock(return_value=[])
+            no_vm = mock.Mock(return_value=None)
+            patches = {
+                "_atomic_receipt": atomic_receipt,
+                "_assert_attended_root_tty": mock.Mock(return_value={}),
+                "_assert_host_identity": mock.Mock(return_value=None),
+                "_assert_no_vm_process": no_vm,
+                "_initialize": initialize,
+                "_limactl": mock.Mock(return_value=Path("/limactl")),
+                "_load_lock": mock.Mock(return_value=lock),
+                "_require_existing_state": mock.Mock(return_value={"lock_descriptor": 9}),
+                "_router_uid_processes": processes,
+                "_status": status,
+                "_verify_bundle": mock.Mock(return_value={}),
+                "_verify_system_tools": mock.Mock(return_value=None),
+                "_write_exact": write_exact,
+            }
+            with mock.patch.dict(controller.__dict__, patches), redirect_stdout(
+                io.StringIO()
+            ) as output:
+                self.assertEqual(0, controller._verify_stopped_after_airgap(args))
+            self.assertIn("host_uplink_restore_safe_while_vm_stopped=true", output.getvalue())
+            initialize.assert_not_called()
+            write_exact.assert_not_called()
+            atomic_receipt.assert_not_called()
+
+            status.side_effect = controller.BootstrapError("Lima status differs")
+            with mock.patch.dict(controller.__dict__, patches), self.assertRaisesRegex(
+                controller.BootstrapError, "status differs"
+            ):
+                controller._verify_stopped_after_airgap(args)
+            status.side_effect = None
+
+            processes.return_value = [1234]
+            with mock.patch.dict(controller.__dict__, patches), self.assertRaisesRegex(
+                controller.BootstrapError, "router UID still has a live process"
+            ):
+                controller._verify_stopped_after_airgap(args)
+            processes.return_value = []
+
+            runtime.mkdir()
+            with mock.patch.dict(controller.__dict__, patches), self.assertRaisesRegex(
+                controller.BootstrapError, "temporary VMNet authority remains live"
+            ):
+                controller._verify_stopped_after_airgap(args)
 
     def test_stopped_instance_verifier_binds_plan_cloud_and_identifier(self) -> None:
         controller = _load_module(HOST_APPLY, "bootstrap_apply_instance_test")
