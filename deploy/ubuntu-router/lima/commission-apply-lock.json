@@ -87,9 +87,13 @@
     "public_key_mode": "0600",
     "public_key_path": "/private/var/db/trading-desk-lima/_config/user.pub",
     "retained_public_mode_0600_resume_v1": {
+      "completed_receipt_continuation_v1": {
+        "producer_commission_apply_sha256": "4dfa7876bc8592c5e070b6b35f63aaae2434d705f57096d0f40f147fc8a0f5c7",
+        "receipt_sha256": "b4ed93990ddba27b0d7507807642dda9503c9ef7e3417c5b94cdb07e63c9796f"
+      },
       "controller_manifest_sha256": "4d7495d4353ecf1bacee5a2fbcb82bfcb08b0ee2d70aa752c26882e8ca28cede",
       "installing_marker_sha256": "64ffbd5d71ae88f898a9ff071432f7ba5ad37076bba242ada019b18bd519c467",
-      "replacement_commission_apply_sha256": "4dfa7876bc8592c5e070b6b35f63aaae2434d705f57096d0f40f147fc8a0f5c7",
+      "replacement_commission_apply_sha256": "4ca7ddca32ba6a6bc6a38c9f522bd6aae2c08e19308bad986254ac0db5f2f330",
       "validate_fill_receipt_sha256": "a71f87dcc141dff4af9fd2d0afdcc1fa4f7be57deeb42886cd3e2d4c09b4af8f"
     },
     "ssh_keygen_mode": "0755",

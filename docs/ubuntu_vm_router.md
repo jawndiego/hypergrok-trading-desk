@@ -218,7 +218,9 @@ writable Lima state. The enabled host-only sequence is:
    validate-fill receipt by one pinned replacement-commissioner script: only
    the already generated mode-`0600` pending or partially promoted pair can be
    completed, and arbitrary predecessor or replacement controllers remain
-   rejected.
+   rejected. After that controller publishes the schema-v2 key receipt, the
+   next pinned commissioner may consume only that exact receipt hash and its
+   exact producer-script hash; it does not rerun or rewrite the key phase.
 8. `apply-local-image` copies the exact signed-image payload from sealed media
    to a root-owned mode-`0444` local path after headroom checks, retires (without
    deleting) the obsolete empty `LIMA_HOME/home`, and validates the separate

@@ -61,8 +61,9 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   exact UID-454 Lima-home adoption, `validate --fill`, a dedicated VM-management
   SSH key whose private and public files are both mode `0600`, local-image
   installation and stopped-VM creation; the schema-v3 lock admits only the
-  exact retained pre-fix management-key marker/controller recovery. VM start,
-  guest installation and every network/router-key phase remain disabled.
+  exact retained pre-fix management-key marker/controller recovery and one
+  exact completed schema-v2 key-receipt continuation. VM start, guest
+  installation and every network/router-key phase remain disabled.
 - A TESTNET-only proposal-v2 model binds the staging document, ticket,
   protected plan, grant, displayed economics, account identity, policy,
   account/market snapshots, broker session and expiry. A separate control

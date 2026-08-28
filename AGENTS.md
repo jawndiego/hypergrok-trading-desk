@@ -226,8 +226,8 @@ This repository builds an agent-runtime-neutral trading research and execution h
   sealing, root-owned non-writable Lima/socket_vmnet installation, adoption of
   the exact empty UID/GID-454 Lima home, retained `validate --fill` evidence,
   one nonprinting UID-454 VM-management SSH key with private/public files fixed
-  at mode `0600` and one exact pre-fix-marker recovery gate, exact local-image
-  installation,
+  at mode `0600`, one exact pre-fix-marker recovery gate and one exact
+  completed-receipt continuation, exact local-image installation,
   and creation of one deterministically verified stopped VM. Its UID-501
   verification receipt remains informational and never root authority. VM
   start, guest/package apply, socket_vmnet activation and every network/router

@@ -676,6 +676,60 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
                     namespace["_validate_vm_management_key_receipt"](
                         invalid, apply_lock
                     )
+            key_receipt_path = receipt_parent / "05-vm-management-key.json"
+            key_receipt_sha256 = hashlib.sha256(
+                key_receipt_path.read_bytes()
+            ).hexdigest()
+
+            class ReaderReached(Exception):
+                pass
+
+            def reader_reached(*_args, **_kwargs):
+                raise ReaderReached
+
+            local_image_patches = dict(patches)
+            local_image_patches.update(
+                {
+                    "_assert_real_path": lambda path, **_kwargs: path.stat(),
+                    "_verify_lima_home_with_management_key": reader_reached,
+                }
+            )
+            with (
+                mock.patch.dict(namespace, local_image_patches),
+                self.assertRaises(ReaderReached),
+            ):
+                namespace["_local_image"](
+                    SimpleNamespace(
+                        expected_validate_fill_receipt_sha256=resume[
+                            "validate_fill_receipt_sha256"
+                        ],
+                        expected_vm_management_key_receipt_sha256=(
+                            key_receipt_sha256
+                        ),
+                        expected_controller_manifest_sha256=active_controller,
+                    )
+                )
+
+            continuation = resume["completed_receipt_continuation_v1"]
+            prior_receipt = {
+                **captured,
+                "active_controller_script_sha256": continuation[
+                    "producer_commission_apply_sha256"
+                ],
+            }
+            namespace["_validate_vm_management_key_receipt"](
+                prior_receipt,
+                apply_lock,
+                receipt_sha256=continuation["receipt_sha256"],
+            )
+            with self.assertRaisesRegex(
+                namespace["CommissionError"], "receipt continuation differs"
+            ):
+                namespace["_validate_vm_management_key_receipt"](
+                    prior_receipt,
+                    apply_lock,
+                    receipt_sha256="0" * 64,
+                )
 
     def test_local_image_tree_rejects_partial_or_changed_payload(self) -> None:
         namespace = load_script_namespace(
@@ -2568,7 +2622,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                     "dependency_closure_package_count": 116,
                     "immutable_public_inputs_locked": True,
                     "immutable_public_inputs_verified": False,
-                    "commission_apply_lock_sha256": "64e8902387ece974014087476fbb9a5dfee738865e7c2944c1c5652d6ca6232a",
+                    "commission_apply_lock_sha256": "0cd6aae7ba996c6929106f49490782fb76c9505768dbe81702549c72a4473e8e",
                     "enabled_host_prepare_phases": [
                         "host_tools_apply_enabled",
                         "lima_home_apply_enabled",

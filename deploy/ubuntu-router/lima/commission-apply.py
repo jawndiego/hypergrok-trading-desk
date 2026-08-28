@@ -536,10 +536,16 @@ def _locks() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         not isinstance(resume_contract, dict)
         or set(resume_contract)
         != {
+            "completed_receipt_continuation_v1",
             "controller_manifest_sha256",
             "installing_marker_sha256",
             "replacement_commission_apply_sha256",
             "validate_fill_receipt_sha256",
+        }
+        or resume_contract.get("completed_receipt_continuation_v1")
+        != {
+            "producer_commission_apply_sha256": "4dfa7876bc8592c5e070b6b35f63aaae2434d705f57096d0f40f147fc8a0f5c7",
+            "receipt_sha256": "b4ed93990ddba27b0d7507807642dda9503c9ef7e3417c5b94cdb07e63c9796f",
         }
         or resume_contract.get("controller_manifest_sha256")
         != "4d7495d4353ecf1bacee5a2fbcb82bfcb08b0ee2d70aa752c26882e8ca28cede"
@@ -1647,6 +1653,7 @@ def _read_expected_receipt(
     *,
     owner_uid: int,
     owner_gid: int,
+    expected_schema_version: int = 1,
 ) -> dict[str, Any]:
     if not SHA256_RE.fullmatch(expected_sha256):
         raise CommissionError("expected receipt SHA-256 is invalid")
@@ -1660,7 +1667,12 @@ def _read_expected_receipt(
     if _sha256_file(path) != expected_sha256:
         raise CommissionError(f"receipt SHA-256 differs: {path}")
     receipt = _read_json(path, "phase receipt")
-    if receipt.get("kind") != kind or receipt.get("schema_version") != 1:
+    if (
+        type(expected_schema_version) is not int
+        or expected_schema_version < 1
+        or receipt.get("kind") != kind
+        or receipt.get("schema_version") != expected_schema_version
+    ):
         raise CommissionError(f"receipt kind/schema differs: {path}")
     return receipt
 
@@ -2950,7 +2962,10 @@ def _fullsync_vm_management_key_pair(
 
 
 def _validate_vm_management_key_receipt(
-    receipt: dict[str, Any], apply_lock: dict[str, Any]
+    receipt: dict[str, Any],
+    apply_lock: dict[str, Any],
+    *,
+    receipt_sha256: str | None = None,
 ) -> None:
     expected_keys = {
         "active_controller_manifest_sha256",
@@ -3019,13 +3034,20 @@ def _validate_vm_management_key_receipt(
     resume = apply_lock["vm_management_ssh"][
         "retained_public_mode_0600_resume_v1"
     ]
+    current_script_sha256 = resume["replacement_commission_apply_sha256"]
     if (
-        receipt["active_controller_script_sha256"]
-        != resume["replacement_commission_apply_sha256"]
-        or _sha256_file(Path(__file__).resolve())
-        != resume["replacement_commission_apply_sha256"]
+        _sha256_file(Path(__file__).resolve()) != current_script_sha256
     ):
         raise CommissionError("VM-management SSH replacement controller differs")
+    producer_script_sha256 = receipt["active_controller_script_sha256"]
+    if producer_script_sha256 != current_script_sha256:
+        continuation = resume["completed_receipt_continuation_v1"]
+        if (
+            producer_script_sha256
+            != continuation["producer_commission_apply_sha256"]
+            or receipt_sha256 != continuation["receipt_sha256"]
+        ):
+            raise CommissionError("VM-management SSH receipt continuation differs")
     used = receipt.get("retained_public_mode_0600_resume_used")
     if used is True:
         if (
@@ -3156,7 +3178,11 @@ def _select_vm_management_key_marker(
             completed, kind="file", owner_uid=0, owner_gid=0, mode=0o400
         )
         completed_value = _read_json(completed, "VM-management SSH key receipt")
-        _validate_vm_management_key_receipt(completed_value, apply_lock)
+        _validate_vm_management_key_receipt(
+            completed_value,
+            apply_lock,
+            receipt_sha256=_sha256_file(completed),
+        )
         if (
             completed_value["active_controller_manifest_sha256"]
             != args.expected_controller_manifest_sha256
@@ -3485,8 +3511,11 @@ def _read_vm_management_key_receipt(
         "trading-desk.router-commission.vm-management-ssh-key",
         owner_uid=0,
         owner_gid=0,
+        expected_schema_version=2,
     )
-    _validate_vm_management_key_receipt(receipt, apply_lock)
+    _validate_vm_management_key_receipt(
+        receipt, apply_lock, receipt_sha256=expected_sha256
+    )
     return receipt
 
 
