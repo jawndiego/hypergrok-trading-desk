@@ -11,6 +11,8 @@
       "state": "absent"
     },
     "effective_config_sha256": "d26df3a6588c2abce4f59a2385046d85dbdbdb19ec8698004e6fcffd00ef2286",
+    "local_create_effective_config_sha256": "00a9183397e3c420aad61659117ac69b1ccabd5250769d69df12c665af78909d",
+    "local_create_disk_sha256": "6403de2584166d8a803a42dee4fc58e0046aadf2f756b2256ff1d95824fd6c33",
     "override_yaml": {
       "sha256": null,
       "state": "absent"

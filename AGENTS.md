@@ -221,14 +221,15 @@ This repository builds an agent-runtime-neutral trading research and execution h
   and a dated Ubuntu image. Its schema-v3 commission lock binds offline host
   attestations, the signed Noble snapshot/cloud manifest and the 116-package
   no-recommends dependency closure. `commission-public.py` may only plan or
-  verify those public bytes. The separate schema-v2 commissioner enables only
-  credential-free host preparation: sealed-runtime qualification, exact media
+  verify those public bytes. The separate schema-v3 commissioner enables only
+  venue-credential-free preparation: sealed-runtime qualification, exact media
   sealing, root-owned non-writable Lima/socket_vmnet installation, adoption of
-  the exact empty UID/GID-454 Lima home, and retained `validate --fill`
-  evidence. Its UID-501 verification receipt remains informational and never
-  root authority. VM create/start, guest/package apply, socket_vmnet
-  activation and every network/key mutation remain hard-disabled behind named
-  blockers.
+  the exact empty UID/GID-454 Lima home, retained `validate --fill` evidence,
+  one nonprinting UID-454 VM-management SSH key, exact local-image installation,
+  and creation of one deterministically verified stopped VM. Its UID-501
+  verification receipt remains informational and never root authority. VM
+  start, guest/package apply, socket_vmnet activation and every network/router
+  key mutation remain hard-disabled behind named blockers.
 - The VM and router renderers share the fixed `192.168.106.1/32` Mac to
   `192.168.106.2/24` guest ingress contract. The rendered
   `local-nat-lab-test-plan` is print-only: PF enforcement, a remote VPN exit,

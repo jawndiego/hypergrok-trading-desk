@@ -1,11 +1,12 @@
 #!/usr/bin/false
-"""Phased, credential-free macOS host preparation for the Lima router.
+"""Phased, venue-credential-free macOS preparation for the Lima router.
 
 The reviewed root path can qualify the sealed Python runtime, seal immutable
 public media, install inert host tools, initialize the dedicated UID-454 Lima
-home, and retain ``limactl validate --fill`` evidence. VM creation/start,
-guest mutation, socket_vmnet activation, router keys, network changes and all
-venue authority remain unreachable behind literal false gates.
+home, create a dedicated VM-management SSH key, install a verified local image,
+retain ``limactl validate --fill`` evidence, and create one stopped VM. VM
+start, guest mutation, socket_vmnet activation, router keys, network changes
+and all venue authority remain unreachable behind literal false gates.
 """
 
 from __future__ import annotations
@@ -20,8 +21,11 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import platform
+import plistlib
 import pwd
 import re
+import resource
+import shutil
 import stat
 import subprocess
 import sys
@@ -76,6 +80,9 @@ PHASE_RECEIPTS = {
     "host-tools": "02-host-tools.json",
     "lima-home": "03-lima-home.json",
     "validate-fill": "04-validate-fill.json",
+    "vm-management-key": "05-vm-management-key.json",
+    "local-image": "06-local-image.json",
+    "vm-create": "07-vm-create.json",
 }
 RUNTIME_RECEIPT_NAME = "python-3.11.16-sealed-runtime.json"
 EXPECTED_BUNDLE_FILES = {
@@ -86,11 +93,13 @@ EXPECTED_BUNDLE_FILES = {
     "commission-guest.py",
     "commission-lock.json",
     "commission-public.py",
+    "cloud-config-create.template",
     "guest-preflight.sh",
     "host-preflight.sh",
     "image-lock.json",
     "lima-2.2.0-attestation.jsonl",
     "lima.yaml",
+    "lima-create-local.yaml",
     "networks.yaml",
     "package-lock.json",
     "sigstore-trusted-root.jsonl",
@@ -404,13 +413,15 @@ def _locks() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         "python_runtime",
         "review_status",
         "schema_version",
+        "storage",
         "stop_line",
         "verifier_toolchain",
+        "vm_management_ssh",
     }
-    if set(apply_lock) != expected_apply_keys or apply_lock.get("schema_version") != 2:
+    if set(apply_lock) != expected_apply_keys or apply_lock.get("schema_version") != 3:
         raise CommissionError("commission apply lock schema differs")
     if apply_lock.get("review_status") != (
-        "credential_free_host_preparation_enabled_vm_guest_network_disabled"
+        "venue_credential_free_create_only_enabled_vm_start_guest_network_disabled"
     ):
         raise CommissionError("commission apply review status differs")
     host = apply_lock.get("host")
@@ -447,8 +458,10 @@ def _locks() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         "lima_home": "/private/var/db/trading-desk-lima",
         "lima_install": "/opt/trading-desk-router-tools/lima-2.2.0",
         "lima_plan": "/opt/trading-desk-router-tools/plans/lima.yaml",
+        "local_image": "/opt/trading-desk-router-images/ubuntu-24.04-server-cloudimg-arm64-20260814.img",
+        "local_image_parent": "/opt/trading-desk-router-images",
         "media_parent": "/private/var/db/trading-desk-router-commission-v1/media",
-        "operator_home": "/private/var/db/trading-desk-lima/home",
+        "operator_home": "/private/var/db/trading-desk-lima",
         "quarantine_parent": "/private/var/db/trading-desk-router-commission-v1/quarantine",
         "receipt_parent": "/private/var/db/trading-desk-router-commission-v1/receipts",
         "socket_vmnet_install": "/opt/socket_vmnet",
@@ -458,11 +471,11 @@ def _locks() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     if apply_lock.get("paths") != expected_paths:
         raise CommissionError("commission path contract differs")
     expected_stop_line = {
-        "credentials_authorized": False,
         "executor_init_authorized": False,
         "mainnet_authorized": False,
         "network_changes_authorized": False,
         "router_key_generation_authorized": False,
+        "venue_credentials_authorized": False,
         "venue_writes_authorized": False,
     }
     if apply_lock.get("stop_line") != expected_stop_line:
@@ -472,8 +485,10 @@ def _locks() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         "media_seal_apply_enabled": True,
         "host_tools_apply_enabled": True,
         "lima_home_apply_enabled": True,
+        "local_image_apply_enabled": True,
         "validate_fill_apply_enabled": True,
-        "vm_create_apply_enabled": False,
+        "vm_management_ssh_key_apply_enabled": True,
+        "vm_create_apply_enabled": True,
         "vm_start_apply_enabled": False,
         "guest_freeze_apply_enabled": False,
         "guest_package_simulation_apply_enabled": False,
@@ -484,6 +499,22 @@ def _locks() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     }
     if apply_lock.get("phases") != expected_enabled:
         raise CommissionError("commission phase gates differ")
+    if apply_lock.get("storage") != {
+        "local_image_minimum_free_after_bytes": 5 * 1024**3,
+        "vm_create_minimum_free_before_bytes": 25 * 1024**3,
+    }:
+        raise CommissionError("commission storage headroom contract differs")
+    if apply_lock.get("vm_management_ssh") != {
+        "comment": "lima",
+        "private_key_path": "/private/var/db/trading-desk-lima/_config/user",
+        "public_key_path": "/private/var/db/trading-desk-lima/_config/user.pub",
+        "ssh_keygen_mode": "0755",
+        "ssh_keygen_path": "/usr/bin/ssh-keygen",
+        "ssh_keygen_sha256": "0d8b8fb52762fa19431b40e8b75cd00b045f10bf206fd67f0598e09bfaad77d0",
+        "ssh_keygen_size_bytes": 847120,
+        "type": "ed25519",
+    }:
+        raise CommissionError("VM-management SSH key contract differs")
     if commission_lock.get("authorization", {}).get("apply_enabled") is not False:
         raise CommissionError("public-input lock unexpectedly enables apply")
     if vm_spec.get("instance_name") != "trading-desk-router":
@@ -503,10 +534,10 @@ def _plan() -> int:
         print(f"blocker_{phase}={blocker}")
     print(
         "enabled_sequence=operator-verify,qualify-runtime,seal-media,"
-        "host-tools,lima-home,validate-fill"
+        "host-tools,lima-home,validate-fill,vm-management-key,local-image,vm-create"
     )
-    print("stop_before=vm-create,vm-start,guest-mutation,router-key,netplan,nftables,wireguard")
-    print("credentials_touched=false")
+    print("stop_before=vm-start,guest-mutation,router-key,netplan,nftables,wireguard")
+    print("venue_credentials_touched=false")
     print("venue_calls_authorized=false")
     print("operator_verification_receipt_is_informational_not_root_authority=true")
     print("crash_resume=exact INSTALLING markers and byte-identical partial state only")
@@ -1630,8 +1661,53 @@ def _copy_locked_file(
             owner_gid=0,
             mode=destination_mode,
         )
-        if _sha256_file(destination) != expected_sha256:
-            raise CommissionError(f"resumed media file differs: {destination}")
+        descriptor = os.open(
+            destination,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+        )
+        try:
+            before = os.fstat(descriptor)
+            digest = hashlib.sha256()
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            after = os.fstat(descriptor)
+            if (
+                _vm_management_key_identity(destination)
+                != (
+                    int(before.st_dev),
+                    int(before.st_ino),
+                    int(before.st_mode),
+                    int(before.st_uid),
+                    int(before.st_gid),
+                    int(before.st_nlink),
+                    int(before.st_size),
+                    int(before.st_mtime_ns),
+                    int(before.st_ctime_ns),
+                )
+                or (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
+                != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                )
+                or digest.hexdigest() != expected_sha256
+            ):
+                raise CommissionError(f"resumed media file differs: {destination}")
+            _full_fsync_fd(descriptor)
+        finally:
+            os.close(descriptor)
+        _sync_directory(destination.parent)
         return
     source_fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
     destination_fd = -1
@@ -2626,6 +2702,7 @@ def _drop_preexec(uid: int, gid: int) -> Any:
     username = pwd.getpwuid(uid).pw_name
 
     def drop() -> None:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         os.initgroups(username, gid)
         os.setgid(gid)
         os.setuid(uid)
@@ -2633,16 +2710,351 @@ def _drop_preexec(uid: int, gid: int) -> Any:
     return drop
 
 
+def _verified_installed_limactl(
+    apply_lock: dict[str, Any], commission_lock: dict[str, Any]
+) -> Path:
+    path = Path(apply_lock["paths"]["lima_install"]) / "bin" / "limactl"
+    _assert_real_path(path, kind="file", owner_uid=0, owner_gid=0, mode=0o555)
+    if _sha256_file(path) != commission_lock["host_attestation"]["lima"][
+        "binary_sha256"
+    ]:
+        raise CommissionError("installed limactl digest differs")
+    result = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--strict", str(path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise CommissionError("installed limactl signature differs")
+    return path
+
+
+def _vm_management_key_identity(path: Path) -> tuple[int, ...]:
+    metadata = path.lstat()
+    return (
+        int(metadata.st_dev),
+        int(metadata.st_ino),
+        int(metadata.st_mode),
+        int(metadata.st_uid),
+        int(metadata.st_gid),
+        int(metadata.st_nlink),
+        int(metadata.st_size),
+        int(metadata.st_mtime_ns),
+        int(metadata.st_ctime_ns),
+    )
+
+
+def _verify_lima_home_for_management_key(
+    path: Path, apply_lock: dict[str, Any], networks_digest: str
+) -> None:
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
+    _assert_real_path(path, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700)
+    if {item.name for item in path.iterdir()} != {"_config", "home"}:
+        raise CommissionError("LIMA_HOME root differs before VM-management key")
+    config = path / "_config"
+    home = path / "home"
+    _assert_real_path(config, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700)
+    _assert_real_path(home, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700)
+    allowed = {
+        "networks.yaml",
+        "user",
+        "user.pub",
+        ".user.pending-v1",
+        ".user.pending-v1.pub",
+    }
+    if not {item.name for item in config.iterdir()}.issubset(allowed):
+        raise CommissionError("LIMA_HOME config differs before VM-management key")
+    networks = config / "networks.yaml"
+    _assert_real_path(networks, kind="file", owner_uid=uid, owner_gid=gid, mode=0o600)
+    if _sha256_file(networks) != networks_digest or any(home.iterdir()):
+        raise CommissionError("LIMA_HOME base state differs before VM-management key")
+
+
+def _verify_ssh_keygen(apply_lock: dict[str, Any]) -> Path:
+    contract = apply_lock["vm_management_ssh"]
+    path = Path(contract["ssh_keygen_path"])
+    metadata = _assert_real_path(
+        path,
+        kind="file",
+        owner_uid=0,
+        owner_gid=0,
+        mode=int(contract["ssh_keygen_mode"], 8),
+    )
+    if (
+        metadata.st_size != contract["ssh_keygen_size_bytes"]
+        or _sha256_file(path) != contract["ssh_keygen_sha256"]
+    ):
+        raise CommissionError("pinned ssh-keygen differs")
+    result = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", "=anchor apple", str(path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise CommissionError("pinned ssh-keygen signature differs")
+    return path
+
+
+def _verify_vm_management_key_pair(
+    apply_lock: dict[str, Any],
+    private_path: Path,
+    public_path: Path,
+) -> dict[str, object]:
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
+    _assert_real_path(
+        private_path, kind="file", owner_uid=uid, owner_gid=gid, mode=0o600
+    )
+    _assert_real_path(
+        public_path, kind="file", owner_uid=uid, owner_gid=gid, mode=0o644
+    )
+    public = _read_fd_bound_file(
+        public_path,
+        owner_uid=uid,
+        owner_gid=gid,
+        mode=0o644,
+        maximum_size=1024,
+    )
+    try:
+        public_text = public.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise CommissionError("VM-management SSH public key is invalid") from error
+    fields = public_text.rstrip("\n").split(" ")
+    if (
+        len(fields) != 3
+        or fields[0] != "ssh-ed25519"
+        or fields[2] != apply_lock["vm_management_ssh"]["comment"]
+        or not fields[1]
+        or public_text != " ".join(fields) + "\n"
+    ):
+        raise CommissionError("VM-management SSH public key is invalid")
+    derived = _derive_vm_management_public_key(apply_lock, private_path)
+    expected_public = f"{fields[0]} {fields[1]}\n".encode("ascii")
+    if derived != expected_public:
+        raise CommissionError("VM-management SSH key pair differs")
+    identity = _vm_management_key_identity(private_path)
+    return {
+        "private_identity": identity,
+        "private_device": identity[0],
+        "private_inode": identity[1],
+        "public_sha256": _sha256_bytes(public),
+    }
+
+
+def _derive_vm_management_public_key(
+    apply_lock: dict[str, Any], private_path: Path
+) -> bytes:
+    ssh_keygen = _verify_ssh_keygen(apply_lock)
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
+    result = subprocess.run(
+        [str(ssh_keygen), "-y", "-f", str(private_path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        preexec_fn=_drop_preexec(uid, gid),
+        timeout=5,
+        check=False,
+    )
+    if (
+        result.returncode != 0
+        or result.stderr
+        or len(result.stdout) > 1024
+        or not result.stdout.startswith(b"ssh-ed25519 ")
+        or result.stdout.count(b"\n") != 1
+    ):
+        raise CommissionError("VM-management SSH public derivation failed")
+    return result.stdout
+
+
+def _fullsync_vm_management_key_pair(
+    apply_lock: dict[str, Any], private_path: Path, public_path: Path
+) -> None:
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
+    for path, mode in ((private_path, 0o600), (public_path, 0o644)):
+        _assert_real_path(
+            path, kind="file", owner_uid=uid, owner_gid=gid, mode=mode
+        )
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
+        )
+        try:
+            _full_fsync_fd(descriptor)
+        finally:
+            os.close(descriptor)
+    _sync_directory(private_path.parent)
+
+
+def _vm_management_key(args: argparse.Namespace) -> int:
+    apply_lock, _, vm_spec = _locks()
+    if not apply_lock["phases"]["vm_management_ssh_key_apply_enabled"]:
+        raise CommissionError("VM-management SSH key phase is disabled")
+    runtime_receipt_sha = _assert_root_apply(args, apply_lock)
+    identity_receipt = _router_operator_identity(apply_lock)
+    state = _initialize_state(apply_lock)
+    _acquire_state_lock(state)
+    validate_receipt = _root_phase_receipt(
+        state, "validate-fill", args.expected_validate_fill_receipt_sha256
+    )
+    if validate_receipt.get("effective_config_sha256") != vm_spec["lima_home"][
+        "effective_config_sha256"
+    ]:
+        raise CommissionError("validate-fill receipt effective config differs")
+    lima_receipt = _root_phase_receipt(
+        state, "lima-home", validate_receipt["lima_home_receipt_sha256"]
+    )
+    if lima_receipt.get("router_identity_receipt") != identity_receipt:
+        raise CommissionError("LIMA_HOME receipt router identity differs")
+    key_marker = _canonical_json(
+        {
+            "schema_version": 1,
+            "kind": "trading-desk.router-commission.installing",
+            "phase": "vm-management-key",
+            "validate_fill_receipt_sha256": args.expected_validate_fill_receipt_sha256,
+            "controller_manifest_sha256": args.expected_controller_manifest_sha256,
+        }
+    )
+    key_marker_path = state["state"] / ".vm-management-key.INSTALLING.json"
+    _write_exact_file(key_marker_path, key_marker, mode=0o400, uid=0, gid=0)
+    lima_home = Path(apply_lock["paths"]["lima_home"])
+    _verify_lima_home_for_management_key(
+        lima_home, apply_lock, lima_receipt["networks_yaml_sha256"]
+    )
+    config = lima_home / "_config"
+    contract = apply_lock["vm_management_ssh"]
+    private_path = Path(contract["private_key_path"])
+    public_path = Path(contract["public_key_path"])
+    if private_path.parent != config or public_path != Path(str(private_path) + ".pub"):
+        raise CommissionError("VM-management SSH key paths differ")
+    pending_private = config / ".user.pending-v1"
+    pending_public = config / ".user.pending-v1.pub"
+    final_private = private_path.exists() or private_path.is_symlink()
+    final_public = public_path.exists() or public_path.is_symlink()
+    pending_private_present = pending_private.exists() or pending_private.is_symlink()
+    pending_public_present = pending_public.exists() or pending_public.is_symlink()
+    if final_private and final_public:
+        if pending_private_present or pending_public_present:
+            raise CommissionError("VM-management SSH key pending state requires review")
+    elif final_private and not final_public and not pending_private_present:
+        if not pending_public_present:
+            derived = _derive_vm_management_public_key(apply_lock, private_path)
+            public_content = (
+                derived.rstrip(b"\n")
+                + b" "
+                + contract["comment"].encode("ascii")
+                + b"\n"
+            )
+            _write_exact_file(
+                pending_public,
+                public_content,
+                mode=0o644,
+                uid=apply_lock["host"]["router_operator_uid"],
+                gid=apply_lock["host"]["router_operator_gid"],
+            )
+        _verify_vm_management_key_pair(apply_lock, private_path, pending_public)
+        _fullsync_vm_management_key_pair(apply_lock, private_path, pending_public)
+        _rename_exclusive(pending_public, public_path)
+    elif not final_private and not final_public:
+        if pending_private_present != pending_public_present:
+            raise CommissionError("VM-management SSH key pending state requires review")
+        if not pending_private_present:
+            ssh_keygen = _verify_ssh_keygen(apply_lock)
+            uid = apply_lock["host"]["router_operator_uid"]
+            gid = apply_lock["host"]["router_operator_gid"]
+            result = subprocess.run(
+                [
+                    str(ssh_keygen),
+                    "-q",
+                    "-t",
+                    contract["type"],
+                    "-N",
+                    "",
+                    "-C",
+                    contract["comment"],
+                    "-f",
+                    str(pending_private),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+                preexec_fn=_drop_preexec(uid, gid),
+                timeout=10,
+                check=False,
+            )
+            if result.returncode != 0 or result.stdout or result.stderr:
+                raise CommissionError("VM-management SSH key generation failed")
+        _verify_vm_management_key_pair(apply_lock, pending_private, pending_public)
+        _fullsync_vm_management_key_pair(
+            apply_lock, pending_private, pending_public
+        )
+        _rename_exclusive(pending_private, private_path)
+        _rename_exclusive(pending_public, public_path)
+    else:
+        raise CommissionError("VM-management SSH key state requires review")
+    evidence = _verify_vm_management_key_pair(apply_lock, private_path, public_path)
+    _fullsync_vm_management_key_pair(apply_lock, private_path, public_path)
+    evidence = _verify_vm_management_key_pair(apply_lock, private_path, public_path)
+    if {item.name for item in config.iterdir()} != {"networks.yaml", "user", "user.pub"}:
+        raise CommissionError("LIMA_HOME config differs after VM-management key generation")
+    receipt = {
+        "schema_version": 1,
+        "kind": "trading-desk.router-commission.vm-management-ssh-key",
+        "phase": "vm-management-key",
+        "validate_fill_receipt_sha256": args.expected_validate_fill_receipt_sha256,
+        "runtime_receipt_sha256": runtime_receipt_sha,
+        "router_identity_receipt": identity_receipt,
+        "private_device": evidence["private_device"],
+        "private_inode": evidence["private_inode"],
+        "public_sha256": evidence["public_sha256"],
+        "installing_marker_sha256": _sha256_bytes(key_marker),
+        "private_key_returned": False,
+        "vm_management_credential_created": True,
+        "venue_credentials_touched": False,
+        "network_changes_performed": False,
+        "vm_created": False,
+        "venue_writes_authorized": False,
+        "mainnet_authorized": False,
+    }
+    path, digest = _atomic_receipt(
+        state["receipt_parent"],
+        PHASE_RECEIPTS["vm-management-key"],
+        receipt,
+        uid=0,
+        gid=0,
+    )
+    print(f"vm_management_key_receipt={path}")
+    print(f"vm_management_key_receipt_sha256={digest}")
+    print("private_key_returned=false")
+    print("venue_credentials_touched=false")
+    print("network_changes_performed=false")
+    return 0
+
+
 def _compatible_validation_plan(
     controller_dir: Path,
     *,
     commissioned_networks_sha256: str,
+    plan_name: str = "lima.yaml",
 ) -> tuple[bytes, str]:
     controller_manifest = _read_json(
         controller_dir / "bundle-manifest.json", "validation controller manifest"
     )
-    validation_plan = controller_dir / "lima.yaml"
-    validation_plan_sha256 = controller_manifest["files"]["lima.yaml"]
+    if plan_name not in {"lima.yaml", "lima-create-local.yaml"}:
+        raise CommissionError("validation controller plan name differs")
+    validation_plan = controller_dir / plan_name
+    validation_plan_sha256 = controller_manifest["files"][plan_name]
     validation_networks_sha256 = controller_manifest["files"]["networks.yaml"]
     if validation_networks_sha256 != commissioned_networks_sha256:
         raise CommissionError(
@@ -2704,7 +3116,7 @@ def _validate_fill(args: argparse.Namespace) -> int:
     )
     lima_home = Path(apply_lock["paths"]["lima_home"])
     _verify_lima_home(lima_home, apply_lock, lima_receipt["networks_yaml_sha256"])
-    limactl = Path(apply_lock["paths"]["lima_install"]) / "bin" / "limactl"
+    limactl = _verified_installed_limactl(apply_lock, commission_lock)
     expected_limactl = commission_lock["host_attestation"]["lima"]["binary_sha256"]
     _assert_real_path(limactl, kind="file", owner_uid=0, owner_gid=0, mode=0o555)
     if _sha256_file(limactl) != expected_limactl:
@@ -2772,10 +3184,1407 @@ def _validate_fill(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_vm_management_key_receipt(
+    state: dict[str, Path], expected_sha256: str
+) -> dict[str, Any]:
+    receipt = _read_expected_receipt(
+        state["receipt_parent"] / PHASE_RECEIPTS["vm-management-key"],
+        expected_sha256,
+        "trading-desk.router-commission.vm-management-ssh-key",
+        owner_uid=0,
+        owner_gid=0,
+    )
+    if (
+        receipt.get("private_key_returned") is not False
+        or receipt.get("vm_management_credential_created") is not True
+        or receipt.get("venue_credentials_touched") is not False
+        or receipt.get("network_changes_performed") is not False
+        or receipt.get("vm_created") is not False
+        or receipt.get("venue_writes_authorized") is not False
+        or receipt.get("mainnet_authorized") is not False
+    ):
+        raise CommissionError("VM-management SSH key receipt stop line differs")
+    return receipt
+
+
+def _verify_lima_home_with_management_key(
+    path: Path,
+    apply_lock: dict[str, Any],
+    networks_digest: str,
+    key_receipt: dict[str, Any],
+    *,
+    legacy_home_present: bool,
+    instance_name: str | None = None,
+) -> dict[str, object]:
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
+    _assert_real_path(path, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700)
+    expected_root = {"_config", "home"} if legacy_home_present else {"_config"}
+    if instance_name is not None:
+        expected_root.add(instance_name)
+    if {item.name for item in path.iterdir()} != expected_root:
+        raise CommissionError("LIMA_HOME root file set differs for VM create")
+    config = path / "_config"
+    _assert_real_path(config, kind="directory", owner_uid=uid, owner_gid=gid)
+    if {item.name for item in config.iterdir()} != {"networks.yaml", "user", "user.pub"}:
+        raise CommissionError("LIMA_HOME config file set differs for VM create")
+    networks = config / "networks.yaml"
+    _assert_real_path(networks, kind="file", owner_uid=uid, owner_gid=gid, mode=0o600)
+    if _sha256_file(networks) != networks_digest:
+        raise CommissionError("LIMA_HOME networks.yaml differs for VM create")
+    if legacy_home_present:
+        home = path / "home"
+        _assert_real_path(home, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700)
+        if any(home.iterdir()):
+            raise CommissionError("legacy Lima operator HOME is not empty")
+    evidence = _verify_vm_management_key_pair(
+        apply_lock,
+        Path(apply_lock["vm_management_ssh"]["private_key_path"]),
+        Path(apply_lock["vm_management_ssh"]["public_key_path"]),
+    )
+    if (
+        evidence["private_device"] != key_receipt.get("private_device")
+        or evidence["private_inode"] != key_receipt.get("private_inode")
+        or evidence["public_sha256"] != key_receipt.get("public_sha256")
+    ):
+        raise CommissionError("VM-management SSH key differs from its receipt")
+    return evidence
+
+
+def _retire_legacy_operator_home(
+    state: dict[str, Path],
+    apply_lock: dict[str, Any],
+) -> Path:
+    lima_home = Path(apply_lock["paths"]["lima_home"])
+    source = lima_home / "home"
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
+    matches = tuple(
+        state["quarantine_parent"].glob("retired-lima-operator-home-*-v1")
+    )
+    if source.exists() or source.is_symlink():
+        if matches:
+            raise CommissionError("legacy Lima HOME retirement state differs")
+        _assert_real_path(source, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700)
+        if any(source.iterdir()):
+            raise CommissionError("legacy Lima operator HOME is not empty")
+        destination = state["quarantine_parent"] / (
+            f"retired-lima-operator-home-{source.stat().st_ino}-v1"
+        )
+        _rename_exclusive(source, destination)
+    else:
+        if len(matches) != 1:
+            raise CommissionError("legacy Lima HOME retirement receipt is ambiguous")
+        destination = matches[0]
+    _assert_real_path(destination, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700)
+    if any(destination.iterdir()) or destination.name != (
+        f"retired-lima-operator-home-{destination.stat().st_ino}-v1"
+    ):
+        raise CommissionError("retained legacy Lima HOME differs")
+    return destination
+
+
+def _free_bytes(path: Path) -> int:
+    values = os.statvfs(path)
+    return int(values.f_frsize) * int(values.f_bavail)
+
+
+def _verify_local_image_tree(
+    parent: Path,
+    image: Path,
+    *,
+    marker: bytes,
+    expected_sha256: str,
+    expected_size: int,
+) -> None:
+    _assert_real_path(parent, kind="directory", owner_uid=0, owner_gid=0, mode=0o555)
+    if {item.name for item in parent.iterdir()} != {".INSTALLING.json", image.name}:
+        raise CommissionError("local-image directory file set differs")
+    marker_path = parent / ".INSTALLING.json"
+    _assert_real_path(marker_path, kind="file", owner_uid=0, owner_gid=0, mode=0o400)
+    if marker_path.read_bytes() != marker:
+        raise CommissionError("local-image installing marker differs")
+    metadata = _assert_real_path(
+        image, kind="file", owner_uid=0, owner_gid=0, mode=0o444
+    )
+    if metadata.st_size != expected_size or _sha256_file(image) != expected_sha256:
+        raise CommissionError("installed local image differs")
+
+
+def _local_image(args: argparse.Namespace) -> int:
+    apply_lock, commission_lock, vm_spec = _locks()
+    if not apply_lock["phases"]["local_image_apply_enabled"]:
+        raise CommissionError("local-image phase is disabled")
+    runtime_receipt_sha = _assert_root_apply(args, apply_lock)
+    identity_receipt = _router_operator_identity(apply_lock)
+    state = _initialize_state(apply_lock)
+    _acquire_state_lock(state)
+    validate_receipt = _root_phase_receipt(
+        state, "validate-fill", args.expected_validate_fill_receipt_sha256
+    )
+    if validate_receipt.get("effective_config_sha256") != vm_spec["lima_home"][
+        "effective_config_sha256"
+    ]:
+        raise CommissionError("validate-fill receipt effective config differs")
+    lima_receipt = _root_phase_receipt(
+        state, "lima-home", validate_receipt["lima_home_receipt_sha256"]
+    )
+    key_receipt = _read_vm_management_key_receipt(
+        state, args.expected_vm_management_key_receipt_sha256
+    )
+    if (
+        key_receipt.get("validate_fill_receipt_sha256")
+        != args.expected_validate_fill_receipt_sha256
+        or key_receipt.get("router_identity_receipt") != identity_receipt
+    ):
+        raise CommissionError("VM-management key receipt chain differs")
+    lima_home = Path(apply_lock["paths"]["lima_home"])
+    legacy_home_present = (lima_home / "home").exists() or (
+        lima_home / "home"
+    ).is_symlink()
+    key_evidence = _verify_lima_home_with_management_key(
+        lima_home,
+        apply_lock,
+        lima_receipt["networks_yaml_sha256"],
+        key_receipt,
+        legacy_home_present=legacy_home_present,
+    )
+    retained_home = _retire_legacy_operator_home(state, apply_lock)
+    _verify_lima_home_with_management_key(
+        lima_home,
+        apply_lock,
+        lima_receipt["networks_yaml_sha256"],
+        key_receipt,
+        legacy_home_present=False,
+    )
+    host_receipt = _root_phase_receipt(
+        state, "host-tools", lima_receipt["host_tools_receipt_sha256"]
+    )
+    media_receipt = _root_phase_receipt(
+        state, "media", host_receipt["media_receipt_sha256"]
+    )
+    media = Path(media_receipt["media_path"])
+    _verify_media_tree(
+        media,
+        media_receipt["bundle_manifest_sha256"],
+        commission_lock,
+        expected_installing_sha256=media_receipt["installing_marker_sha256"],
+        expected_ready_sha256=media_receipt["ready_marker_sha256"],
+    )
+    cloud = commission_lock["cloud_image"]
+    source = media / "evidence" / cloud["image_filename"]
+    _assert_real_path(source, kind="file", owner_uid=0, owner_gid=0, mode=0o400)
+    if source.stat().st_size != cloud["image_size_bytes"] or _sha256_file(source) != cloud["image_sha256"]:
+        raise CommissionError("sealed cloud image differs before local install")
+    image_parent = Path(apply_lock["paths"]["local_image_parent"])
+    image = Path(apply_lock["paths"]["local_image"])
+    if image.parent != image_parent:
+        raise CommissionError("local-image path differs")
+    minimum_after = apply_lock["storage"]["local_image_minimum_free_after_bytes"]
+    free_before = _free_bytes(Path("/opt"))
+    if free_before < cloud["image_size_bytes"] + minimum_after:
+        raise CommissionError("insufficient local-image installation headroom")
+    marker_value = {
+        "schema_version": 1,
+        "kind": "trading-desk.router-commission.installing",
+        "phase": "local-image",
+        "image_sha256": cloud["image_sha256"],
+        "image_size_bytes": cloud["image_size_bytes"],
+        "vm_management_key_receipt_sha256": args.expected_vm_management_key_receipt_sha256,
+        "controller_manifest_sha256": args.expected_controller_manifest_sha256,
+    }
+    marker = _canonical_json(marker_value)
+    stage = image_parent.parent / f".{image_parent.name}.installing-{cloud['image_sha256']}"
+    if image_parent.exists() or image_parent.is_symlink():
+        _verify_local_image_tree(
+            image_parent,
+            image,
+            marker=marker,
+            expected_sha256=cloud["image_sha256"],
+            expected_size=cloud["image_size_bytes"],
+        )
+    else:
+        if not stage.exists():
+            stage.mkdir(mode=0o700)
+            os.chown(stage, 0, 0)
+            _sync_directory(stage.parent)
+        if stat.S_IMODE(stage.stat().st_mode) == 0o555:
+            _verify_local_image_tree(
+                stage,
+                stage / image.name,
+                marker=marker,
+                expected_sha256=cloud["image_sha256"],
+                expected_size=cloud["image_size_bytes"],
+            )
+        else:
+            _assert_real_path(stage, kind="directory", owner_uid=0, owner_gid=0, mode=0o700)
+            _write_exact_file(stage / ".INSTALLING.json", marker, mode=0o400, uid=0, gid=0)
+            _copy_locked_file(
+                source,
+                stage / image.name,
+                cloud["image_sha256"],
+                destination_mode=0o444,
+            )
+            os.chmod(stage, 0o555)
+            _sync_directory(stage)
+        _rename_exclusive(stage, image_parent)
+        _verify_local_image_tree(
+            image_parent,
+            image,
+            marker=marker,
+            expected_sha256=cloud["image_sha256"],
+            expected_size=cloud["image_size_bytes"],
+        )
+    free_after = _free_bytes(image_parent)
+    if free_after < minimum_after:
+        raise CommissionError("local-image installation consumed emergency headroom")
+    plan_bytes, plan_sha256 = _compatible_validation_plan(
+        SCRIPT_DIR,
+        commissioned_networks_sha256=lima_receipt["networks_yaml_sha256"],
+        plan_name="lima-create-local.yaml",
+    )
+    if f"file://{image}".encode("ascii") not in plan_bytes:
+        raise CommissionError("local-create plan does not bind the installed image")
+    _assert_no_vm_or_socket_vmnet_process()
+    network_before = _network_state_snapshot()
+    limactl = _verified_installed_limactl(apply_lock, commission_lock)
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
+    environment = {
+        "HOME": apply_lock["paths"]["operator_home"],
+        "LIMA_HOME": apply_lock["paths"]["lima_home"],
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": f"{apply_lock['paths']['lima_install']}/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    }
+    result = subprocess.run(
+        [str(limactl), "validate", "--fill", "/dev/fd/0"],
+        input=plan_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        preexec_fn=_drop_preexec(uid, gid),
+        timeout=60,
+        check=False,
+    )
+    if result.returncode != 0 or len(result.stdout) > 4 * 1024 * 1024 or len(result.stderr) > 1024 * 1024:
+        raise CommissionError("local-create limactl validate --fill failed")
+    effective_sha256 = _sha256_bytes(result.stdout)
+    if effective_sha256 != vm_spec["lima_home"]["local_create_effective_config_sha256"]:
+        raise CommissionError("local-create effective config digest differs")
+    _assert_no_vm_or_socket_vmnet_process()
+    if _network_state_snapshot() != network_before:
+        raise CommissionError("host network state changed during local-image validation")
+    observation = state["observations"] / f"local-create-fill-{effective_sha256}.yaml"
+    _write_exact_file(observation, result.stdout, mode=0o400, uid=0, gid=0)
+    key_after = _verify_lima_home_with_management_key(
+        lima_home,
+        apply_lock,
+        lima_receipt["networks_yaml_sha256"],
+        key_receipt,
+        legacy_home_present=False,
+    )
+    if key_after["private_identity"] != key_evidence["private_identity"]:
+        raise CommissionError("VM-management private key changed during local-image phase")
+    receipt = {
+        "schema_version": 1,
+        "kind": "trading-desk.router-commission.local-image",
+        "phase": "local-image",
+        "validate_fill_receipt_sha256": args.expected_validate_fill_receipt_sha256,
+        "vm_management_key_receipt_sha256": args.expected_vm_management_key_receipt_sha256,
+        "runtime_receipt_sha256": runtime_receipt_sha,
+        "router_identity_receipt": identity_receipt,
+        "retained_legacy_operator_home": str(retained_home),
+        "local_image_path": str(image),
+        "local_image_sha256": cloud["image_sha256"],
+        "local_image_size_bytes": cloud["image_size_bytes"],
+        "local_image_device": image.stat().st_dev,
+        "local_image_inode": image.stat().st_ino,
+        "minimum_free_after_bytes": minimum_after,
+        "headroom_verified": True,
+        "local_create_plan_sha256": plan_sha256,
+        "local_create_effective_config_sha256": effective_sha256,
+        "effective_config_evidence": str(observation),
+        "venue_credentials_touched": False,
+        "network_changes_performed": False,
+        "vm_created": False,
+        "venue_writes_authorized": False,
+        "mainnet_authorized": False,
+    }
+    path, digest = _atomic_receipt(
+        state["receipt_parent"], PHASE_RECEIPTS["local-image"], receipt, uid=0, gid=0
+    )
+    print(f"local_image_receipt={path}")
+    print(f"local_image_receipt_sha256={digest}")
+    print("vm_created=false")
+    print("network_changes_performed=false")
+    return 0
+
+
+def _read_local_image_receipt(
+    state: dict[str, Path], expected_sha256: str
+) -> dict[str, Any]:
+    receipt = _read_expected_receipt(
+        state["receipt_parent"] / PHASE_RECEIPTS["local-image"],
+        expected_sha256,
+        "trading-desk.router-commission.local-image",
+        owner_uid=0,
+        owner_gid=0,
+    )
+    if (
+        receipt.get("venue_credentials_touched") is not False
+        or receipt.get("network_changes_performed") is not False
+        or receipt.get("vm_created") is not False
+        or receipt.get("venue_writes_authorized") is not False
+        or receipt.get("mainnet_authorized") is not False
+        or receipt.get("headroom_verified") is not True
+    ):
+        raise CommissionError("local-image receipt stop line differs")
+    return receipt
+
+
+def _canonical_network_snapshot_output(name: str, text: str) -> bytes:
+    if name == "interfaces":
+        canonical = "\n".join(sorted(text.split())) + "\n"
+    elif name in {"ipv4_routes", "ipv6_routes"}:
+        defaults = []
+        for line in text.splitlines():
+            fields = line.split()
+            if fields and fields[0] == "default" and len(fields) >= 4:
+                defaults.append(" ".join(fields[:4]))
+        canonical = "\n".join(sorted(defaults)) + "\n"
+    else:
+        raise CommissionError("unknown network snapshot component")
+    return canonical.encode("utf-8")
+
+
+def _network_state_snapshot() -> dict[str, str]:
+    commands = {
+        "interfaces": ["/sbin/ifconfig", "-l"],
+        "ipv4_routes": ["/usr/sbin/netstat", "-rn", "-f", "inet"],
+        "ipv6_routes": ["/usr/sbin/netstat", "-rn", "-f", "inet6"],
+    }
+    result: dict[str, str] = {}
+    for name, command in commands.items():
+        observed = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=10,
+            check=False,
+        )
+        if observed.returncode != 0 or observed.stderr or len(observed.stdout) > 4 * 1024 * 1024:
+            raise CommissionError("host network-state snapshot failed")
+        text = observed.stdout.decode("utf-8", errors="strict")
+        result[name] = _sha256_bytes(_canonical_network_snapshot_output(name, text))
+    return result
+
+
+def _assert_no_vm_or_socket_vmnet_process() -> None:
+    result = subprocess.run(
+        ["/bin/ps", "-axo", "pid=,uid=,comm=,args="],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0 or len(result.stdout) > 4 * 1024 * 1024:
+        raise CommissionError("host process inventory failed")
+    forbidden = (
+        "socket_vmnet",
+        "limactl hostagent",
+        "lima-trading-desk-router",
+        "qemu-system",
+    )
+    if any(token in line for line in result.stdout.splitlines() for token in forbidden):
+        raise CommissionError("VM or socket_vmnet process is already active")
+    for path in (Path("/private/var/run/lima"), Path("/private/etc/sudoers.d/lima")):
+        if path.exists() or path.is_symlink():
+            raise CommissionError("socket_vmnet runtime or sudoers state is present")
+
+
+def _assert_qemu_img_absent(environment: dict[str, str]) -> None:
+    if shutil.which("qemu-img", path=environment["PATH"]) is not None:
+        raise CommissionError("qemu-img must be absent from the create-only PATH")
+
+
+def _verify_created_disk_content(
+    path: Path, *, expected_size: int, expected_sha256: str
+) -> tuple[int, str]:
+    metadata = path.stat()
+    allocated = int(metadata.st_blocks) * 512
+    if metadata.st_size != expected_size or not 0 < allocated <= expected_size:
+        raise CommissionError("created instance disk allocation differs")
+    identity_before = _vm_management_key_identity(path)
+    observed_sha256 = _sha256_file(path)
+    if _vm_management_key_identity(path) != identity_before:
+        raise CommissionError("created instance disk changed during verification")
+    if observed_sha256 != expected_sha256:
+        raise CommissionError("created instance disk content differs")
+    return allocated, observed_sha256
+
+
+def _verify_created_vm(
+    apply_lock: dict[str, Any],
+    vm_spec: dict[str, Any],
+    *,
+    plan_bytes: bytes,
+    cloud_template: bytes,
+    key_receipt: dict[str, Any],
+    networks_sha256: str,
+) -> dict[str, object]:
+    lima_home = Path(apply_lock["paths"]["lima_home"])
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
+    _assert_real_path(lima_home, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700)
+    instance = lima_home / vm_spec["instance_name"]
+    if {item.name for item in lima_home.iterdir()} != {"_config", instance.name}:
+        raise CommissionError("create-only LIMA_HOME file set differs")
+    key_evidence = _verify_lima_home_with_management_key(
+        lima_home,
+        apply_lock,
+        networks_sha256,
+        key_receipt,
+        legacy_home_present=False,
+        instance_name=instance.name,
+    )
+    _assert_real_path(instance, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700)
+    expected_files = {
+        "cloud-config.yaml",
+        "disk",
+        "lima-version",
+        "lima.yaml",
+        "vz-identifier",
+    }
+    if {item.name for item in instance.iterdir()} != expected_files:
+        raise CommissionError("create-only instance file set differs")
+    expected_modes = {
+        "cloud-config.yaml": 0o444,
+        "disk": 0o600,
+        "lima-version": 0o444,
+        "lima.yaml": 0o644,
+        "vz-identifier": 0o644,
+    }
+    for name, mode in expected_modes.items():
+        _assert_real_path(
+            instance / name,
+            kind="file",
+            owner_uid=uid,
+            owner_gid=gid,
+            mode=mode,
+        )
+    stored_plan = _read_fd_bound_file(
+        instance / "lima.yaml",
+        owner_uid=uid,
+        owner_gid=gid,
+        mode=0o644,
+        maximum_size=1024 * 1024,
+    )
+    if stored_plan != plan_bytes:
+        raise CommissionError("created instance plan differs")
+    stored_plan_sha256 = _sha256_bytes(stored_plan)
+    version = _read_fd_bound_file(
+        instance / "lima-version",
+        owner_uid=uid,
+        owner_gid=gid,
+        mode=0o444,
+        maximum_size=64,
+    )
+    if version != b"v2.2.0":
+        raise CommissionError("created instance Lima version differs")
+    version_sha256 = _sha256_bytes(version)
+    expected_disk = int(vm_spec["disk_gib"]) * 1024**3
+    disk_allocated, disk_sha256 = _verify_created_disk_content(
+        instance / "disk",
+        expected_size=expected_disk,
+        expected_sha256=vm_spec["lima_home"]["local_create_disk_sha256"],
+    )
+    identifier = _read_fd_bound_file(
+        instance / "vz-identifier",
+        owner_uid=uid,
+        owner_gid=gid,
+        mode=0o644,
+        maximum_size=1024,
+    )
+    try:
+        identifier_value = plistlib.loads(identifier)
+    except (plistlib.InvalidFileException, ValueError) as error:
+        raise CommissionError("created VZ identifier is invalid") from error
+    if (
+        not isinstance(identifier_value, dict)
+        or set(identifier_value) != {"UUID"}
+        or not isinstance(identifier_value["UUID"], bytes)
+        or len(identifier_value["UUID"]) != 16
+    ):
+        raise CommissionError("created VZ identifier differs")
+    identifier_sha256 = _sha256_bytes(identifier)
+    identifier_uuid = identifier_value["UUID"].hex()
+    cloud = _read_fd_bound_file(
+        instance / "cloud-config.yaml",
+        owner_uid=uid,
+        owner_gid=gid,
+        mode=0o444,
+        maximum_size=64 * 1024,
+    )
+    public = _read_fd_bound_file(
+        Path(apply_lock["vm_management_ssh"]["public_key_path"]),
+        owner_uid=uid,
+        owner_gid=gid,
+        mode=0o644,
+        maximum_size=1024,
+    ).decode("ascii").strip()
+    public_marker = b"@@VM_MANAGEMENT_PUBLIC_KEY@@"
+    wan_marker = b"@@WAN_MAC@@"
+    wan_matches = re.findall(
+        rb"for pair in ((?:[0-9a-f]{2}:){5}[0-9a-f]{2})=eth0 ", cloud
+    )
+    if (
+        cloud_template.count(public_marker) != 1
+        or cloud_template.count(wan_marker) != 1
+        or len(wan_matches) != 1
+        or not wan_matches[0].startswith(b"52:55:55:")
+    ):
+        raise CommissionError("created cloud-config identity differs")
+    expected_cloud = cloud_template.replace(
+        public_marker, public.encode("ascii")
+    ).replace(wan_marker, wan_matches[0])
+    if cloud != expected_cloud:
+        raise CommissionError("created cloud-config content differs")
+    cloud_sha256 = _sha256_bytes(cloud)
+    for name in sorted(expected_files):
+        descriptor = os.open(
+            instance / name,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+        )
+        try:
+            _full_fsync_fd(descriptor)
+        finally:
+            os.close(descriptor)
+    _sync_directory(instance)
+    _sync_directory(lima_home / "_config")
+    _sync_directory(lima_home)
+    return {
+        "instance_path": str(instance),
+        "instance_device": instance.stat().st_dev,
+        "instance_inode": instance.stat().st_ino,
+        "disk_logical_bytes": expected_disk,
+        "disk_allocated_bytes": disk_allocated,
+        "disk_sha256": disk_sha256,
+        "stored_plan_sha256": stored_plan_sha256,
+        "lima_version_sha256": version_sha256,
+        "cloud_config_sha256": cloud_sha256,
+        "wan_mac": wan_matches[0].decode("ascii"),
+        "vz_identifier_sha256": identifier_sha256,
+        "vz_identifier_uuid": identifier_uuid,
+        "management_private_identity": key_evidence["private_identity"],
+    }
+
+
+def _verify_retained_vm_create_quarantine(
+    state: dict[str, Path],
+    apply_lock: dict[str, Any],
+    *,
+    marker_digest: str,
+    source: Path,
+) -> tuple[Path, ...]:
+    marker_path = state["state"] / ".vm-create.INSTALLING.json"
+    _assert_real_path(
+        marker_path, kind="file", owner_uid=0, owner_gid=0, mode=0o400
+    )
+    if _sha256_file(marker_path) != marker_digest:
+        raise CommissionError("VM-create retained marker differs")
+    prefix = f"quarantine-transaction-vm-create-{marker_digest}-"
+    transactions = tuple(sorted(state["quarantine_parent"].glob(f"{prefix}*.json")))
+    retained: list[Path] = []
+    observed_sequences: set[int] = set()
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
+    live_source_identity: tuple[int, int] | None = None
+    if source.exists() or source.is_symlink():
+        live_source = _assert_real_path(
+            source, kind="directory", owner_uid=uid, owner_gid=gid
+        )
+        live_source_identity = (live_source.st_dev, live_source.st_ino)
+    for transaction_path in transactions:
+        attempt_id = transaction_path.name.removeprefix(prefix).removesuffix(".json")
+        if SHA256_RE.fullmatch(attempt_id) is None:
+            raise CommissionError("VM-create quarantine attempt differs")
+        receipt_path = state["quarantine_parent"] / (
+            f"quarantine-vm-create-{marker_digest}-{attempt_id}.json"
+        )
+        for path in (transaction_path, receipt_path):
+            _assert_real_path(
+                path, kind="file", owner_uid=0, owner_gid=0, mode=0o400
+            )
+        transaction = _read_json(transaction_path, "VM-create quarantine transaction")
+        receipt = _read_json(receipt_path, "VM-create quarantine receipt")
+        moves = transaction.get("moves")
+        attempt_sequence = transaction.get("attempt_sequence")
+        source_identity = transaction.get("source_identity")
+        if (
+            transaction.get("schema_version") != 2
+            or transaction.get("kind")
+            != "trading-desk.router-commission.quarantine-transaction"
+            or transaction.get("phase") != "vm-create"
+            or transaction.get("attempt_id") != attempt_id
+            or type(attempt_sequence) is not int
+            or attempt_sequence < 1
+            or not isinstance(source_identity, dict)
+            or attempt_id
+            != _sha256_bytes(
+                _canonical_json(
+                    {
+                        "attempt_sequence": attempt_sequence,
+                        "source_identity": source_identity,
+                    }
+                )
+            )
+            or transaction.get("installing_marker_sha256") != marker_digest
+            or not isinstance(moves, list)
+            or len(moves) != 1
+            or receipt.get("schema_version") != 2
+            or receipt.get("kind") != "trading-desk.router-commission.quarantine"
+            or receipt.get("phase") != "vm-create"
+            or receipt.get("attempt_id") != attempt_id
+            or receipt.get("attempt_sequence") != attempt_sequence
+            or receipt.get("transaction_receipt_sha256")
+            != _sha256_file(transaction_path)
+            or receipt.get("automatic_delete_performed") is not False
+        ):
+            raise CommissionError("VM-create quarantine evidence differs")
+        if attempt_sequence in observed_sequences:
+            raise CommissionError("VM-create quarantine sequence repeats")
+        observed_sequences.add(attempt_sequence)
+        _verify_completed_directory_quarantine(
+            transaction,
+            receipt,
+            transaction_path=transaction_path,
+            attempt_id=attempt_id,
+            attempt_sequence=attempt_sequence,
+            marker_digest=marker_digest,
+            phase="vm-create",
+            allowed_sources=frozenset({source}),
+            quarantine_parent=state["quarantine_parent"],
+            state_marker=marker_path,
+            owner_uid=uid,
+            owner_gid=gid,
+        )
+        move = moves[0]
+        if not isinstance(move, dict) or set(move) != {"source", "destination"}:
+            raise CommissionError("VM-create quarantine move differs")
+        destination = Path(move["destination"])
+        if (
+            Path(move["source"]) != source
+            or destination.parent != state["quarantine_parent"]
+        ):
+            raise CommissionError("VM-create quarantine move differs")
+        _assert_real_path(
+            destination, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o500
+        )
+        expected_identity = {
+            "path": str(source),
+            "device": destination.stat().st_dev,
+            "inode": destination.stat().st_ino,
+        }
+        if (
+            source_identity != expected_identity
+            or live_source_identity
+            == (destination.stat().st_dev, destination.stat().st_ino)
+            or destination.name
+            != f".quarantine-vm-create-{destination.stat().st_ino}-{marker_digest}-{attempt_id}"
+            or receipt.get("quarantined_paths") != [str(destination)]
+            or destination in retained
+        ):
+            raise CommissionError("VM-create retained quarantine differs")
+        retained.append(destination)
+    incomplete = tuple(
+        state["quarantine_parent"].glob(
+            f"quarantine-transaction-vm-create-{marker_digest}-*.json"
+        )
+    )
+    if len(incomplete) != len(retained):
+        raise CommissionError("incomplete VM-create quarantine requires review")
+    if observed_sequences != set(range(1, len(observed_sequences) + 1)):
+        raise CommissionError("VM-create quarantine sequence differs")
+    return tuple(retained)
+
+
+def _parse_create_only_status(
+    raw: bytes,
+    *,
+    instance_name: str,
+    instance_path: Path,
+) -> str:
+    if not raw or len(raw) > 128 * 1024:
+        raise CommissionError("create-only Lima status output is invalid")
+    try:
+        lines = raw.decode("utf-8").splitlines()
+        values = [json.loads(line, object_pairs_hook=_unique_object) for line in lines]
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise CommissionError("create-only Lima status output is invalid") from error
+    if len(values) != 1 or not isinstance(values[0], dict):
+        raise CommissionError("create-only Lima status is not a singleton")
+    value = values[0]
+    if (
+        value.get("name") != instance_name
+        or value.get("status") != "Stopped"
+        or value.get("vmType") != "vz"
+        or value.get("arch") != "aarch64"
+        or value.get("dir") != str(instance_path)
+        or value.get("protected") is not False
+        or value.get("errors") not in (None, [])
+    ):
+        raise CommissionError("create-only Lima status differs")
+    return _sha256_bytes(_canonical_json(value))
+
+
+def _verify_create_only_status(
+    limactl: Path,
+    environment: dict[str, str],
+    *,
+    uid: int,
+    gid: int,
+    instance_name: str,
+    instance_path: Path,
+) -> str:
+    result = subprocess.run(
+        [str(limactl), "list", "--format=json", instance_name],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment,
+        preexec_fn=_drop_preexec(uid, gid),
+        timeout=20,
+        check=False,
+    )
+    if result.returncode != 0 or result.stderr:
+        raise CommissionError("create-only Lima status query failed")
+    return _parse_create_only_status(
+        result.stdout,
+        instance_name=instance_name,
+        instance_path=instance_path,
+    )
+
+
+def _create_vm(args: argparse.Namespace) -> int:
+    apply_lock, commission_lock, vm_spec = _locks()
+    if not apply_lock["phases"]["vm_create_apply_enabled"]:
+        raise CommissionError("VM create phase is disabled")
+    runtime_receipt_sha = _assert_root_apply(args, apply_lock)
+    identity_receipt = _router_operator_identity(apply_lock)
+    state = _initialize_state(apply_lock)
+    _acquire_state_lock(state)
+    local_receipt = _read_local_image_receipt(
+        state, args.expected_local_image_receipt_sha256
+    )
+    key_receipt = _read_vm_management_key_receipt(
+        state, local_receipt["vm_management_key_receipt_sha256"]
+    )
+    if local_receipt.get("router_identity_receipt") != identity_receipt:
+        raise CommissionError("local-image router identity differs")
+    image = Path(apply_lock["paths"]["local_image"])
+    metadata = _assert_real_path(
+        image, kind="file", owner_uid=0, owner_gid=0, mode=0o444
+    )
+    if (
+        metadata.st_dev != local_receipt["local_image_device"]
+        or metadata.st_ino != local_receipt["local_image_inode"]
+        or metadata.st_size != local_receipt["local_image_size_bytes"]
+        or _sha256_file(image) != local_receipt["local_image_sha256"]
+        or local_receipt["local_image_sha256"]
+        != commission_lock["cloud_image"]["image_sha256"]
+    ):
+        raise CommissionError("local image differs from its receipt")
+    plan_bytes, plan_sha256 = _compatible_validation_plan(
+        SCRIPT_DIR,
+        commissioned_networks_sha256=_root_phase_receipt(
+            state,
+            "lima-home",
+            _root_phase_receipt(
+                state,
+                "validate-fill",
+                local_receipt["validate_fill_receipt_sha256"],
+            )["lima_home_receipt_sha256"],
+        )["networks_yaml_sha256"],
+        plan_name="lima-create-local.yaml",
+    )
+    if (
+        plan_sha256 != local_receipt["local_create_plan_sha256"]
+        or local_receipt["local_create_effective_config_sha256"]
+        != vm_spec["lima_home"]["local_create_effective_config_sha256"]
+    ):
+        raise CommissionError("local-create plan receipt differs")
+    controller_manifest = _read_json(
+        SCRIPT_DIR / "bundle-manifest.json", "create controller manifest"
+    )
+    cloud_template_path = SCRIPT_DIR / "cloud-config-create.template"
+    cloud_template = _read_fd_bound_file(
+        cloud_template_path,
+        owner_uid=0,
+        owner_gid=0,
+        mode=0o600,
+        maximum_size=64 * 1024,
+    )
+    if _sha256_bytes(cloud_template) != controller_manifest["files"][
+        "cloud-config-create.template"
+    ]:
+        raise CommissionError("create cloud-config template differs")
+    _assert_no_vm_or_socket_vmnet_process()
+    limactl = _verified_installed_limactl(apply_lock, commission_lock)
+    create_environment = {
+        "HOME": apply_lock["paths"]["operator_home"],
+        "LIMA_HOME": apply_lock["paths"]["lima_home"],
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": f"{apply_lock['paths']['lima_install']}/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    }
+    _assert_qemu_img_absent(create_environment)
+    network_before = _network_state_snapshot()
+    free_before = _free_bytes(Path(apply_lock["paths"]["lima_home"]))
+    if free_before < apply_lock["storage"]["vm_create_minimum_free_before_bytes"]:
+        raise CommissionError("insufficient VM create headroom")
+    marker = _canonical_json(
+        {
+            "schema_version": 1,
+            "kind": "trading-desk.router-commission.installing",
+            "phase": "vm-create",
+            "local_image_receipt_sha256": args.expected_local_image_receipt_sha256,
+            "local_create_plan_sha256": plan_sha256,
+        }
+    )
+    marker_path = state["state"] / ".vm-create.INSTALLING.json"
+    _write_exact_file(marker_path, marker, mode=0o400, uid=0, gid=0)
+    lima_home = Path(apply_lock["paths"]["lima_home"])
+    instance = lima_home / vm_spec["instance_name"]
+    retained_quarantine = _verify_retained_vm_create_quarantine(
+        state,
+        apply_lock,
+        marker_digest=_sha256_bytes(marker),
+        source=instance,
+    )
+    key_before = _verify_vm_management_key_pair(
+        apply_lock,
+        Path(apply_lock["vm_management_ssh"]["private_key_path"]),
+        Path(apply_lock["vm_management_ssh"]["public_key_path"]),
+    )
+    if not instance.exists() and not instance.is_symlink():
+        uid = apply_lock["host"]["router_operator_uid"]
+        gid = apply_lock["host"]["router_operator_gid"]
+        result = subprocess.run(
+            [
+                str(limactl),
+                "create",
+                "--tty=false",
+                f"--name={vm_spec['instance_name']}",
+                "-",
+            ],
+            input=plan_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=create_environment,
+            preexec_fn=_drop_preexec(uid, gid),
+            timeout=300,
+            check=False,
+        )
+        if (
+            len(result.stdout) > 1024 * 1024
+            or len(result.stderr) > 4 * 1024 * 1024
+            or (result.returncode != 0 and not instance.is_dir())
+        ):
+            raise CommissionError("create-only limactl invocation failed")
+    evidence = _verify_created_vm(
+        apply_lock,
+        vm_spec,
+        plan_bytes=plan_bytes,
+        cloud_template=cloud_template,
+        key_receipt=key_receipt,
+        networks_sha256=_root_phase_receipt(
+            state,
+            "lima-home",
+            _root_phase_receipt(
+                state,
+                "validate-fill",
+                local_receipt["validate_fill_receipt_sha256"],
+            )["lima_home_receipt_sha256"],
+        )["networks_yaml_sha256"],
+    )
+    status_document_sha256 = _verify_create_only_status(
+        limactl,
+        create_environment,
+        uid=apply_lock["host"]["router_operator_uid"],
+        gid=apply_lock["host"]["router_operator_gid"],
+        instance_name=vm_spec["instance_name"],
+        instance_path=instance,
+    )
+    key_after = _verify_vm_management_key_pair(
+        apply_lock,
+        Path(apply_lock["vm_management_ssh"]["private_key_path"]),
+        Path(apply_lock["vm_management_ssh"]["public_key_path"]),
+    )
+    if key_after["private_identity"] != key_before["private_identity"]:
+        raise CommissionError("Lima replaced the VM-management private key")
+    _assert_no_vm_or_socket_vmnet_process()
+    _assert_qemu_img_absent(create_environment)
+    network_after = _network_state_snapshot()
+    if network_after != network_before:
+        raise CommissionError("host network state changed during create-only phase")
+    free_after = _free_bytes(lima_home)
+    if free_after < apply_lock["storage"]["local_image_minimum_free_after_bytes"]:
+        raise CommissionError("VM create consumed emergency headroom")
+    marker_path.unlink()
+    _sync_directory(state["state"])
+    receipt = {
+        "schema_version": 1,
+        "kind": "trading-desk.router-commission.vm-create",
+        "phase": "vm-create",
+        "local_image_receipt_sha256": args.expected_local_image_receipt_sha256,
+        "runtime_receipt_sha256": runtime_receipt_sha,
+        "router_identity_receipt": identity_receipt,
+        "local_create_plan_sha256": plan_sha256,
+        "instance_path": evidence["instance_path"],
+        "instance_device": evidence["instance_device"],
+        "instance_inode": evidence["instance_inode"],
+        "disk_logical_bytes": evidence["disk_logical_bytes"],
+        "disk_sha256": evidence["disk_sha256"],
+        "stored_plan_sha256": evidence["stored_plan_sha256"],
+        "lima_version_sha256": evidence["lima_version_sha256"],
+        "cloud_config_sha256": evidence["cloud_config_sha256"],
+        "wan_mac": evidence["wan_mac"],
+        "vz_identifier_sha256": evidence["vz_identifier_sha256"],
+        "vz_identifier_uuid": evidence["vz_identifier_uuid"],
+        "minimum_free_before_bytes": apply_lock["storage"][
+            "vm_create_minimum_free_before_bytes"
+        ],
+        "headroom_verified": True,
+        "create_or_exact_adoption_completed": True,
+        "retained_vm_create_quarantines": [
+            str(path) for path in retained_quarantine
+        ],
+        "vm_status": "Stopped",
+        "status_document_sha256": status_document_sha256,
+        "vm_created": True,
+        "vm_started": False,
+        "ready_to_start": False,
+        "start_blocker": "offline pre-frozen image and locked guest account are absent",
+        "socket_vmnet_started": False,
+        "qemu_img_absent": True,
+        "network_changes_performed": False,
+        "venue_credentials_touched": False,
+        "router_key_generated": False,
+        "venue_writes_authorized": False,
+        "mainnet_authorized": False,
+    }
+    path, digest = _atomic_receipt(
+        state["receipt_parent"], PHASE_RECEIPTS["vm-create"], receipt, uid=0, gid=0
+    )
+    print(f"vm_create_receipt={path}")
+    print(f"vm_create_receipt_sha256={digest}")
+    print("vm_status=Stopped")
+    print("vm_started=false")
+    print("socket_vmnet_started=false")
+    print("network_changes_performed=false")
+    return 0
+
+
+def _verify_completed_key_quarantine(
+    transaction: dict[str, Any],
+    receipt: dict[str, Any],
+    *,
+    transaction_path: Path,
+    attempt_id: str,
+    attempt_sequence: int,
+    marker_digest: str,
+    candidates: tuple[tuple[Path, int], ...],
+    quarantine_parent: Path,
+    uid: int,
+    gid: int,
+) -> None:
+    identities = transaction.get("source_identities")
+    moves = transaction.get("moves")
+    if (
+        set(transaction)
+        != {
+            "schema_version",
+            "kind",
+            "phase",
+            "attempt_id",
+            "attempt_sequence",
+            "source_identities",
+            "installing_marker_sha256",
+            "moves",
+        }
+        or not isinstance(identities, list)
+        or not isinstance(moves, list)
+        or not 1 <= len(identities) == len(moves) <= 2
+        or set(receipt)
+        != {
+            "schema_version",
+            "kind",
+            "phase",
+            "attempt_id",
+            "attempt_sequence",
+            "installing_marker_sha256",
+            "transaction_receipt_sha256",
+            "quarantined_paths",
+            "automatic_delete_performed",
+            "network_changes_performed",
+            "venue_credentials_touched",
+            "venue_writes_authorized",
+            "mainnet_authorized",
+        }
+        or receipt.get("schema_version") != 2
+        or receipt.get("kind")
+        != "trading-desk.router-commission.key-quarantine"
+        or receipt.get("phase") != "vm-management-key"
+        or receipt.get("attempt_id") != attempt_id
+        or receipt.get("attempt_sequence") != attempt_sequence
+        or receipt.get("installing_marker_sha256") != marker_digest
+        or receipt.get("transaction_receipt_sha256")
+        != _sha256_file(transaction_path)
+        or receipt.get("automatic_delete_performed") is not False
+        or receipt.get("network_changes_performed") is not False
+        or receipt.get("venue_credentials_touched") is not False
+        or receipt.get("venue_writes_authorized") is not False
+        or receipt.get("mainnet_authorized") is not False
+    ):
+        raise CommissionError("VM-management key quarantine receipt differs")
+    retained: list[str] = []
+    seen_sources: set[Path] = set()
+    for identity, move in zip(identities, moves, strict=True):
+        if (
+            not isinstance(identity, dict)
+            or set(identity) != {"path", "device", "inode", "mode"}
+            or not isinstance(identity.get("path"), str)
+            or type(identity.get("device")) is not int
+            or type(identity.get("inode")) is not int
+            or type(identity.get("mode")) is not int
+            or not isinstance(move, dict)
+            or set(move) != {"source", "destination", "mode"}
+            or not isinstance(move.get("source"), str)
+            or not isinstance(move.get("destination"), str)
+        ):
+            raise CommissionError("VM-management key quarantine history differs")
+        source = Path(identity["path"])
+        destination = Path(move["destination"])
+        mode = identity["mode"]
+        if (
+            (source, mode) not in candidates
+            or source in seen_sources
+            or move["source"] != str(source)
+            or move["mode"] != mode
+            or destination.parent != quarantine_parent
+        ):
+            raise CommissionError("VM-management key quarantine history differs")
+        seen_sources.add(source)
+        metadata = _assert_real_path(
+            destination, kind="file", owner_uid=uid, owner_gid=gid, mode=mode
+        )
+        if identity != {
+            "path": str(source),
+            "device": metadata.st_dev,
+            "inode": metadata.st_ino,
+            "mode": mode,
+        } or destination.name != (
+            f".quarantine-vm-management-key-{source.name}-{metadata.st_ino}-"
+            f"{marker_digest}-{attempt_id}"
+        ):
+            raise CommissionError("VM-management key retained artifact differs")
+        if source.exists() or source.is_symlink():
+            current = _assert_real_path(
+                source, kind="file", owner_uid=uid, owner_gid=gid, mode=mode
+            )
+            if (current.st_dev, current.st_ino) == (metadata.st_dev, metadata.st_ino):
+                raise CommissionError("VM-management key retained source aliases retry")
+        retained.append(str(destination))
+    if receipt.get("quarantined_paths") != retained:
+        raise CommissionError("VM-management key retained receipt differs")
+
+
+def _quarantine_management_key_pending(args: argparse.Namespace) -> int:
+    apply_lock, _, _ = _locks()
+    if not apply_lock["phases"]["quarantine_apply_enabled"]:
+        raise CommissionError("quarantine phase is disabled")
+    _assert_root_apply(args, apply_lock)
+    state = _initialize_state(apply_lock)
+    _acquire_state_lock(state)
+    if not SHA256_RE.fullmatch(args.expected_marker_sha256):
+        raise CommissionError("expected installing-marker SHA-256 is invalid")
+    marker = state["state"] / ".vm-management-key.INSTALLING.json"
+    _assert_real_path(marker, kind="file", owner_uid=0, owner_gid=0, mode=0o400)
+    if _sha256_file(marker) != args.expected_marker_sha256:
+        raise CommissionError("VM-management key marker differs")
+    completed = state["receipt_parent"] / PHASE_RECEIPTS["vm-management-key"]
+    if completed.exists() or completed.is_symlink():
+        raise CommissionError("completed VM-management key cannot be quarantined")
+    config = Path(apply_lock["paths"]["lima_home"]) / "_config"
+    candidates = (
+        (config / ".user.pending-v1", 0o600),
+        (config / ".user.pending-v1.pub", 0o644),
+    )
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
+    prefix = (
+        f"quarantine-transaction-vm-management-key-"
+        f"{args.expected_marker_sha256}-"
+    )
+    incomplete: list[tuple[Path, str, int]] = []
+    observed_sequences: set[int] = set()
+    for path in state["quarantine_parent"].glob(f"{prefix}*.json"):
+        attempt = path.name.removeprefix(prefix).removesuffix(".json")
+        if SHA256_RE.fullmatch(attempt) is None:
+            raise CommissionError("VM-management key quarantine attempt differs")
+        _assert_real_path(path, kind="file", owner_uid=0, owner_gid=0, mode=0o400)
+        observed = _read_json(path, "VM-management key quarantine transaction")
+        sequence = observed.get("attempt_sequence")
+        identities = observed.get("source_identities")
+        if (
+            observed.get("schema_version") != 2
+            or observed.get("kind")
+            != "trading-desk.router-commission.key-quarantine-transaction"
+            or observed.get("phase") != "vm-management-key"
+            or observed.get("attempt_id") != attempt
+            or type(sequence) is not int
+            or sequence < 1
+            or not isinstance(identities, list)
+            or not identities
+            or observed.get("installing_marker_sha256")
+            != args.expected_marker_sha256
+            or attempt
+            != _sha256_bytes(
+                _canonical_json(
+                    {
+                        "attempt_sequence": sequence,
+                        "source_identities": identities,
+                    }
+                )
+            )
+        ):
+            raise CommissionError("VM-management key quarantine transaction differs")
+        if sequence in observed_sequences:
+            raise CommissionError("VM-management key quarantine sequence repeats")
+        observed_sequences.add(sequence)
+        completed_attempt = state["quarantine_parent"] / (
+            f"quarantine-vm-management-key-{args.expected_marker_sha256}-"
+            f"{attempt}.json"
+        )
+        if not completed_attempt.exists() and not completed_attempt.is_symlink():
+            incomplete.append((path, attempt, sequence))
+        else:
+            _assert_real_path(
+                completed_attempt,
+                kind="file",
+                owner_uid=0,
+                owner_gid=0,
+                mode=0o400,
+            )
+            completed_value = _read_json(
+                completed_attempt, "VM-management key quarantine receipt"
+            )
+            if (
+                completed_value.get("schema_version") != 2
+                or completed_value.get("kind")
+                != "trading-desk.router-commission.key-quarantine"
+                or completed_value.get("phase") != "vm-management-key"
+                or completed_value.get("attempt_id") != attempt
+                or completed_value.get("attempt_sequence") != sequence
+                or completed_value.get("installing_marker_sha256")
+                != args.expected_marker_sha256
+                or completed_value.get("transaction_receipt_sha256")
+                != _sha256_file(path)
+                or completed_value.get("automatic_delete_performed") is not False
+            ):
+                raise CommissionError("VM-management key quarantine receipt differs")
+            _verify_completed_key_quarantine(
+                observed,
+                completed_value,
+                transaction_path=path,
+                attempt_id=attempt,
+                attempt_sequence=sequence,
+                marker_digest=args.expected_marker_sha256,
+                candidates=candidates,
+                quarantine_parent=state["quarantine_parent"],
+                uid=uid,
+                gid=gid,
+            )
+    if observed_sequences != set(range(1, len(observed_sequences) + 1)):
+        raise CommissionError("VM-management key quarantine sequence differs")
+    if len(incomplete) > 1:
+        raise CommissionError("multiple incomplete key quarantines require review")
+    if incomplete:
+        transaction_path, attempt_id, attempt_sequence = incomplete[0]
+        _assert_real_path(
+            transaction_path, kind="file", owner_uid=0, owner_gid=0, mode=0o400
+        )
+        transaction = _read_json(transaction_path, "VM-management key quarantine transaction")
+        transaction_sha256 = _sha256_file(transaction_path)
+    else:
+        moves = []
+        source_identities = []
+        for source, mode in candidates:
+            if not source.exists() and not source.is_symlink():
+                continue
+            _assert_real_path(source, kind="file", owner_uid=uid, owner_gid=gid, mode=mode)
+            if source.stat().st_dev != state["quarantine_parent"].stat().st_dev:
+                raise CommissionError("key quarantine destination is on another filesystem")
+            source_identities.append(
+                {
+                    "path": str(source),
+                    "device": source.stat().st_dev,
+                    "inode": source.stat().st_ino,
+                    "mode": mode,
+                }
+            )
+        if not source_identities:
+            raise CommissionError("no VM-management key pending file exists")
+        attempt_sequence = len(observed_sequences) + 1
+        attempt_id = _sha256_bytes(
+            _canonical_json(
+                {
+                    "attempt_sequence": attempt_sequence,
+                    "source_identities": source_identities,
+                }
+            )
+        )
+        for identity in source_identities:
+            source = Path(identity["path"])
+            destination = state["quarantine_parent"] / (
+                f".quarantine-vm-management-key-{source.name}-{identity['inode']}-"
+                f"{args.expected_marker_sha256}-{attempt_id}"
+            )
+            moves.append(
+                {
+                    "source": str(source),
+                    "destination": str(destination),
+                    "mode": identity["mode"],
+                }
+            )
+        transaction = {
+            "schema_version": 2,
+            "kind": "trading-desk.router-commission.key-quarantine-transaction",
+            "phase": "vm-management-key",
+            "attempt_id": attempt_id,
+            "attempt_sequence": attempt_sequence,
+            "source_identities": source_identities,
+            "installing_marker_sha256": args.expected_marker_sha256,
+            "moves": moves,
+        }
+        transaction_path = state["quarantine_parent"] / (
+            f"{prefix}{attempt_id}.json"
+        )
+        transaction_path, transaction_sha256 = _atomic_receipt(
+            state["quarantine_parent"],
+            transaction_path.name,
+            transaction,
+            uid=0,
+            gid=0,
+        )
+    if (
+        set(transaction)
+        != {
+            "schema_version",
+            "kind",
+            "phase",
+            "attempt_id",
+            "attempt_sequence",
+            "source_identities",
+            "installing_marker_sha256",
+            "moves",
+        }
+        or transaction.get("schema_version") != 2
+        or transaction.get("kind")
+        != "trading-desk.router-commission.key-quarantine-transaction"
+        or transaction.get("phase") != "vm-management-key"
+        or transaction.get("attempt_id") != attempt_id
+        or transaction.get("attempt_sequence") != attempt_sequence
+        or not isinstance(transaction.get("source_identities"), list)
+        or transaction.get("installing_marker_sha256")
+        != args.expected_marker_sha256
+        or not isinstance(transaction.get("moves"), list)
+        or not 1 <= len(transaction["moves"]) <= 2
+    ):
+        raise CommissionError("VM-management key quarantine transaction differs")
+    if attempt_id != _sha256_bytes(
+        _canonical_json(
+            {
+                "attempt_sequence": attempt_sequence,
+                "source_identities": transaction["source_identities"],
+            }
+        )
+    ):
+        raise CommissionError("VM-management key quarantine attempt binding differs")
+    retained = []
+    observed_identities = []
+    for move in transaction["moves"]:
+        if not isinstance(move, dict) or set(move) != {"source", "destination", "mode"}:
+            raise CommissionError("VM-management key quarantine move differs")
+        source = Path(move["source"])
+        destination = Path(move["destination"])
+        mode = move["mode"]
+        if (source, mode) not in candidates or destination.parent != state["quarantine_parent"]:
+            raise CommissionError("VM-management key quarantine move differs")
+        source_present = source.exists() or source.is_symlink()
+        destination_present = destination.exists() or destination.is_symlink()
+        if source_present == destination_present:
+            raise CommissionError("VM-management key quarantine move is ambiguous")
+        current = source if source_present else destination
+        _assert_real_path(current, kind="file", owner_uid=uid, owner_gid=gid, mode=mode)
+        expected_destination = state["quarantine_parent"] / (
+            f".quarantine-vm-management-key-{source.name}-{current.stat().st_ino}-"
+            f"{args.expected_marker_sha256}-{attempt_id}"
+        )
+        if destination != expected_destination:
+            raise CommissionError("VM-management key quarantine destination differs")
+        observed_identities.append(
+            {
+                "path": str(source),
+                "device": current.stat().st_dev,
+                "inode": current.stat().st_ino,
+                "mode": mode,
+            }
+        )
+        if source_present:
+            _rename_exclusive(source, destination)
+        retained.append(destination)
+    if transaction["source_identities"] != observed_identities:
+        raise CommissionError("VM-management key quarantine source identity differs")
+    receipt = {
+        "schema_version": 2,
+        "kind": "trading-desk.router-commission.key-quarantine",
+        "phase": "vm-management-key",
+        "attempt_id": attempt_id,
+        "attempt_sequence": attempt_sequence,
+        "installing_marker_sha256": args.expected_marker_sha256,
+        "transaction_receipt_sha256": transaction_sha256,
+        "quarantined_paths": [str(path) for path in retained],
+        "automatic_delete_performed": False,
+        "network_changes_performed": False,
+        "venue_credentials_touched": False,
+        "venue_writes_authorized": False,
+        "mainnet_authorized": False,
+    }
+    receipt_name = (
+        f"quarantine-vm-management-key-{args.expected_marker_sha256}-"
+        f"{attempt_id}.json"
+    )
+    path, digest = _atomic_receipt(
+        state["quarantine_parent"], receipt_name, receipt, uid=0, gid=0
+    )
+    print(f"key_quarantine_receipt={path}")
+    print(f"key_quarantine_receipt_sha256={digest}")
+    print("automatic_delete_performed=false")
+    return 0
+
+
 def _disabled_phase(args: argparse.Namespace, phase: str) -> int:
     apply_lock, _, _ = _locks()
     gate = {
-        "vm-create": "vm_create_apply_enabled",
         "vm-start": "vm_start_apply_enabled",
         "guest-freeze": "guest_freeze_apply_enabled",
         "guest-package": "guest_package_install_apply_enabled",
@@ -2783,7 +4592,6 @@ def _disabled_phase(args: argparse.Namespace, phase: str) -> int:
     if apply_lock["phases"][gate]:
         raise CommissionError(f"unexpectedly enabled phase requires implementation review: {phase}")
     blocker_key = {
-        "vm-create": "vm_create",
         "vm-start": "vm_start",
         "guest-freeze": "guest_freeze",
         "guest-package": "guest_package_install",
@@ -2796,8 +4604,408 @@ def _disabled_phase(args: argparse.Namespace, phase: str) -> int:
     return 64
 
 
+def _verify_completed_directory_quarantine(
+    transaction: dict[str, Any],
+    receipt: dict[str, Any],
+    *,
+    transaction_path: Path,
+    attempt_id: str,
+    attempt_sequence: int,
+    marker_digest: str,
+    phase: str,
+    allowed_sources: frozenset[Path],
+    quarantine_parent: Path,
+    state_marker: Path | None,
+    owner_uid: int,
+    owner_gid: int,
+) -> None:
+    identity = transaction.get("source_identity")
+    moves = transaction.get("moves")
+    if (
+        set(transaction)
+        != {
+            "schema_version",
+            "kind",
+            "phase",
+            "attempt_id",
+            "attempt_sequence",
+            "source_identity",
+            "installing_marker_sha256",
+            "moves",
+        }
+        or not isinstance(identity, dict)
+        or set(identity) != {"path", "device", "inode"}
+        or not isinstance(identity.get("path"), str)
+        or type(identity.get("device")) is not int
+        or type(identity.get("inode")) is not int
+        or not isinstance(moves, list)
+        or len(moves) != 1
+        or set(receipt)
+        != {
+            "schema_version",
+            "kind",
+            "phase",
+            "attempt_id",
+            "attempt_sequence",
+            "installing_marker_sha256",
+            "transaction_receipt_sha256",
+            "quarantined_paths",
+            "automatic_delete_performed",
+            "network_changes_performed",
+            "vm_created",
+            "credentials_touched",
+            "venue_writes_authorized",
+            "mainnet_authorized",
+        }
+        or receipt.get("schema_version") != 2
+        or receipt.get("kind") != "trading-desk.router-commission.quarantine"
+        or receipt.get("phase") != phase
+        or receipt.get("attempt_id") != attempt_id
+        or receipt.get("attempt_sequence") != attempt_sequence
+        or receipt.get("installing_marker_sha256") != marker_digest
+        or receipt.get("transaction_receipt_sha256")
+        != _sha256_file(transaction_path)
+        or receipt.get("automatic_delete_performed") is not False
+        or receipt.get("network_changes_performed") is not False
+        or receipt.get("vm_created") is not False
+        or receipt.get("credentials_touched") is not False
+        or receipt.get("venue_writes_authorized") is not False
+        or receipt.get("mainnet_authorized") is not False
+    ):
+        raise CommissionError("directory quarantine receipt differs")
+    move = moves[0]
+    if (
+        not isinstance(move, dict)
+        or set(move) != {"source", "destination"}
+        or not isinstance(move.get("source"), str)
+        or not isinstance(move.get("destination"), str)
+    ):
+        raise CommissionError("directory quarantine history differs")
+    source = Path(move["source"])
+    destination = Path(move["destination"])
+    expected_parent = quarantine_parent if phase == "vm-create" else source.parent
+    if (
+        source not in allowed_sources
+        or identity["path"] != str(source)
+        or destination.parent != expected_parent
+    ):
+        raise CommissionError("directory quarantine history differs")
+    metadata = _assert_real_path(
+        destination,
+        kind="directory",
+        owner_uid=owner_uid,
+        owner_gid=owner_gid,
+        mode=0o500,
+    )
+    if identity != {
+        "path": str(source),
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+    } or destination.name != (
+        f".quarantine-{phase}-{metadata.st_ino}-{marker_digest}-{attempt_id}"
+    ):
+        raise CommissionError("directory quarantine retained artifact differs")
+    if source.exists() or source.is_symlink():
+        current = _assert_real_path(
+            source,
+            kind="directory",
+            owner_uid=owner_uid,
+            owner_gid=owner_gid,
+        )
+        if (current.st_dev, current.st_ino) == (metadata.st_dev, metadata.st_ino):
+            raise CommissionError("directory quarantine retained source aliases retry")
+    marker = state_marker if phase == "vm-create" else destination / ".INSTALLING.json"
+    if marker is None:
+        raise CommissionError("directory quarantine marker is absent")
+    _assert_real_path(marker, kind="file", owner_uid=0, owner_gid=0, mode=0o400)
+    if _sha256_file(marker) != marker_digest:
+        raise CommissionError("directory quarantine retained marker differs")
+    marker_value = _read_json(marker, "directory quarantine retained marker")
+    if (
+        marker_value.get("kind")
+        != "trading-desk.router-commission.installing"
+        or marker_value.get("phase") != phase
+        or receipt.get("quarantined_paths") != [str(destination)]
+    ):
+        raise CommissionError("directory quarantine retained evidence differs")
+
+
+def _quarantine_directory_attempt(
+    args: argparse.Namespace,
+    apply_lock: dict[str, Any],
+    commission_lock: dict[str, Any],
+    state: dict[str, Path],
+    phase: str,
+) -> int:
+    marker = (
+        state["state"] / ".vm-create.INSTALLING.json"
+        if phase == "vm-create"
+        else None
+    )
+    if phase == "local-image":
+        image_parent = Path(apply_lock["paths"]["local_image_parent"])
+        stage = image_parent.parent / (
+            f".{image_parent.name}.installing-"
+            f"{commission_lock['cloud_image']['image_sha256']}"
+        )
+        candidates = [
+            path
+            for path in (stage, image_parent)
+            if path.exists() or path.is_symlink()
+        ]
+        allowed_sources = frozenset({stage, image_parent})
+        owner_uid = 0
+        owner_gid = 0
+    else:
+        instance = Path(apply_lock["paths"]["lima_home"]) / "trading-desk-router"
+        candidates = [instance] if instance.exists() or instance.is_symlink() else []
+        allowed_sources = frozenset({instance})
+        owner_uid = apply_lock["host"]["router_operator_uid"]
+        owner_gid = apply_lock["host"]["router_operator_gid"]
+    prefix = f"quarantine-transaction-{phase}-{args.expected_marker_sha256}-"
+    incomplete: list[tuple[Path, str, int]] = []
+    observed_sequences: set[int] = set()
+    for transaction_path in state["quarantine_parent"].glob(f"{prefix}*.json"):
+        attempt_id = transaction_path.name.removeprefix(prefix).removesuffix(".json")
+        if SHA256_RE.fullmatch(attempt_id) is None:
+            raise CommissionError("quarantine attempt filename differs")
+        _assert_real_path(
+            transaction_path, kind="file", owner_uid=0, owner_gid=0, mode=0o400
+        )
+        observed = _read_json(transaction_path, "directory quarantine transaction")
+        sequence = observed.get("attempt_sequence")
+        identity = observed.get("source_identity")
+        if (
+            observed.get("schema_version") != 2
+            or observed.get("kind")
+            != "trading-desk.router-commission.quarantine-transaction"
+            or observed.get("phase") != phase
+            or observed.get("attempt_id") != attempt_id
+            or type(sequence) is not int
+            or sequence < 1
+            or not isinstance(identity, dict)
+            or observed.get("installing_marker_sha256")
+            != args.expected_marker_sha256
+            or attempt_id
+            != _sha256_bytes(
+                _canonical_json(
+                    {
+                        "attempt_sequence": sequence,
+                        "source_identity": identity,
+                    }
+                )
+            )
+        ):
+            raise CommissionError("directory quarantine transaction differs")
+        if sequence in observed_sequences:
+            raise CommissionError("directory quarantine sequence repeats")
+        observed_sequences.add(sequence)
+        receipt_path = state["quarantine_parent"] / (
+            f"quarantine-{phase}-{args.expected_marker_sha256}-{attempt_id}.json"
+        )
+        if not receipt_path.exists() and not receipt_path.is_symlink():
+            incomplete.append((transaction_path, attempt_id, sequence))
+        else:
+            _assert_real_path(
+                receipt_path, kind="file", owner_uid=0, owner_gid=0, mode=0o400
+            )
+            completed_value = _read_json(receipt_path, "directory quarantine receipt")
+            if (
+                completed_value.get("schema_version") != 2
+                or completed_value.get("kind")
+                != "trading-desk.router-commission.quarantine"
+                or completed_value.get("phase") != phase
+                or completed_value.get("attempt_id") != attempt_id
+                or completed_value.get("attempt_sequence") != sequence
+                or completed_value.get("installing_marker_sha256")
+                != args.expected_marker_sha256
+                or completed_value.get("transaction_receipt_sha256")
+                != _sha256_file(transaction_path)
+                or completed_value.get("automatic_delete_performed") is not False
+            ):
+                raise CommissionError("directory quarantine receipt differs")
+            _verify_completed_directory_quarantine(
+                observed,
+                completed_value,
+                transaction_path=transaction_path,
+                attempt_id=attempt_id,
+                attempt_sequence=sequence,
+                marker_digest=args.expected_marker_sha256,
+                phase=phase,
+                allowed_sources=allowed_sources,
+                quarantine_parent=state["quarantine_parent"],
+                state_marker=marker,
+                owner_uid=owner_uid,
+                owner_gid=owner_gid,
+            )
+    if observed_sequences != set(range(1, len(observed_sequences) + 1)):
+        raise CommissionError("directory quarantine sequence differs")
+    if len(incomplete) > 1:
+        raise CommissionError("multiple incomplete quarantine attempts require review")
+    if incomplete:
+        transaction_path, attempt_id, attempt_sequence = incomplete[0]
+        _assert_real_path(
+            transaction_path, kind="file", owner_uid=0, owner_gid=0, mode=0o400
+        )
+        transaction = _read_json(transaction_path, "directory quarantine transaction")
+        transaction_sha256 = _sha256_file(transaction_path)
+    else:
+        if len(candidates) != 1:
+            raise CommissionError("exactly one incomplete directory is required")
+        source = candidates[0]
+        if source.is_symlink() or not source.is_dir():
+            raise CommissionError("incomplete directory is unsafe")
+        source_identity = {
+            "path": str(source),
+            "device": source.stat().st_dev,
+            "inode": source.stat().st_ino,
+        }
+        attempt_sequence = len(observed_sequences) + 1
+        attempt_id = _sha256_bytes(
+            _canonical_json(
+                {
+                    "attempt_sequence": attempt_sequence,
+                    "source_identity": source_identity,
+                }
+            )
+        )
+        transaction_path = state["quarantine_parent"] / (
+            f"{prefix}{attempt_id}.json"
+        )
+        destination_parent = (
+            state["quarantine_parent"] if phase == "vm-create" else source.parent
+        )
+        if source.stat().st_dev != destination_parent.stat().st_dev:
+            raise CommissionError("quarantine destination is on another filesystem")
+        destination = destination_parent / (
+            f".quarantine-{phase}-{source.stat().st_ino}-"
+            f"{args.expected_marker_sha256}-{attempt_id}"
+        )
+        transaction = {
+            "schema_version": 2,
+            "kind": "trading-desk.router-commission.quarantine-transaction",
+            "phase": phase,
+            "attempt_id": attempt_id,
+            "attempt_sequence": attempt_sequence,
+            "source_identity": source_identity,
+            "installing_marker_sha256": args.expected_marker_sha256,
+            "moves": [{"source": str(source), "destination": str(destination)}],
+        }
+        transaction_path, transaction_sha256 = _atomic_receipt(
+            state["quarantine_parent"],
+            transaction_path.name,
+            transaction,
+            uid=0,
+            gid=0,
+        )
+    if (
+        set(transaction)
+        != {
+            "schema_version",
+            "kind",
+            "phase",
+            "attempt_id",
+            "attempt_sequence",
+            "source_identity",
+            "installing_marker_sha256",
+            "moves",
+        }
+        or transaction.get("schema_version") != 2
+        or transaction.get("kind")
+        != "trading-desk.router-commission.quarantine-transaction"
+        or transaction.get("phase") != phase
+        or transaction.get("attempt_id") != attempt_id
+        or transaction.get("attempt_sequence") != attempt_sequence
+        or transaction.get("installing_marker_sha256")
+        != args.expected_marker_sha256
+        or not isinstance(transaction.get("moves"), list)
+        or len(transaction["moves"]) != 1
+    ):
+        raise CommissionError("directory quarantine transaction differs")
+    if attempt_id != _sha256_bytes(
+        _canonical_json(
+            {
+                "attempt_sequence": attempt_sequence,
+                "source_identity": transaction.get("source_identity"),
+            }
+        )
+    ):
+        raise CommissionError("directory quarantine attempt binding differs")
+    move = transaction["moves"][0]
+    if not isinstance(move, dict) or set(move) != {"source", "destination"}:
+        raise CommissionError("directory quarantine move differs")
+    source = Path(move["source"])
+    destination = Path(move["destination"])
+    source_present = source.exists() or source.is_symlink()
+    destination_present = destination.exists() or destination.is_symlink()
+    if source_present == destination_present:
+        raise CommissionError("directory quarantine move is ambiguous")
+    current = source if source_present else destination
+    _assert_real_path(
+        current,
+        kind="directory",
+        owner_uid=owner_uid,
+        owner_gid=owner_gid,
+    )
+    source_identity = transaction.get("source_identity")
+    if source_identity != {
+        "path": str(source),
+        "device": current.stat().st_dev,
+        "inode": current.stat().st_ino,
+    }:
+        raise CommissionError("directory quarantine source identity differs")
+    expected_parent = (
+        state["quarantine_parent"] if phase == "vm-create" else source.parent
+    )
+    expected_destination = expected_parent / (
+        f".quarantine-{phase}-{current.stat().st_ino}-"
+        f"{args.expected_marker_sha256}-{attempt_id}"
+    )
+    if destination != expected_destination:
+        raise CommissionError("directory quarantine destination differs")
+    if phase == "local-image":
+        marker = current / ".INSTALLING.json"
+    assert marker is not None
+    _assert_real_path(marker, kind="file", owner_uid=0, owner_gid=0, mode=0o400)
+    if _sha256_file(marker) != args.expected_marker_sha256:
+        raise CommissionError("directory quarantine marker differs")
+    marker_value = _read_json(marker, "directory quarantine marker")
+    if marker_value.get("kind") != "trading-desk.router-commission.installing" or marker_value.get("phase") != phase:
+        raise CommissionError("directory quarantine marker phase differs")
+    if source_present:
+        _rename_exclusive(source, destination)
+    os.chmod(destination, 0o500)
+    _sync_directory(destination)
+    receipt = {
+        "schema_version": 2,
+        "kind": "trading-desk.router-commission.quarantine",
+        "phase": phase,
+        "attempt_id": attempt_id,
+        "attempt_sequence": attempt_sequence,
+        "installing_marker_sha256": args.expected_marker_sha256,
+        "transaction_receipt_sha256": transaction_sha256,
+        "quarantined_paths": [str(destination)],
+        "automatic_delete_performed": False,
+        "network_changes_performed": False,
+        "vm_created": False,
+        "credentials_touched": False,
+        "venue_writes_authorized": False,
+        "mainnet_authorized": False,
+    }
+    receipt_name = (
+        f"quarantine-{phase}-{args.expected_marker_sha256}-{attempt_id}.json"
+    )
+    path, digest = _atomic_receipt(
+        state["quarantine_parent"], receipt_name, receipt, uid=0, gid=0
+    )
+    print(f"quarantine_receipt={path}")
+    print(f"quarantine_receipt_sha256={digest}")
+    print("automatic_delete_performed=false")
+    return 0
+
+
 def _quarantine_incomplete(args: argparse.Namespace) -> int:
-    apply_lock, _, _ = _locks()
+    apply_lock, commission_lock, _ = _locks()
     if not apply_lock["phases"]["quarantine_apply_enabled"]:
         raise CommissionError("quarantine phase is disabled")
     _assert_root_apply(args, apply_lock)
@@ -2812,6 +5020,8 @@ def _quarantine_incomplete(args: argparse.Namespace) -> int:
     later = {
         "media": ("host-tools", "lima-home", "validate-fill"),
         "host-tools": ("lima-home", "validate-fill"),
+        "local-image": ("vm-create",),
+        "vm-create": (),
     }[phase]
     if any(
         (state["receipt_parent"] / PHASE_RECEIPTS[name]).exists()
@@ -2819,6 +5029,10 @@ def _quarantine_incomplete(args: argparse.Namespace) -> int:
         for name in later
     ):
         raise CommissionError("later phase receipt prevents quarantine")
+    if phase in {"local-image", "vm-create"}:
+        return _quarantine_directory_attempt(
+            args, apply_lock, commission_lock, state, phase
+        )
     transaction_name = (
         f"quarantine-transaction-{phase}-{args.expected_marker_sha256}.json"
     )
@@ -2848,7 +5062,7 @@ def _quarantine_incomplete(args: argparse.Namespace) -> int:
                 for path in state["media_parent"].iterdir()
                 if path.name and not path.name.startswith(".")
             )
-        else:
+        elif phase == "host-tools":
             tools_parent = Path(apply_lock["paths"]["tools_parent"])
             if tools_parent.exists():
                 candidates.extend(tools_parent.glob(".lima-2.2.0.installing-*"))
@@ -2860,26 +5074,47 @@ def _quarantine_incomplete(args: argparse.Namespace) -> int:
                 path = Path(path_text)
                 if path.exists() or path.is_symlink():
                     candidates.append(path)
-        moves: list[dict[str, str]] = []
-        for source in candidates:
-            if source.is_symlink() or not source.is_dir():
-                raise CommissionError(f"quarantine candidate is unsafe: {source}")
-            marker = source / ".INSTALLING.json"
+        elif phase == "local-image":
+            image_parent = Path(apply_lock["paths"]["local_image_parent"])
+            stage = image_parent.parent / (
+                f".{image_parent.name}.installing-"
+                f"{commission_lock['cloud_image']['image_sha256']}"
+            )
+            for path in (stage, image_parent):
+                if path.exists() or path.is_symlink():
+                    candidates.append(path)
+        else:
+            marker = state["state"] / ".vm-create.INSTALLING.json"
             _assert_real_path(
                 marker, kind="file", owner_uid=0, owner_gid=0, mode=0o400
             )
             if _sha256_file(marker) != args.expected_marker_sha256:
+                raise CommissionError("VM-create state marker digest differs")
+            instance = Path(apply_lock["paths"]["lima_home"]) / "trading-desk-router"
+            if instance.exists() or instance.is_symlink():
+                candidates.append(instance)
+        moves: list[dict[str, str]] = []
+        for source in candidates:
+            if source.is_symlink() or not source.is_dir():
+                raise CommissionError(f"quarantine candidate is unsafe: {source}")
+            marker = (
+                state["state"] / ".vm-create.INSTALLING.json"
+                if phase == "vm-create"
+                else source / ".INSTALLING.json"
+            )
+            _assert_real_path(marker, kind="file", owner_uid=0, owner_gid=0, mode=0o400)
+            if _sha256_file(marker) != args.expected_marker_sha256:
                 raise CommissionError(f"quarantine marker digest differs: {source}")
             marker_value = _read_json(marker, "installing marker")
-            if (
-                marker_value.get("kind")
-                != "trading-desk.router-commission.installing"
-                or marker_value.get("phase") != phase
-            ):
+            if marker_value.get("kind") != "trading-desk.router-commission.installing" or marker_value.get("phase") != phase:
                 raise CommissionError(f"quarantine marker phase differs: {source}")
-            destination = source.parent / (
-                f".quarantine-{phase}-{source.stat().st_ino}-"
-                f"{args.expected_marker_sha256}"
+            destination_parent = (
+                state["quarantine_parent"] if phase == "vm-create" else source.parent
+            )
+            if source.stat().st_dev != destination_parent.stat().st_dev:
+                raise CommissionError("quarantine destination is on another filesystem")
+            destination = destination_parent / (
+                f".quarantine-{phase}-{source.stat().st_ino}-{args.expected_marker_sha256}"
             )
             moves.append({"source": str(source), "destination": str(destination)})
         if not moves:
@@ -2900,9 +5135,10 @@ def _quarantine_incomplete(args: argparse.Namespace) -> int:
             raise CommissionError("quarantine move schema differs")
         source = Path(move["source"])
         destination = Path(move["destination"])
-        if source.parent != destination.parent or not destination.name.startswith(
-            f".quarantine-{phase}-"
-        ):
+        expected_parent = (
+            state["quarantine_parent"] if phase == "vm-create" else source.parent
+        )
+        if destination.parent != expected_parent or not destination.name.startswith(f".quarantine-{phase}-"):
             raise CommissionError("quarantine move path differs")
         source_exists = source.exists() or source.is_symlink()
         destination_exists = destination.exists() or destination.is_symlink()
@@ -2911,7 +5147,11 @@ def _quarantine_incomplete(args: argparse.Namespace) -> int:
         current = source if source_exists else destination
         if current.is_symlink() or not current.is_dir():
             raise CommissionError(f"quarantine move endpoint is unsafe: {current}")
-        marker = current / ".INSTALLING.json"
+        marker = (
+            state["state"] / ".vm-create.INSTALLING.json"
+            if phase == "vm-create"
+            else current / ".INSTALLING.json"
+        )
         _assert_real_path(marker, kind="file", owner_uid=0, owner_gid=0, mode=0o400)
         if _sha256_file(marker) != args.expected_marker_sha256:
             raise CommissionError(f"quarantine move marker differs: {current}")
@@ -2994,14 +5234,38 @@ def _parser() -> argparse.ArgumentParser:
     _add_root_receipt_args(validate_fill)
     validate_fill.add_argument("--expected-lima-home-receipt-sha256", required=True)
 
-    subparsers.add_parser("apply-create-vm")
+    management_key = subparsers.add_parser("apply-vm-management-key")
+    _add_root_receipt_args(management_key)
+    management_key.add_argument(
+        "--expected-validate-fill-receipt-sha256", required=True
+    )
+
+    local_image = subparsers.add_parser("apply-local-image")
+    _add_root_receipt_args(local_image)
+    local_image.add_argument(
+        "--expected-validate-fill-receipt-sha256", required=True
+    )
+    local_image.add_argument(
+        "--expected-vm-management-key-receipt-sha256", required=True
+    )
+
+    create_vm = subparsers.add_parser("apply-create-vm")
+    _add_root_receipt_args(create_vm)
+    create_vm.add_argument("--expected-local-image-receipt-sha256", required=True)
     subparsers.add_parser("apply-start-vm")
     subparsers.add_parser("apply-freeze-guest")
     subparsers.add_parser("apply-guest-package")
     quarantine = subparsers.add_parser("quarantine-incomplete")
     _add_root_receipt_args(quarantine)
-    quarantine.add_argument("--incomplete-phase", choices=("media", "host-tools"), required=True)
+    quarantine.add_argument(
+        "--incomplete-phase",
+        choices=("media", "host-tools", "local-image", "vm-create"),
+        required=True,
+    )
     quarantine.add_argument("--expected-marker-sha256", required=True)
+    key_quarantine = subparsers.add_parser("quarantine-vm-management-key")
+    _add_root_receipt_args(key_quarantine)
+    key_quarantine.add_argument("--expected-marker-sha256", required=True)
     return parser
 
 
@@ -3028,8 +5292,12 @@ def main(argv: list[str] | None = None) -> int:
             return _lima_home(args)
         if args.phase == "apply-validate-fill":
             return _validate_fill(args)
+        if args.phase == "apply-vm-management-key":
+            return _vm_management_key(args)
+        if args.phase == "apply-local-image":
+            return _local_image(args)
         if args.phase == "apply-create-vm":
-            return _disabled_phase(args, "vm-create")
+            return _create_vm(args)
         if args.phase == "apply-start-vm":
             return _disabled_phase(args, "vm-start")
         if args.phase == "apply-freeze-guest":
@@ -3038,6 +5306,8 @@ def main(argv: list[str] | None = None) -> int:
             return _disabled_phase(args, "guest-package")
         if args.phase == "quarantine-incomplete":
             return _quarantine_incomplete(args)
+        if args.phase == "quarantine-vm-management-key":
+            return _quarantine_management_key_pending(args)
         raise CommissionError("unknown commissioning phase")
     except (CommissionError, OSError, KeyError, TypeError, ValueError, tarfile.TarError) as error:
         print(f"router_commission_failed: {error}", file=sys.stderr)

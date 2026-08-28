@@ -4,7 +4,7 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 # This artifact is deliberately plan-only. The separate root-sealed launcher
-# owns the enabled credential-free host-preparation phases.
+# owns the enabled venue-credential-free stopped-VM preparation phases.
 if [ "$#" -ne 1 ] || [ "$1" != "--plan" ]; then
     printf '%s\n' 'bootstrap_apply_disabled: only --plan is accepted' >&2
     exit 64
@@ -22,7 +22,10 @@ printf '%s\n' \
     'separate_host_tool_apply_enabled=true' \
     'separate_lima_home_apply_enabled=true' \
     'separate_validate_fill_apply_enabled=true' \
-    'separate_vm_create_apply_enabled=false' \
+    'separate_vm_management_key_apply_enabled=true' \
+    'separate_local_image_apply_enabled=true' \
+    'separate_vm_create_apply_enabled=true' \
+    'separate_vm_start_apply_enabled=false' \
     'separate_guest_mutation_apply_enabled=false' \
     'host_tool_attestation_required=true' \
     'lima_source_url=__PINNED_LIMA_SOURCE_URL__' \

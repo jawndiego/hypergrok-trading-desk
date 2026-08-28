@@ -56,10 +56,11 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   under `deploy/macos/testnet`; none has been applied.
 - A pinned Lima/VZ VM plan exists under `deploy/ubuntu-router/lima`. The signed snapshot/cloud-image inputs, offline host
   attestations and 116-package no-recommends closure are locked with a
-  read-only replay verifier. Its schema-v2 root launcher enables only
-  credential-free runtime qualification, media/host-tool preparation, exact
-  UID-454 Lima-home adoption and `validate --fill`; VM create/start, guest
-  installation and every network/key phase remain disabled.
+  read-only replay verifier. Its schema-v3 root launcher enables only
+  venue-credential-free runtime qualification, media/host-tool preparation,
+  exact UID-454 Lima-home adoption, `validate --fill`, a dedicated VM-management
+  SSH key, local-image installation and stopped-VM creation; VM start, guest
+  installation and every network/router-key phase remain disabled.
 - A TESTNET-only proposal-v2 model binds the staging document, ticket,
   protected plan, grant, displayed economics, account identity, policy,
   account/market snapshots, broker session and expiry. A separate control
@@ -118,8 +119,9 @@ their owning machines because their derived public keys are renderer inputs.
 6. **Ubuntu router lab.** First render and verify the pinned Lima/VZ VM plan,
    replay the immutable public-input lock, qualify the sealed runtime, seal the
    public media, install the inert host tools, adopt the exact UID-454 Lima
-   home and retain `validate --fill`. Then resolve the local-image,
-   socket_vmnet activation and first-boot APT blockers before provisioning any VM.
+   home, retain `validate --fill`, create its dedicated management SSH key,
+   install the local image and create the exact stopped VM. Then resolve
+   socket_vmnet activation and first-boot APT blockers before starting it.
    Pass guest preflight before generating the VM and Mac WireGuard private keys
    on their owning machines, derive and
    attest the public keys, then render and qualify `local_nat_lab` using

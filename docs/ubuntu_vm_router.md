@@ -1,9 +1,9 @@
 # Local Ubuntu VM router for TESTNET qualification
 
 Status: **repository-rendered guest configuration plus a pinned Lima/VZ VM
-bundle; immutable public-input replay and credential-free root host preparation
-through `limactl validate --fill` are implemented but remain unapplied on a new
-host. VM creation/start, guest mutation, socket_vmnet activation, router/network
+bundle; immutable public-input replay and venue-credential-free preparation
+through creation of one stopped VM are implemented but remain unapplied on a
+new host. VM start, guest mutation, socket_vmnet activation, router/network
 changes, live health collection and boot orchestration remain disabled and
 unqualified; this is not VPN-qualified or a capital security boundary**.
 
@@ -122,8 +122,8 @@ limactl validate /absolute/new/router-vm-plan/lima.yaml
 ```
 
 The renderer itself is nonmutating and its output contains no private key. The
-separate bundled commissioner enables only credential-free host preparation;
-VM lifecycle and network apply remain disabled. The VM plan disables host mounts,
+separate bundled commissioner enables only venue-credential-free preparation;
+VM start and network apply remain disabled. The VM plan disables host mounts,
 containerd, Rosetta, host DNS/proxy propagation, SSH-agent forwarding and port
 forwards. Package-lock schema v3 binds a separate commission lock containing:
 
@@ -168,11 +168,11 @@ dependency ambiguity and any package-transaction widening. `gh` uses only the
 embedded offline bundles and trusted root; credential/token variables and
 ambient config/cache locations are not passed to it.
 
-## Root host preparation — credential-free phases enabled
+## Venue-credential-free stopped-VM preparation
 
 The rendered VM bundle includes `commission-apply.py`, its root-only
 `commission-apply-launcher.sh`, dormant `commission-guest.py`, and the exact
-schema-v2 `commission-apply-lock.json`. Running the Python commissioners with no
+schema-v3 `commission-apply-lock.json`. Running the Python commissioners with no
 argument prints their plans. The lock separates UID 501 public-evidence replay
 from the disabled `trading-router-operator` UID/GID 454 that exclusively owns
 writable Lima state. The enabled host-only sequence is:
@@ -208,6 +208,23 @@ writable Lima state. The enabled host-only sequence is:
    retains the exact effective configuration digest. The plan fixes
    `user.comment: "Trading Desk Router Operator"`; Lima therefore cannot fill
    this field from the invoking host account's mutable GECOS value.
+7. `apply-vm-management-key` uses the pinned Apple `ssh-keygen` as UID 454 to
+   create only Lima's dedicated ED25519 management key. The private key remains
+   mode `0600` inside `_config`, is fully synced before promotion, never prints,
+   and is explicitly distinct from venue, Keychain and WireGuard credentials.
+8. `apply-local-image` copies the exact signed-image payload from sealed media
+   to a root-owned mode-`0444` local path after headroom checks, retires (without
+   deleting) the obsolete empty `LIMA_HOME/home`, and validates the separate
+   manifest-bound local-image plan.
+9. `apply-create-vm` runs only `limactl create --tty=false
+   --name=trading-desk-router -` as UID 454. It pins the deterministic raw-disk
+   hash, stored plan, cloud config, Lima version and VZ identifier; verifies the
+   management key inode did not change; and requires stable interfaces/default
+   routes with no VM or socket_vmnet process before and after. It never starts
+   the VM. The receipt explicitly records `ready_to_start=false`: the stock
+   cloud config still has an unlocked-password/admin model, so start remains
+   blocked until the separately reviewed offline pre-frozen image and locked
+   guest-account bootstrap replace it.
 
 The launcher proves its canonical root-owned/no-ACL controller chain and checks
 the sealed runtime's owner, write bits, ACLs, symlink containment, interpreter
@@ -229,13 +246,13 @@ manifest-bound plan to `limactl` through `/dev/fd/0`. The validate receipt binds
 both the earlier commissioning manifest and the replacement validation
 controller/plan hashes.
 
-The stop line remains before VM creation. The locked YAML still uses an HTTPS
-image URL instead of a reviewed local-image import, socket_vmnet sudoers and
-daemon activation are absent, and a first boot could race APT timers before the
-complete 663-package baseline is frozen. VM create/start, guest
+The stop line remains before VM start. socket_vmnet sudoers and daemon
+activation are absent, and a first boot could race APT timers before the
+complete 663-package baseline is frozen. VM start, guest
 freeze/simulation/install and router activation therefore remain literal false
-gates. No host route, PF rule, tunnel, router key, credential or venue state is
-changed by the enabled host-preparation phases.
+gates. No host route, PF rule, tunnel, router/WireGuard key, venue credential or
+venue state is changed; only the explicitly named local VM-management SSH key
+is created.
 
 ## VM network contract
 
@@ -294,10 +311,11 @@ The current host was updated from macOS 15.3.1 to 26.6.2 build 25G83 on
 requalified. Repeat after any later OS/runtime change. Apple publishes current
 security releases at <https://support.apple.com/100100>.
 
-Only the bounded credential-free root host-preparation sequence is authorized:
+Only the bounded venue-credential-free preparation sequence is authorized:
 runtime qualification, public-media sealing, inert host-tool installation,
-UID-454 Lima-home initialization and `validate --fill`. VM creation/start,
-guest-package, network and key commands remain unauthorized. The legacy unpinned
+UID-454 Lima-home initialization, `validate --fill`, one explicit
+VM-management SSH key, local-image installation and stopped-VM creation. VM
+start, guest-package, network and router-key commands remain unauthorized. The legacy unpinned
 `apt-get update`, unversioned package install and immediate `wg genkey`
 sequence has been removed because it bypassed the reviewed locks.
 
@@ -455,14 +473,15 @@ not a host kill switch or VPN qualification.
 Today the safe sequence stops after replaying the immutable public inputs,
 qualifying the sealed runtime, sealing media, installing inert Lima/socket_vmnet
 files, adopting the exact empty UID-454 `LIMA_HOME`, and retaining
-`limactl validate --fill`. These phases do not create or start a VM, install a
-sudoers rule, start socket_vmnet, mutate guest packages, activate
+`limactl validate --fill`; it then creates the dedicated management SSH key,
+installs the exact local image, validates the local plan and creates one stopped
+VM. These phases do not start a VM, install a sudoers rule, start socket_vmnet,
+mutate guest packages, activate
 nftables/WireGuard or change Mac routes.
 
 The remaining blockers are intentional: socket_vmnet sudoers/daemon activation
-is absent; the verified image has no locked local-image create configuration;
-and there is no race-free first-boot APT freeze or console simulation
-transcript. VM create/start, guest package mutation and every network/key phase
+is absent and there is no race-free first-boot APT freeze or console simulation
+transcript. VM start, guest package mutation and every network/router-key phase
 remain disabled.
 
 After a later promotion, the shortest continued sequence is: bind the verified

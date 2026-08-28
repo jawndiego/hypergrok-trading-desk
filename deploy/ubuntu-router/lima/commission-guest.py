@@ -205,8 +205,8 @@ def _locks(*, plan_only: bool = False) -> tuple[dict[str, Any], dict[str, Any]]:
     commission_path = SCRIPT_DIR / "commission-lock.json" if plan_only else COMMISSION_LOCK_PATH
     apply_lock = _read_json(apply_path, "guest apply lock")
     commission_lock = _read_json(commission_path, "guest commission lock")
-    if apply_lock.get("schema_version") != 2 or apply_lock.get("review_status") != (
-        "credential_free_host_preparation_enabled_vm_guest_network_disabled"
+    if apply_lock.get("schema_version") != 3 or apply_lock.get("review_status") != (
+        "venue_credential_free_create_only_enabled_vm_start_guest_network_disabled"
     ):
         raise GuestCommissionError("guest apply lock status differs")
     if any(apply_lock.get("stop_line", {}).values()):

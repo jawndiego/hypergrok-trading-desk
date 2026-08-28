@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stdout
 import hashlib
 import io
 import importlib.util
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import stat
 import subprocess
@@ -123,6 +125,32 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
                 "--expected-lima-home-receipt-sha256",
                 "5" * 64,
             ],
+            "_vm_management_key": [
+                "apply-vm-management-key",
+                *common,
+                "--expected-validate-fill-receipt-sha256",
+                "6" * 64,
+            ],
+            "_local_image": [
+                "apply-local-image",
+                *common,
+                "--expected-validate-fill-receipt-sha256",
+                "6" * 64,
+                "--expected-vm-management-key-receipt-sha256",
+                "7" * 64,
+            ],
+            "_create_vm": [
+                "apply-create-vm",
+                *common,
+                "--expected-local-image-receipt-sha256",
+                "8" * 64,
+            ],
+            "_quarantine_management_key_pending": [
+                "quarantine-vm-management-key",
+                *common,
+                "--expected-marker-sha256",
+                "9" * 64,
+            ],
         }
         for index, (function_name, arguments) in enumerate(cases.items(), start=10):
             selected = mock.Mock(return_value=index)
@@ -228,6 +256,546 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
                         controller,
                         commissioned_networks_sha256="b" * 64,
                     )
+
+    def test_create_only_network_snapshot_ignores_neighbor_timer_churn(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_network_snapshot_test"
+        )
+        canonical = namespace["_canonical_network_snapshot_output"]
+        before = (
+            "Routing tables\nInternet:\n"
+            "Destination Gateway Flags Netif Expire\n"
+            "default 192.168.1.1 UGScg en1\n"
+            "192.168.1.25 aa:bb:cc:dd:ee:ff UHLWI en1 100\n"
+        )
+        after = before.replace(" 100\n", " 42\n")
+        self.assertEqual(
+            canonical("ipv4_routes", before), canonical("ipv4_routes", after)
+        )
+        changed_default = after.replace("192.168.1.1", "192.168.1.254", 1)
+        self.assertNotEqual(
+            canonical("ipv4_routes", before),
+            canonical("ipv4_routes", changed_default),
+        )
+        self.assertEqual(
+            canonical("interfaces", "en1 lo0 utun0\n"),
+            canonical("interfaces", "utun0 en1 lo0\n"),
+        )
+        self.assertNotEqual(
+            canonical("interfaces", "en1 lo0\n"),
+            canonical("interfaces", "en1 lo0 bridge99\n"),
+        )
+
+    def test_qemu_img_injection_is_rejected_before_create(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_qemu_absence_test"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment = {"PATH": str(root)}
+            namespace["_assert_qemu_img_absent"](environment)
+            injected = root / "qemu-img"
+            injected.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            injected.chmod(0o755)
+            with self.assertRaisesRegex(namespace["CommissionError"], "qemu-img"):
+                namespace["_assert_qemu_img_absent"](environment)
+
+    def test_created_disk_requires_exact_deterministic_content(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_disk_content_test"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            disk = Path(directory) / "disk"
+            expected = bytes(range(256)) * 32
+            disk.write_bytes(expected)
+            digest = hashlib.sha256(expected).hexdigest()
+            namespace["_verify_created_disk_content"](
+                disk, expected_size=len(expected), expected_sha256=digest
+            )
+            disk.write_bytes(expected[:2048] + bytes(2048) + expected[4096:])
+            with self.assertRaisesRegex(namespace["CommissionError"], "content"):
+                namespace["_verify_created_disk_content"](
+                    disk, expected_size=len(expected), expected_sha256=digest
+                )
+            disk.write_bytes(expected[:-1])
+            with self.assertRaisesRegex(namespace["CommissionError"], "allocation"):
+                namespace["_verify_created_disk_content"](
+                    disk, expected_size=len(expected), expected_sha256=digest
+                )
+            disk.write_bytes(bytes(len(expected)))
+            with self.assertRaisesRegex(namespace["CommissionError"], "content"):
+                namespace["_verify_created_disk_content"](
+                    disk, expected_size=len(expected), expected_sha256=digest
+                )
+
+    def test_management_key_pair_is_fullsynced_before_promotion(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_key_fsync_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        apply_lock["host"]["router_operator_uid"] = os.getuid()
+        apply_lock["host"]["router_operator_gid"] = os.getgid()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            private = root / "private"
+            public = root / "public"
+            private.write_bytes(b"private")
+            private.chmod(0o600)
+            public.write_bytes(b"public")
+            public.chmod(0o644)
+            calls: list[int] = []
+            with (
+                mock.patch.dict(
+                    namespace,
+                    {
+                        "_full_fsync_fd": lambda descriptor: calls.append(descriptor),
+                        "_sync_directory": lambda _path: None,
+                        "_no_named_acl": lambda _path: None,
+                    },
+                ),
+            ):
+                namespace["_fullsync_vm_management_key_pair"](
+                    apply_lock, private, public
+                )
+            self.assertEqual(2, len(calls))
+            before = (private.read_bytes(), public.read_bytes())
+            with (
+                mock.patch.dict(
+                    namespace,
+                    {
+                        "_full_fsync_fd": mock.Mock(
+                            side_effect=OSError("injected fullsync failure")
+                        ),
+                        "_sync_directory": lambda _path: None,
+                        "_no_named_acl": lambda _path: None,
+                    },
+                ),
+                self.assertRaises(OSError),
+            ):
+                namespace["_fullsync_vm_management_key_pair"](
+                    apply_lock, private, public
+                )
+            self.assertEqual(before, (private.read_bytes(), public.read_bytes()))
+
+    def test_local_image_tree_rejects_partial_or_changed_payload(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_local_image_tree_test"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory).resolve()
+            image = parent / "image.img"
+            marker = parent / ".INSTALLING.json"
+            image.write_bytes(b"exact-image")
+            image.chmod(0o444)
+            marker.write_bytes(b"marker\n")
+            marker.chmod(0o400)
+            parent.chmod(0o555)
+
+            def assert_path(path: Path, *, kind: str, mode: int | None = None, **_kwargs):
+                metadata = path.lstat()
+                self.assertEqual(kind == "directory", stat.S_ISDIR(metadata.st_mode))
+                if mode is not None:
+                    self.assertEqual(mode, stat.S_IMODE(metadata.st_mode))
+                return metadata
+
+            with mock.patch.dict(namespace, {"_assert_real_path": assert_path}):
+                namespace["_verify_local_image_tree"](
+                    parent,
+                    image,
+                    marker=b"marker\n",
+                    expected_sha256=hashlib.sha256(b"exact-image").hexdigest(),
+                    expected_size=len(b"exact-image"),
+                )
+                image.chmod(0o644)
+                image.write_bytes(b"partial")
+                image.chmod(0o444)
+                with self.assertRaises(namespace["CommissionError"]):
+                    namespace["_verify_local_image_tree"](
+                        parent,
+                        image,
+                        marker=b"marker\n",
+                        expected_sha256=hashlib.sha256(b"exact-image").hexdigest(),
+                        expected_size=len(b"exact-image"),
+                    )
+
+    def test_resumed_locked_copy_reestablishes_full_durability(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_resumed_copy_test"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "source"
+            destination = root / "destination"
+            content = b"already-complete"
+            source.write_bytes(content)
+            destination.write_bytes(content)
+            destination.chmod(0o400)
+            fullsync_calls: list[int] = []
+
+            def assert_path(path: Path, *, mode: int | None = None, **_kwargs):
+                metadata = path.lstat()
+                if mode is not None:
+                    self.assertEqual(mode, stat.S_IMODE(metadata.st_mode))
+                return metadata
+
+            with mock.patch.dict(
+                namespace,
+                {
+                    "_assert_real_path": assert_path,
+                    "_full_fsync_fd": lambda descriptor: fullsync_calls.append(
+                        descriptor
+                    ),
+                    "_sync_directory": lambda path: self.assertEqual(root, path),
+                },
+            ):
+                namespace["_copy_locked_file"](
+                    source,
+                    destination,
+                    hashlib.sha256(content).hexdigest(),
+                )
+            self.assertEqual(1, len(fullsync_calls))
+            before = destination.read_bytes()
+            with (
+                mock.patch.dict(
+                    namespace,
+                    {
+                        "_assert_real_path": assert_path,
+                        "_full_fsync_fd": mock.Mock(
+                            side_effect=OSError("injected fullsync failure")
+                        ),
+                        "_sync_directory": lambda _path: None,
+                    },
+                ),
+                self.assertRaises(OSError),
+            ):
+                namespace["_copy_locked_file"](
+                    source,
+                    destination,
+                    hashlib.sha256(content).hexdigest(),
+                )
+            self.assertEqual(before, destination.read_bytes())
+
+    def test_created_vm_binds_plan_cloud_identity_and_vz_identifier(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_created_vm_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        vm_spec = example_spec()
+        apply_lock["host"]["router_operator_uid"] = os.getuid()
+        apply_lock["host"]["router_operator_gid"] = os.getgid()
+        with tempfile.TemporaryDirectory() as directory:
+            lima_home = Path(directory).resolve()
+            apply_lock["paths"]["lima_home"] = str(lima_home)
+            config = lima_home / "_config"
+            instance = lima_home / "trading-desk-router"
+            config.mkdir(mode=0o700)
+            instance.mkdir(mode=0o700)
+            networks = config / "networks.yaml"
+            networks.write_bytes(b"network")
+            networks.chmod(0o600)
+            private = config / "user"
+            public = config / "user.pub"
+            private.write_bytes(b"private")
+            private.chmod(0o600)
+            public_text = "ssh-ed25519 AAAATEST lima\n"
+            public.write_text(public_text, encoding="ascii")
+            public.chmod(0o644)
+            apply_lock["vm_management_ssh"]["private_key_path"] = str(private)
+            apply_lock["vm_management_ssh"]["public_key_path"] = str(public)
+            plan = b"local-plan\n"
+            cloud_template = (
+                b'#cloud-config\n  - name: "routeradmin"\n'
+                b'    gecos: "Trading Desk Router Operator"\n'
+                b"    key: @@VM_MANAGEMENT_PUBLIC_KEY@@\n"
+                b"  for pair in @@WAN_MAC@@=eth0 02:74:64:00:00:01=td-ingress; do\n"
+            )
+            cloud = cloud_template.replace(
+                b"@@VM_MANAGEMENT_PUBLIC_KEY@@",
+                public_text.strip().encode("ascii"),
+            ).replace(b"@@WAN_MAC@@", b"52:55:55:12:34:56")
+            files = {
+                "cloud-config.yaml": cloud,
+                "disk": b"disk",
+                "lima-version": b"v2.2.0",
+                "lima.yaml": plan,
+                "vz-identifier": plistlib.dumps(
+                    {"UUID": b"1" * 16}, fmt=plistlib.FMT_BINARY
+                ),
+            }
+            modes = {
+                "cloud-config.yaml": 0o444,
+                "disk": 0o600,
+                "lima-version": 0o444,
+                "lima.yaml": 0o644,
+                "vz-identifier": 0o644,
+            }
+            for name, content in files.items():
+                path = instance / name
+                path.write_bytes(content)
+                path.chmod(modes[name])
+            private_identity = namespace["_vm_management_key_identity"](private)
+            key_receipt = {
+                "private_device": private_identity[0],
+                "private_inode": private_identity[1],
+                "public_sha256": hashlib.sha256(public.read_bytes()).hexdigest(),
+            }
+            patches = {
+                "_verify_vm_management_key_pair": lambda *_args: {
+                    "private_identity": private_identity,
+                    "private_device": private_identity[0],
+                    "private_inode": private_identity[1],
+                    "public_sha256": key_receipt["public_sha256"],
+                },
+                "_verify_created_disk_content": lambda *_args, **_kwargs: (
+                    512,
+                    "d" * 64,
+                ),
+                "_full_fsync_fd": lambda _descriptor: None,
+                "_sync_directory": lambda _path: None,
+                "_no_named_acl": lambda _path: None,
+            }
+            with mock.patch.dict(namespace, patches):
+                evidence = namespace["_verify_created_vm"](
+                    apply_lock,
+                    vm_spec,
+                    plan_bytes=plan,
+                    cloud_template=cloud_template,
+                    key_receipt=key_receipt,
+                    networks_sha256=hashlib.sha256(b"network").hexdigest(),
+                )
+                self.assertEqual(
+                    hashlib.sha256(files["cloud-config.yaml"]).hexdigest(),
+                    evidence["cloud_config_sha256"],
+                )
+                (instance / "lima.yaml").write_bytes(b"changed\n")
+                with self.assertRaisesRegex(
+                    namespace["CommissionError"], "plan differs"
+                ):
+                    namespace["_verify_created_vm"](
+                        apply_lock,
+                        vm_spec,
+                        plan_bytes=plan,
+                        cloud_template=cloud_template,
+                        key_receipt=key_receipt,
+                        networks_sha256=hashlib.sha256(b"network").hexdigest(),
+                    )
+                (instance / "lima.yaml").write_bytes(plan)
+                (instance / "cloud-config.yaml").chmod(0o644)
+                (instance / "cloud-config.yaml").write_bytes(
+                    cloud + b"runcmd: [malicious]\n"
+                )
+                (instance / "cloud-config.yaml").chmod(0o444)
+                with self.assertRaisesRegex(
+                    namespace["CommissionError"], "cloud-config content"
+                ):
+                    namespace["_verify_created_vm"](
+                        apply_lock,
+                        vm_spec,
+                        plan_bytes=plan,
+                        cloud_template=cloud_template,
+                        key_receipt=key_receipt,
+                        networks_sha256=hashlib.sha256(b"network").hexdigest(),
+                    )
+
+    def test_create_phase_invokes_create_only_and_never_start(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_create_only_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        commission_lock = json.loads(
+            (LIMA_ROOT / "commission-lock.json").read_text(encoding="utf-8")
+        )
+        vm_spec = example_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            state_root = root / "state"
+            receipt_parent = root / "receipts"
+            quarantine = root / "quarantine"
+            lima_home = root / "lima"
+            for path in (state_root, receipt_parent, quarantine, lima_home):
+                path.mkdir(mode=0o700)
+            image = root / "image.img"
+            image.write_bytes(b"image")
+            image.chmod(0o444)
+            apply_lock["paths"]["local_image"] = str(image)
+            apply_lock["paths"]["lima_home"] = str(lima_home)
+            apply_lock["paths"]["operator_home"] = str(lima_home)
+            plan = b"local create plan\n"
+            plan_sha256 = hashlib.sha256(plan).hexdigest()
+            cloud_template = b"cloud-template"
+            image_sha256 = commission_lock["cloud_image"]["image_sha256"]
+            local_receipt = {
+                "vm_management_key_receipt_sha256": "k" * 64,
+                "router_identity_receipt": {"sha256": "i" * 64},
+                "local_image_device": image.stat().st_dev,
+                "local_image_inode": image.stat().st_ino,
+                "local_image_size_bytes": image.stat().st_size,
+                "local_image_sha256": image_sha256,
+                "local_create_plan_sha256": plan_sha256,
+                "local_create_effective_config_sha256": vm_spec["lima_home"][
+                    "local_create_effective_config_sha256"
+                ],
+                "validate_fill_receipt_sha256": "v" * 64,
+            }
+            key_receipt = {
+                "private_device": 1,
+                "private_inode": 2,
+                "public_sha256": "p" * 64,
+            }
+            calls: list[list[str]] = []
+
+            def run(command, **_kwargs):
+                calls.append([str(value) for value in command])
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+            evidence = {
+                "instance_path": str(lima_home / "trading-desk-router"),
+                "instance_device": 10,
+                "instance_inode": 11,
+                "disk_logical_bytes": 20 * 1024**3,
+                "disk_allocated_bytes": 2 * 1024**3,
+                "disk_sha256": "d" * 64,
+                "stored_plan_sha256": plan_sha256,
+                "lima_version_sha256": "l" * 64,
+                "cloud_config_sha256": "c" * 64,
+                "vz_identifier_sha256": "z" * 64,
+                "vz_identifier_uuid": "1" * 32,
+                "wan_mac": "52:55:55:12:34:56",
+                "management_private_identity": (1, 2),
+            }
+
+            def write(path: Path, content: bytes, **_kwargs) -> None:
+                if path.exists():
+                    self.assertEqual(content, path.read_bytes())
+                else:
+                    path.write_bytes(content)
+                    path.chmod(0o400)
+
+            def receipt(_parent, name, _value, **_kwargs):
+                path = receipt_parent / name
+                path.write_bytes(b"receipt")
+                return path, "r" * 64
+
+            patches = {
+                "_locks": lambda: (apply_lock, commission_lock, vm_spec),
+                "_assert_root_apply": lambda *_args: "runtime",
+                "_router_operator_identity": lambda _lock: {"sha256": "i" * 64},
+                "_initialize_state": lambda _lock: {
+                    "state": state_root,
+                    "receipt_parent": receipt_parent,
+                    "quarantine_parent": quarantine,
+                },
+                "_acquire_state_lock": lambda _state: 1,
+                "_read_local_image_receipt": lambda *_args: local_receipt,
+                "_read_vm_management_key_receipt": lambda *_args: key_receipt,
+                "_root_phase_receipt": lambda _state, phase, _digest: (
+                    {"lima_home_receipt_sha256": "h" * 64}
+                    if phase == "validate-fill"
+                    else {"networks_yaml_sha256": "n" * 64}
+                ),
+                "_assert_real_path": lambda path, **_kwargs: path.stat(),
+                "_sha256_file": lambda path: (
+                    image_sha256 if path == image else hashlib.sha256(path.read_bytes()).hexdigest()
+                ),
+                "_compatible_validation_plan": lambda *_args, **_kwargs: (
+                    plan,
+                    plan_sha256,
+                ),
+                "_read_json": lambda *_args: {
+                    "files": {
+                        "cloud-config-create.template": hashlib.sha256(
+                            cloud_template
+                        ).hexdigest()
+                    }
+                },
+                "_read_fd_bound_file": lambda *_args, **_kwargs: cloud_template,
+                "_assert_no_vm_or_socket_vmnet_process": lambda: None,
+                "_verified_installed_limactl": lambda *_args: Path(
+                    "/opt/trading-desk-router-tools/lima-2.2.0/bin/limactl"
+                ),
+                "_assert_qemu_img_absent": lambda _environment: None,
+                "_network_state_snapshot": lambda: {"stable": "1"},
+                "_free_bytes": lambda _path: 100 * 1024**3,
+                "_write_exact_file": write,
+                "_verify_retained_vm_create_quarantine": lambda *_args, **_kwargs: (),
+                "_verify_vm_management_key_pair": lambda *_args: {
+                    "private_identity": (1, 2)
+                },
+                "_verify_created_vm": lambda *_args, **_kwargs: evidence,
+                "_verify_create_only_status": lambda *_args, **_kwargs: "s" * 64,
+                "_drop_preexec": lambda *_args: None,
+                "_sync_directory": lambda _path: None,
+                "_atomic_receipt": receipt,
+            }
+            with (
+                mock.patch.dict(namespace, patches),
+                mock.patch.object(namespace["subprocess"], "run", side_effect=run),
+                redirect_stdout(io.StringIO()),
+            ):
+                result = namespace["_create_vm"](
+                    SimpleNamespace(
+                        expected_local_image_receipt_sha256="x" * 64,
+                        expected_controller_manifest_sha256="m" * 64,
+                    )
+                )
+            self.assertEqual(0, result)
+            self.assertEqual(1, len(calls))
+            self.assertEqual(
+                [
+                    "/opt/trading-desk-router-tools/lima-2.2.0/bin/limactl",
+                    "create",
+                    "--tty=false",
+                    "--name=trading-desk-router",
+                    "-",
+                ],
+                calls[0],
+            )
+            self.assertNotIn("start", calls[0])
+
+    def test_create_status_requires_one_exact_stopped_instance(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_create_status_test"
+        )
+        instance = Path("/private/var/db/trading-desk-lima/trading-desk-router")
+        value = {
+            "name": "trading-desk-router",
+            "status": "Stopped",
+            "vmType": "vz",
+            "arch": "aarch64",
+            "dir": str(instance),
+            "protected": False,
+        }
+        raw = (json.dumps(value, separators=(",", ":")) + "\n").encode()
+        observed = namespace["_parse_create_only_status"](
+            raw,
+            instance_name="trading-desk-router",
+            instance_path=instance,
+        )
+        self.assertRegex(observed, r"^[0-9a-f]{64}$")
+        variants = (
+            {**value, "status": "Running"},
+            {**value, "status": "Unknown"},
+            {**value, "name": "other"},
+        )
+        for variant in variants:
+            with self.assertRaises(namespace["CommissionError"]):
+                namespace["_parse_create_only_status"](
+                    (json.dumps(variant) + "\n").encode(),
+                    instance_name="trading-desk-router",
+                    instance_path=instance,
+                )
+        with self.assertRaisesRegex(namespace["CommissionError"], "singleton"):
+            namespace["_parse_create_only_status"](
+                raw + raw,
+                instance_name="trading-desk-router",
+                instance_path=instance,
+            )
 
     def test_router_identity_receipt_is_exact_and_live_bound(self) -> None:
         namespace = load_script_namespace(
@@ -590,6 +1158,560 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
             self.assertTrue(retained.is_dir())
             self.assertFalse(source.exists())
 
+    def test_receipt_bound_vm_create_quarantine_remains_retry_eligible(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_vm_quarantine_retry_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        apply_lock["host"]["router_operator_uid"] = os.getuid()
+        apply_lock["host"]["router_operator_gid"] = os.getgid()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            state_root = root / "state"
+            quarantine = root / "quarantine"
+            lima_home = root / "lima"
+            for path in (state_root, quarantine, lima_home):
+                path.mkdir(mode=0o700)
+            source = lima_home / "trading-desk-router"
+            marker = state_root / ".vm-create.INSTALLING.json"
+            write_json(
+                marker,
+                {
+                    "schema_version": 1,
+                    "kind": "trading-desk.router-commission.installing",
+                    "phase": "vm-create",
+                },
+            )
+            marker.chmod(0o400)
+            marker_digest = hashlib.sha256(marker.read_bytes()).hexdigest()
+            temporary = quarantine / ".retained"
+            temporary.mkdir(mode=0o700)
+            inode = temporary.stat().st_ino
+            source_identity = {
+                "path": str(source),
+                "device": temporary.stat().st_dev,
+                "inode": inode,
+            }
+            attempt_sequence = 1
+            attempt_id = hashlib.sha256(
+                (
+                    json.dumps(
+                        {
+                            "attempt_sequence": attempt_sequence,
+                            "source_identity": source_identity,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode()
+            ).hexdigest()
+            retained = quarantine / (
+                f".quarantine-vm-create-{inode}-{marker_digest}-{attempt_id}"
+            )
+            temporary.rename(retained)
+            retained.chmod(0o500)
+            transaction = {
+                "schema_version": 2,
+                "kind": "trading-desk.router-commission.quarantine-transaction",
+                "phase": "vm-create",
+                "attempt_id": attempt_id,
+                "attempt_sequence": attempt_sequence,
+                "source_identity": source_identity,
+                "installing_marker_sha256": marker_digest,
+                "moves": [{"source": str(source), "destination": str(retained)}],
+            }
+            transaction_path = quarantine / (
+                f"quarantine-transaction-vm-create-{marker_digest}-{attempt_id}.json"
+            )
+            write_json(transaction_path, transaction)
+            transaction_path.chmod(0o400)
+            receipt = {
+                "schema_version": 2,
+                "kind": "trading-desk.router-commission.quarantine",
+                "phase": "vm-create",
+                "attempt_id": attempt_id,
+                "attempt_sequence": attempt_sequence,
+                "installing_marker_sha256": marker_digest,
+                "transaction_receipt_sha256": hashlib.sha256(
+                    transaction_path.read_bytes()
+                ).hexdigest(),
+                "quarantined_paths": [str(retained)],
+                "automatic_delete_performed": False,
+                "network_changes_performed": False,
+                "vm_created": False,
+                "credentials_touched": False,
+                "venue_writes_authorized": False,
+                "mainnet_authorized": False,
+            }
+            receipt_path = quarantine / (
+                f"quarantine-vm-create-{marker_digest}-{attempt_id}.json"
+            )
+            write_json(receipt_path, receipt)
+            receipt_path.chmod(0o400)
+
+            second_temporary = quarantine / ".second-retained"
+            second_temporary.mkdir(mode=0o700)
+            second_inode = second_temporary.stat().st_ino
+            second_identity = {
+                "path": str(source),
+                "device": second_temporary.stat().st_dev,
+                "inode": second_inode,
+            }
+            second_sequence = 2
+            second_attempt = hashlib.sha256(
+                (
+                    json.dumps(
+                        {
+                            "attempt_sequence": second_sequence,
+                            "source_identity": second_identity,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode()
+            ).hexdigest()
+            second_retained = quarantine / (
+                f".quarantine-vm-create-{second_inode}-{marker_digest}-"
+                f"{second_attempt}"
+            )
+            second_temporary.rename(second_retained)
+            second_retained.chmod(0o500)
+            second_transaction = {
+                "schema_version": 2,
+                "kind": "trading-desk.router-commission.quarantine-transaction",
+                "phase": "vm-create",
+                "attempt_id": second_attempt,
+                "attempt_sequence": second_sequence,
+                "source_identity": second_identity,
+                "installing_marker_sha256": marker_digest,
+                "moves": [
+                    {"source": str(source), "destination": str(second_retained)}
+                ],
+            }
+            second_transaction_path = quarantine / (
+                f"quarantine-transaction-vm-create-{marker_digest}-"
+                f"{second_attempt}.json"
+            )
+            write_json(second_transaction_path, second_transaction)
+            second_transaction_path.chmod(0o400)
+            second_receipt = {
+                "schema_version": 2,
+                "kind": "trading-desk.router-commission.quarantine",
+                "phase": "vm-create",
+                "attempt_id": second_attempt,
+                "attempt_sequence": second_sequence,
+                "installing_marker_sha256": marker_digest,
+                "transaction_receipt_sha256": hashlib.sha256(
+                    second_transaction_path.read_bytes()
+                ).hexdigest(),
+                "quarantined_paths": [str(second_retained)],
+                "automatic_delete_performed": False,
+                "network_changes_performed": False,
+                "vm_created": False,
+                "credentials_touched": False,
+                "venue_writes_authorized": False,
+                "mainnet_authorized": False,
+            }
+            second_receipt_path = quarantine / (
+                f"quarantine-vm-create-{marker_digest}-{second_attempt}.json"
+            )
+            write_json(second_receipt_path, second_receipt)
+            second_receipt_path.chmod(0o400)
+
+            def assert_path(path: Path, *, kind: str, mode: int | None = None, **_kwargs):
+                metadata = path.lstat()
+                self.assertEqual(kind == "directory", stat.S_ISDIR(metadata.st_mode))
+                if mode is not None:
+                    self.assertEqual(mode, stat.S_IMODE(metadata.st_mode))
+                return metadata
+
+            with mock.patch.dict(namespace, {"_assert_real_path": assert_path}):
+                observed = namespace["_verify_retained_vm_create_quarantine"](
+                    {"state": state_root, "quarantine_parent": quarantine},
+                    apply_lock,
+                    marker_digest=marker_digest,
+                    source=source,
+                )
+            self.assertEqual({retained, second_retained}, set(observed))
+            self.assertTrue(retained.exists())
+            self.assertTrue(second_retained.exists())
+            self.assertFalse(source.exists())
+            source.mkdir(mode=0o700)
+            with mock.patch.dict(namespace, {"_assert_real_path": assert_path}):
+                resumed = namespace["_verify_retained_vm_create_quarantine"](
+                    {"state": state_root, "quarantine_parent": quarantine},
+                    apply_lock,
+                    marker_digest=marker_digest,
+                    source=source,
+                )
+            self.assertEqual({retained, second_retained}, set(resumed))
+            self.assertTrue(source.exists())
+            exact_second_receipt = json.loads(
+                second_receipt_path.read_text(encoding="utf-8")
+            )
+            for invalid_receipt in (
+                {**exact_second_receipt, "network_changes_performed": True},
+                {**exact_second_receipt, "unexpected": False},
+            ):
+                second_receipt_path.chmod(0o600)
+                write_json(second_receipt_path, invalid_receipt)
+                second_receipt_path.chmod(0o400)
+                with (
+                    mock.patch.dict(namespace, {"_assert_real_path": assert_path}),
+                    self.assertRaises(namespace["CommissionError"]),
+                ):
+                    namespace["_verify_retained_vm_create_quarantine"](
+                        {"state": state_root, "quarantine_parent": quarantine},
+                        apply_lock,
+                        marker_digest=marker_digest,
+                        source=source,
+                    )
+            second_receipt_path.chmod(0o600)
+            write_json(second_receipt_path, exact_second_receipt)
+            second_receipt_path.chmod(0o400)
+
+    def test_management_key_partial_pendings_are_quarantined_without_delete(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_key_quarantine_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        commission_lock = json.loads(
+            (LIMA_ROOT / "commission-lock.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            state_root = root / "state"
+            receipt_parent = root / "receipts"
+            quarantine = root / "quarantine"
+            config = root / "lima" / "_config"
+            for path in (state_root, receipt_parent, quarantine, config):
+                path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            apply_lock["paths"]["lima_home"] = str(root / "lima")
+            apply_lock["host"]["router_operator_uid"] = os.getuid()
+            apply_lock["host"]["router_operator_gid"] = os.getgid()
+            private = config / ".user.pending-v1"
+            public = config / ".user.pending-v1.pub"
+            private.write_bytes(b"partial-private")
+            private.chmod(0o600)
+            public.write_bytes(b"partial-public")
+            public.chmod(0o644)
+            marker = state_root / ".vm-management-key.INSTALLING.json"
+            marker.write_bytes(b"marker\n")
+            marker.chmod(0o400)
+            marker_digest = hashlib.sha256(marker.read_bytes()).hexdigest()
+
+            def assert_path(path: Path, *, kind: str, mode: int | None = None, **_kwargs):
+                try:
+                    metadata = path.lstat()
+                except FileNotFoundError as error:
+                    raise namespace["CommissionError"](
+                        "test retained path is absent"
+                    ) from error
+                self.assertEqual(kind == "directory", stat.S_ISDIR(metadata.st_mode))
+                if mode is not None:
+                    self.assertEqual(mode, stat.S_IMODE(metadata.st_mode))
+                return metadata
+
+            def atomic(parent: Path, name: str, value: object, **_kwargs):
+                path = parent / name
+                content = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+                if path.exists():
+                    self.assertEqual(content, path.read_bytes())
+                else:
+                    path.write_bytes(content)
+                    path.chmod(0o400)
+                return path, hashlib.sha256(content).hexdigest()
+
+            patches = {
+                "_locks": lambda: (apply_lock, commission_lock, example_spec()),
+                "_assert_root_apply": lambda *_args: "runtime",
+                "_initialize_state": lambda _lock: {
+                    "state": state_root,
+                    "receipt_parent": receipt_parent,
+                    "quarantine_parent": quarantine,
+                },
+                "_acquire_state_lock": lambda _state: 1,
+                "_assert_real_path": assert_path,
+                "_rename_exclusive": lambda source, destination: source.rename(destination),
+                "_atomic_receipt": atomic,
+            }
+            with mock.patch.dict(namespace, patches), redirect_stdout(io.StringIO()):
+                result = namespace["_quarantine_management_key_pending"](
+                    SimpleNamespace(
+                        expected_marker_sha256=marker_digest,
+                        expected_controller_manifest_sha256="c" * 64,
+                    )
+                )
+            self.assertEqual(0, result)
+            self.assertFalse(private.exists())
+            self.assertFalse(public.exists())
+            retained = tuple(quarantine.glob(".quarantine-vm-management-key-*"))
+            self.assertEqual(2, len(retained))
+            self.assertEqual(
+                {b"partial-private", b"partial-public"},
+                {path.read_bytes() for path in retained},
+            )
+            private.write_bytes(b"second-private")
+            private.chmod(0o600)
+            public.write_bytes(b"second-public")
+            public.chmod(0o644)
+            with mock.patch.dict(namespace, patches), redirect_stdout(io.StringIO()):
+                second = namespace["_quarantine_management_key_pending"](
+                    SimpleNamespace(
+                        expected_marker_sha256=marker_digest,
+                        expected_controller_manifest_sha256="c" * 64,
+                    )
+                )
+            self.assertEqual(0, second)
+            self.assertFalse(private.exists())
+            self.assertFalse(public.exists())
+            retained = tuple(quarantine.glob(".quarantine-vm-management-key-*"))
+            self.assertEqual(4, len(retained))
+            self.assertEqual(
+                {
+                    b"partial-private",
+                    b"partial-public",
+                    b"second-private",
+                    b"second-public",
+                },
+                {path.read_bytes() for path in retained},
+            )
+            transactions = tuple(
+                quarantine.glob("quarantine-transaction-vm-management-key-*.json")
+            )
+            self.assertEqual(2, len(transactions))
+            self.assertEqual(
+                {1, 2},
+                {
+                    json.loads(path.read_text(encoding="utf-8"))["attempt_sequence"]
+                    for path in transactions
+                },
+            )
+            retained[0].unlink()
+            with (
+                mock.patch.dict(namespace, patches),
+                self.assertRaises(namespace["CommissionError"]),
+            ):
+                namespace["_quarantine_management_key_pending"](
+                    SimpleNamespace(
+                        expected_marker_sha256=marker_digest,
+                        expected_controller_manifest_sha256="c" * 64,
+                    )
+                )
+
+    def test_partial_local_image_stage_is_quarantined_then_retryable(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_local_image_quarantine_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        commission_lock = json.loads(
+            (LIMA_ROOT / "commission-lock.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            state_root = root / "state"
+            receipt_parent = root / "receipts"
+            quarantine = root / "quarantine"
+            for path in (state_root, receipt_parent, quarantine):
+                path.mkdir(mode=0o700)
+            image_parent = root / "images"
+            apply_lock["paths"]["local_image_parent"] = str(image_parent)
+            apply_lock["paths"]["local_image"] = str(image_parent / "image.img")
+            image_sha256 = commission_lock["cloud_image"]["image_sha256"]
+            stage = root / f".images.installing-{image_sha256}"
+            stage.mkdir(mode=0o700)
+            marker_value = {
+                "schema_version": 1,
+                "kind": "trading-desk.router-commission.installing",
+                "phase": "local-image",
+            }
+            marker = stage / ".INSTALLING.json"
+            write_json(marker, marker_value)
+            marker.chmod(0o400)
+            (stage / "partial.img").write_bytes(b"partial")
+            marker_digest = hashlib.sha256(marker.read_bytes()).hexdigest()
+
+            def assert_path(path: Path, *, kind: str, mode: int | None = None, **_kwargs):
+                metadata = path.lstat()
+                self.assertEqual(kind == "directory", stat.S_ISDIR(metadata.st_mode))
+                if mode is not None:
+                    self.assertEqual(mode, stat.S_IMODE(metadata.st_mode))
+                return metadata
+
+            def atomic(parent: Path, name: str, value: object, **_kwargs):
+                path = parent / name
+                content = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+                path.write_bytes(content)
+                path.chmod(0o400)
+                return path, hashlib.sha256(content).hexdigest()
+
+            patches = {
+                "_locks": lambda: (apply_lock, commission_lock, example_spec()),
+                "_assert_root_apply": lambda *_args: "runtime",
+                "_initialize_state": lambda _lock: {
+                    "state": state_root,
+                    "receipt_parent": receipt_parent,
+                    "quarantine_parent": quarantine,
+                    "media_parent": root / "media",
+                },
+                "_acquire_state_lock": lambda _state: 1,
+                "_assert_real_path": assert_path,
+                "_rename_exclusive": lambda source, destination: source.rename(destination),
+                "_atomic_receipt": atomic,
+                "_sync_directory": lambda _path: None,
+            }
+            with mock.patch.dict(namespace, patches), redirect_stdout(io.StringIO()):
+                result = namespace["_quarantine_incomplete"](
+                    SimpleNamespace(
+                        incomplete_phase="local-image",
+                        expected_marker_sha256=marker_digest,
+                        expected_controller_manifest_sha256="c" * 64,
+                    )
+                )
+            self.assertEqual(0, result)
+            self.assertFalse(stage.exists())
+            stage.mkdir(mode=0o700)
+            marker = stage / ".INSTALLING.json"
+            write_json(marker, marker_value)
+            marker.chmod(0o400)
+            (stage / "partial.img").write_bytes(b"second-partial")
+            with mock.patch.dict(namespace, patches), redirect_stdout(io.StringIO()):
+                second = namespace["_quarantine_incomplete"](
+                    SimpleNamespace(
+                        incomplete_phase="local-image",
+                        expected_marker_sha256=marker_digest,
+                        expected_controller_manifest_sha256="c" * 64,
+                    )
+                )
+            self.assertEqual(0, second)
+            self.assertFalse(stage.exists())
+            retained = tuple(root.glob(".quarantine-local-image-*"))
+            self.assertEqual(2, len(retained))
+            self.assertEqual(
+                {b"partial", b"second-partial"},
+                {(path / "partial.img").read_bytes() for path in retained},
+            )
+            replaced = retained[0]
+            original = replaced.with_name(f"{replaced.name}.retained-for-test")
+            replaced.rename(original)
+            replaced.mkdir(mode=0o700)
+            replacement_marker = replaced / ".INSTALLING.json"
+            write_json(replacement_marker, marker_value)
+            replacement_marker.chmod(0o400)
+            (replaced / "partial.img").write_bytes(b"replacement")
+            replaced.chmod(0o500)
+            with (
+                mock.patch.dict(namespace, patches),
+                self.assertRaises(namespace["CommissionError"]),
+            ):
+                namespace["_quarantine_incomplete"](
+                    SimpleNamespace(
+                        incomplete_phase="local-image",
+                        expected_marker_sha256=marker_digest,
+                        expected_controller_manifest_sha256="c" * 64,
+                    )
+                )
+
+    def test_partial_vm_create_is_twice_quarantined_then_retryable(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_vm_double_quarantine_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        commission_lock = json.loads(
+            (LIMA_ROOT / "commission-lock.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            state_root = root / "state"
+            receipt_parent = root / "receipts"
+            quarantine = root / "quarantine"
+            lima_home = root / "lima"
+            for path in (state_root, receipt_parent, quarantine, lima_home):
+                path.mkdir(mode=0o700)
+            apply_lock["paths"]["lima_home"] = str(lima_home)
+            apply_lock["host"]["router_operator_uid"] = os.getuid()
+            apply_lock["host"]["router_operator_gid"] = os.getgid()
+            marker_value = {
+                "schema_version": 1,
+                "kind": "trading-desk.router-commission.installing",
+                "phase": "vm-create",
+            }
+            marker = state_root / ".vm-create.INSTALLING.json"
+            write_json(marker, marker_value)
+            marker.chmod(0o400)
+            marker_digest = hashlib.sha256(marker.read_bytes()).hexdigest()
+
+            def assert_path(path: Path, *, kind: str, mode: int | None = None, **_kwargs):
+                metadata = path.lstat()
+                self.assertEqual(kind == "directory", stat.S_ISDIR(metadata.st_mode))
+                if mode is not None:
+                    self.assertEqual(mode, stat.S_IMODE(metadata.st_mode))
+                return metadata
+
+            def atomic(parent: Path, name: str, value: object, **_kwargs):
+                path = parent / name
+                content = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+                path.write_bytes(content)
+                path.chmod(0o400)
+                return path, hashlib.sha256(content).hexdigest()
+
+            patches = {
+                "_locks": lambda: (apply_lock, commission_lock, example_spec()),
+                "_assert_root_apply": lambda *_args: "runtime",
+                "_initialize_state": lambda _lock: {
+                    "state": state_root,
+                    "receipt_parent": receipt_parent,
+                    "quarantine_parent": quarantine,
+                    "media_parent": root / "media",
+                },
+                "_acquire_state_lock": lambda _state: 1,
+                "_assert_real_path": assert_path,
+                "_rename_exclusive": lambda source, destination: source.rename(destination),
+                "_atomic_receipt": atomic,
+                "_sync_directory": lambda _path: None,
+            }
+            for content in (b"first-partial", b"second-partial"):
+                instance = lima_home / "trading-desk-router"
+                instance.mkdir(mode=0o700)
+                (instance / "disk").write_bytes(content)
+                with mock.patch.dict(namespace, patches), redirect_stdout(io.StringIO()):
+                    result = namespace["_quarantine_incomplete"](
+                        SimpleNamespace(
+                            incomplete_phase="vm-create",
+                            expected_marker_sha256=marker_digest,
+                            expected_controller_manifest_sha256="c" * 64,
+                        )
+                    )
+                self.assertEqual(0, result)
+                self.assertFalse(instance.exists())
+            retained = tuple(quarantine.glob(".quarantine-vm-create-*"))
+            self.assertEqual(2, len(retained))
+            self.assertEqual(
+                {b"first-partial", b"second-partial"},
+                {(path / "disk").read_bytes() for path in retained},
+            )
+            transactions = tuple(
+                quarantine.glob("quarantine-transaction-vm-create-*.json")
+            )
+            self.assertEqual(2, len(transactions))
+            self.assertEqual(
+                {1, 2},
+                {
+                    json.loads(path.read_text(encoding="utf-8"))["attempt_sequence"]
+                    for path in transactions
+                },
+            )
+
     def test_commission_persistence_rejects_zero_length_writes(self) -> None:
         namespace = load_script_namespace(
             COMMISSION_APPLY_PATH, "commission_apply_zero_write_test"
@@ -726,8 +1848,9 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
         with self.assertRaisesRegex(error, "architecture/profile-qualified"):
             parse("example <stage1>")
 
-    def test_repository_artifacts_enable_only_credential_free_host_prep(self) -> None:
+    def test_repository_artifacts_enable_only_venue_free_create_only_prep(self) -> None:
         expected = {
+            "cloud-config-create.yaml.example",
             "vm-spec.json.example",
             "lima.yaml.example",
             "networks.yaml.example",
@@ -838,8 +1961,8 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
         self.assertIn("quarantine-transaction", apply_text)
         self.assertIn("source_exists == destination_exists", apply_text)
         self.assertIn("transaction_receipt_sha256", apply_text)
-        self.assertNotIn("limactl\", \"create", apply_text)
-        self.assertNotIn("limactl\", \"start", apply_text)
+        self.assertIn('"create",\n                "--tty=false"', apply_text)
+        self.assertNotIn('"start",', apply_text)
         self.assertNotIn("/usr/bin/systemctl", apply_text)
         self.assertNotIn("/usr/bin/apt-get", apply_text)
         self.assertIn("RENAME_NOREPLACE", guest_text)
@@ -961,7 +2084,7 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
             COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
         )
         self.assertEqual(
-            "credential_free_host_preparation_enabled_vm_guest_network_disabled",
+            "venue_credential_free_create_only_enabled_vm_start_guest_network_disabled",
             apply_lock["review_status"],
         )
         for enabled in (
@@ -971,10 +2094,12 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
             "validate_fill_apply_enabled",
             "runtime_qualification_receipt_enabled",
             "quarantine_apply_enabled",
+            "vm_management_ssh_key_apply_enabled",
+            "local_image_apply_enabled",
+            "vm_create_apply_enabled",
         ):
             self.assertIs(True, apply_lock["phases"][enabled], enabled)
         for disabled in (
-            "vm_create_apply_enabled",
             "vm_start_apply_enabled",
             "guest_freeze_apply_enabled",
             "guest_package_simulation_apply_enabled",
@@ -982,7 +2107,9 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
             "router_activation_apply_enabled",
         ):
             self.assertIs(False, apply_lock["phases"][disabled], disabled)
-        self.assertFalse(any(apply_lock["stop_line"].values()))
+        self.assertTrue(apply_lock["phases"]["vm_management_ssh_key_apply_enabled"])
+        self.assertFalse(apply_lock["stop_line"]["venue_credentials_authorized"])
+        self.assertFalse(apply_lock["stop_line"]["network_changes_authorized"])
         self.assertEqual(
             "bc38b2a17ac99e58e0047f3160cc59ace8b327bf68afe418165184c1a562a2c6",
             apply_lock["verifier_toolchain"]["gh"]["sha256"],
@@ -1063,7 +2190,9 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
             vm_renderer.render_bundle(spec_path, image_path, package_path, second)
 
             expected_files = {
+                "cloud-config-create.template",
                 "lima.yaml",
+                "lima-create-local.yaml",
                 "networks.yaml",
                 "bootstrap-public.sh",
                 "host-preflight.sh",
@@ -1132,7 +2261,8 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                 "/var/db/trading-desk-lima",
                 manifest["host_contract"]["lima_home_path"],
             )
-            self.assertIs(False, manifest["host_contract"]["create_start_authorized"])
+            self.assertIs(True, manifest["host_contract"]["create_authorized"])
+            self.assertIs(False, manifest["host_contract"]["start_authorized"])
             self.assertEqual(
                 {
                     "apply_authorized": False,
@@ -1140,20 +2270,23 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                     "dependency_closure_package_count": 116,
                     "immutable_public_inputs_locked": True,
                     "immutable_public_inputs_verified": False,
-                    "commission_apply_lock_sha256": "8ac08b3e8eb3b936a68b7e801b3810751964ba47f35032634c0172c1d06a7b67",
+                    "commission_apply_lock_sha256": "df91138d67629f13faafbffe8bcf683c3b614e256b42dc3320b11f5af8e27e2b",
                     "enabled_host_prepare_phases": [
                         "host_tools_apply_enabled",
                         "lima_home_apply_enabled",
+                        "local_image_apply_enabled",
                         "media_seal_apply_enabled",
                         "operator_verification_receipt_enabled",
                         "quarantine_apply_enabled",
                         "runtime_qualification_receipt_enabled",
                         "validate_fill_apply_enabled",
+                        "vm_create_apply_enabled",
+                        "vm_management_ssh_key_apply_enabled",
                     ],
                     "host_prepare_apply_authorized": True,
                     "guest_mutation_apply_enabled": False,
                     "router_activation_apply_enabled": False,
-                    "vm_create_apply_enabled": False,
+                    "vm_create_apply_enabled": True,
                     "vm_start_apply_enabled": False,
                 },
                 manifest["commission_contract"],
@@ -1178,8 +2311,9 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                     "private_key_field_emitted": False,
                     "router_keys_generated": False,
                     "venue_writes_authorized": False,
+                    "vm_management_ssh_key_apply_enabled": True,
                     "vm_created": False,
-                    "vm_create_apply_enabled": False,
+                    "vm_create_apply_enabled": True,
                 },
                 manifest["security_claims"],
             )
@@ -1214,6 +2348,16 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
             self.assertIn("\n  hosts: {}", lima)
             self.assertNotIn("vzNAT: true", lima)
             self.assertNotIn('lima: "td-router-wan"', lima)
+            local_lima = (first / "lima-create-local.yaml").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(
+                'location: "file:///opt/trading-desk-router-images/'
+                'ubuntu-24.04-server-cloudimg-arm64-20260814.img"',
+                local_lima,
+            )
+            self.assertNotIn("cloud-images.ubuntu.com", local_lima)
+            self.assertIn('comment: "Trading Desk Router Operator"', local_lima)
 
             networks = (first / "networks.yaml").read_text(encoding="utf-8")
             self.assertIn('group: "trading-router-operator"', networks)
@@ -1307,7 +2451,8 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
             self.assertIn("host_tools_apply_enabled=true", apply_plan.stdout)
             self.assertIn("lima_home_apply_enabled=true", apply_plan.stdout)
             self.assertIn("validate_fill_apply_enabled=true", apply_plan.stdout)
-            self.assertIn("vm_create_apply_enabled=false", apply_plan.stdout)
+            self.assertIn("vm_create_apply_enabled=true", apply_plan.stdout)
+            self.assertIn("vm_start_apply_enabled=false", apply_plan.stdout)
             self.assertIn("credentials_touched=false", apply_plan.stdout)
             default_apply_plan = subprocess.run(
                 [sys.executable, str(commission_apply)],
@@ -1348,7 +2493,6 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                 self.assertEqual(64, refused_guest.returncode, command)
                 self.assertIn("apply_disabled", refused_guest.stderr)
             for disabled_phase in (
-                "apply-create-vm",
                 "apply-start-vm",
                 "apply-freeze-guest",
                 "apply-guest-package",
@@ -1528,7 +2672,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
         apply_lock = json.loads(
             COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
         )
-        apply_lock["phases"]["vm_create_apply_enabled"] = True
+        apply_lock["phases"]["vm_create_apply_enabled"] = False
         with self.assertRaisesRegex(ValueError, "phase gates differ"):
             vm_renderer.validate_commission_apply_lock(apply_lock)
 

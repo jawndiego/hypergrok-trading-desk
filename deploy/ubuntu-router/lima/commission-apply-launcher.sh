@@ -101,7 +101,7 @@ if "$otool" -l "$python" | /usr/bin/grep -Fq 'LC_RPATH'; then
 fi
 
 case "${1-}" in
-    qualify-runtime|apply-seal-media|apply-host-tools|apply-lima-home|apply-validate-fill|quarantine-incomplete) ;;
+    qualify-runtime|apply-seal-media|apply-host-tools|apply-lima-home|apply-validate-fill|apply-vm-management-key|apply-local-image|apply-create-vm|quarantine-incomplete|quarantine-vm-management-key) ;;
     *) die 'launcher accepts only reviewed host-preparation phases' ;;
 esac
 

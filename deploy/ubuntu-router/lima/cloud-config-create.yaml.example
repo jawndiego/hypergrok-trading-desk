@@ -1,0 +1,37 @@
+#cloud-config
+# vim:syntax=yaml
+
+growpart:
+  mode: auto
+  devices: ['/']
+
+users:
+  - name: "routeradmin"
+    uid: "1000"
+    gecos: "Trading Desk Router Operator"
+    homedir: "/var/lib/trading-desk-router"
+    shell: /bin/bash
+    sudo: ALL=(ALL) ALL
+    lock_passwd: false
+    ssh-authorized-keys:
+      - "@@VM_MANAGEMENT_PUBLIC_KEY@@"
+bootcmd:
+- |
+  # Work around the NIC rename race on Ubuntu 26.04 first boot (LP: #2136392):
+  # cloud-init cannot rename an already-up NIC, leaving it unconfigured.
+  # Re-attempt the rename (requires link down), then wait for the slirp NIC
+  # to be configured. No-op when interfaces already have their expected names.
+  for pair in @@WAN_MAC@@=eth0 __INGRESS_MAC_VALUE__=__INGRESS_INTERFACE_VALUE__; do
+    mac="${pair%=*}"; want="${pair#*=}"
+    [ -e "/sys/class/net/$want" ] && continue
+    cur=$(grep -lix "$mac" /sys/class/net/*/address 2>/dev/null | awk -F/ 'NR==1{print $(NF-1)}')
+    [ -n "$cur" ] || continue
+    for i in 1 2 3; do
+      ip link set "$cur" down && ip link set "$cur" name "$want" && ip link set "$want" up && break
+      sleep 1
+    done
+  done
+  i=0
+  until ip -4 addr show dev eth0 2>/dev/null | grep -q inet || [ $((i += 1)) -gt 30 ]; do
+    sleep 1
+  done

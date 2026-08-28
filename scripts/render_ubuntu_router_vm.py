@@ -4,8 +4,9 @@
 The renderer performs no downloads, package installation, VM lifecycle,
 privilege, key, network, credential, or venue operation. Checked-in version,
 signed-snapshot, dependency-closure and provenance pins are immutable; the
-commission authorization object enables only the separate credential-free
-host-preparation phases; VM/guest/network/key operations remain disabled.
+commission authorization object enables venue-credential-free host preparation,
+one dedicated VM-management SSH key, a fixed local image and stopped VM
+creation; VM start, guest, network and router-key operations remain disabled.
 """
 
 from __future__ import annotations
@@ -31,6 +32,10 @@ DEFAULT_IMAGE_LOCK = TEMPLATE_ROOT / "image-lock.json"
 DEFAULT_PACKAGE_LOCK = TEMPLATE_ROOT / "package-lock.json"
 DEFAULT_COMMISSION_LOCK = TEMPLATE_ROOT / "commission-lock.json"
 DEFAULT_COMMISSION_APPLY_LOCK = TEMPLATE_ROOT / "commission-apply-lock.json"
+LOCAL_IMAGE_PATH = (
+    "/opt/trading-desk-router-images/"
+    "ubuntu-24.04-server-cloudimg-arm64-20260814.img"
+)
 
 PLACEHOLDER_RE = re.compile(r"__[A-Z0-9_]+__")
 INSTANCE_RE = re.compile(r"[a-z][a-z0-9-]{0,30}")
@@ -61,7 +66,14 @@ SPEC_KEYS = frozenset(
     }
 )
 LIMA_HOME_KEYS = frozenset(
-    {"path", "default_yaml", "override_yaml", "effective_config_sha256"}
+    {
+        "path",
+        "default_yaml",
+        "override_yaml",
+        "effective_config_sha256",
+        "local_create_effective_config_sha256",
+        "local_create_disk_sha256",
+    }
 )
 OPTIONAL_CONFIG_KEYS = frozenset({"state", "sha256"})
 NETWORK_KEYS = frozenset(
@@ -140,6 +152,7 @@ REQUIRED_GUEST_PACKAGES = frozenset(
 )
 
 TEMPLATES: dict[str, tuple[str, int]] = {
+    "cloud-config-create.yaml.example": ("cloud-config-create.template", 0o600),
     "lima.yaml.example": ("lima.yaml", 0o600),
     "networks.yaml.example": ("networks.yaml", 0o600),
     "bootstrap-public.sh": ("bootstrap-public.sh", 0o700),
@@ -179,8 +192,9 @@ SECURITY_CLAIMS = {
     "private_key_field_emitted": False,
     "router_keys_generated": False,
     "venue_writes_authorized": False,
+    "vm_management_ssh_key_apply_enabled": True,
     "vm_created": False,
-    "vm_create_apply_enabled": False,
+    "vm_create_apply_enabled": True,
 }
 
 
@@ -630,16 +644,18 @@ def validate_commission_apply_lock(lock: dict[str, Any]) -> dict[str, Any]:
                 "python_runtime",
                 "review_status",
                 "schema_version",
+                "storage",
                 "stop_line",
                 "verifier_toolchain",
+                "vm_management_ssh",
             }
         ),
         "commission apply lock",
     )
-    if type(lock["schema_version"]) is not int or lock["schema_version"] != 2:
-        raise ValueError("commission apply lock schema_version must be exactly 2")
+    if type(lock["schema_version"]) is not int or lock["schema_version"] != 3:
+        raise ValueError("commission apply lock schema_version must be exactly 3")
     if lock["review_status"] != (
-        "credential_free_host_preparation_enabled_vm_guest_network_disabled"
+        "venue_credential_free_create_only_enabled_vm_start_guest_network_disabled"
     ):
         raise ValueError("commission apply lock review status differs")
     expected_host = {
@@ -674,8 +690,10 @@ def validate_commission_apply_lock(lock: dict[str, Any]) -> dict[str, Any]:
         "lima_home": "/private/var/db/trading-desk-lima",
         "lima_install": "/opt/trading-desk-router-tools/lima-2.2.0",
         "lima_plan": "/opt/trading-desk-router-tools/plans/lima.yaml",
+        "local_image": "/opt/trading-desk-router-images/ubuntu-24.04-server-cloudimg-arm64-20260814.img",
+        "local_image_parent": "/opt/trading-desk-router-images",
         "media_parent": "/private/var/db/trading-desk-router-commission-v1/media",
-        "operator_home": "/private/var/db/trading-desk-lima/home",
+        "operator_home": "/private/var/db/trading-desk-lima",
         "quarantine_parent": "/private/var/db/trading-desk-router-commission-v1/quarantine",
         "receipt_parent": "/private/var/db/trading-desk-router-commission-v1/receipts",
         "socket_vmnet_install": "/opt/socket_vmnet",
@@ -690,23 +708,25 @@ def validate_commission_apply_lock(lock: dict[str, Any]) -> dict[str, Any]:
         "guest_package_simulation_apply_enabled": False,
         "host_tools_apply_enabled": True,
         "lima_home_apply_enabled": True,
+        "local_image_apply_enabled": True,
         "media_seal_apply_enabled": True,
         "operator_verification_receipt_enabled": True,
         "quarantine_apply_enabled": True,
         "router_activation_apply_enabled": False,
         "runtime_qualification_receipt_enabled": True,
         "validate_fill_apply_enabled": True,
-        "vm_create_apply_enabled": False,
+        "vm_management_ssh_key_apply_enabled": True,
+        "vm_create_apply_enabled": True,
         "vm_start_apply_enabled": False,
     }
     if lock["phases"] != expected_phases:
         raise ValueError("commission apply phase gates differ")
     expected_stop_line = {
-        "credentials_authorized": False,
         "executor_init_authorized": False,
         "mainnet_authorized": False,
         "network_changes_authorized": False,
         "router_key_generation_authorized": False,
+        "venue_credentials_authorized": False,
         "venue_writes_authorized": False,
     }
     if lock["stop_line"] != expected_stop_line:
@@ -715,13 +735,28 @@ def validate_commission_apply_lock(lock: dict[str, Any]) -> dict[str, Any]:
         "guest_freeze",
         "guest_package_install",
         "router_activation",
-        "vm_create",
         "vm_start",
     } or not all(
         isinstance(value, str) and 20 <= len(value) <= 300
         for value in lock["blockers"].values()
     ):
         raise ValueError("commission apply blocker set differs")
+    if lock["storage"] != {
+        "local_image_minimum_free_after_bytes": 5 * 1024**3,
+        "vm_create_minimum_free_before_bytes": 25 * 1024**3,
+    }:
+        raise ValueError("commission apply storage contract differs")
+    if lock["vm_management_ssh"] != {
+        "comment": "lima",
+        "private_key_path": "/private/var/db/trading-desk-lima/_config/user",
+        "public_key_path": "/private/var/db/trading-desk-lima/_config/user.pub",
+        "ssh_keygen_mode": "0755",
+        "ssh_keygen_path": "/usr/bin/ssh-keygen",
+        "ssh_keygen_sha256": "0d8b8fb52762fa19431b40e8b75cd00b045f10bf206fd67f0598e09bfaad77d0",
+        "ssh_keygen_size_bytes": 847120,
+        "type": "ed25519",
+    }:
+        raise ValueError("commission VM-management SSH contract differs")
     if lock["python_runtime"] != {
         "external_install_receipt_required": True,
         "load_scan_path": (
@@ -904,6 +939,14 @@ def _validate_lima_home(value: object) -> dict[str, object]:
         not isinstance(effective, str) or not SHA256_RE.fullmatch(effective)
     ):
         raise ValueError("effective Lima config must be pending or a lowercase SHA-256")
+    local_effective = value["local_create_effective_config_sha256"]
+    if not isinstance(local_effective, str) or not SHA256_RE.fullmatch(
+        local_effective
+    ):
+        raise ValueError("local-create effective Lima config must be a lowercase SHA-256")
+    local_disk = value["local_create_disk_sha256"]
+    if not isinstance(local_disk, str) or not SHA256_RE.fullmatch(local_disk):
+        raise ValueError("local-create disk SHA-256 must be lowercase")
     return {
         "path": value["path"],
         "default_yaml": _validate_optional_host_config(
@@ -913,6 +956,8 @@ def _validate_lima_home(value: object) -> dict[str, object]:
             value["override_yaml"], "override.yaml"
         ),
         "effective_config_sha256": effective,
+        "local_create_effective_config_sha256": local_effective,
+        "local_create_disk_sha256": local_disk,
     }
 
 
@@ -1182,6 +1227,14 @@ def render_bundle(
             _render_template(TEMPLATE_ROOT / template_name, replacements),
             mode,
         )
+    local_replacements = dict(replacements)
+    local_replacements["__PINNED_IMAGE_LOCATION_YAML__"] = _yaml_string(
+        f"file://{LOCAL_IMAGE_PATH}"
+    )
+    rendered["lima-create-local.yaml"] = (
+        _render_template(TEMPLATE_ROOT / "lima.yaml.example", local_replacements),
+        0o600,
+    )
     canonical_inputs = {
         "vm-spec.json": _canonical_json(spec_input),
         "image-lock.json": _canonical_json(image_input),
@@ -1248,8 +1301,15 @@ def render_bundle(
                 "effective_config_sha256": spec["lima_home"][
                     "effective_config_sha256"
                 ],
+                "local_create_effective_config_sha256": spec["lima_home"][
+                    "local_create_effective_config_sha256"
+                ],
+                "local_create_disk_sha256": spec["lima_home"][
+                    "local_create_disk_sha256"
+                ],
                 "effective_config_command": "limactl validate --fill",
-                "create_start_authorized": False,
+                "create_authorized": True,
+                "start_authorized": False,
             },
             "commission_contract": {
                 "commission_lock_sha256": package_lock["apt_install_source"][
@@ -1270,7 +1330,7 @@ def render_bundle(
                     if enabled
                 ),
                 "host_prepare_apply_authorized": True,
-                "vm_create_apply_enabled": False,
+                "vm_create_apply_enabled": True,
                 "vm_start_apply_enabled": False,
                 "guest_mutation_apply_enabled": False,
                 "router_activation_apply_enabled": False,
@@ -1374,6 +1434,7 @@ def verify_bundle(
     expected_modes = {
         output_name: mode for output_name, mode in TEMPLATES.values()
     }
+    expected_modes["lima-create-local.yaml"] = 0o600
     expected_modes.update(CANONICAL_INPUTS)
     expected_modes.update(STATIC_PUBLIC_INPUTS)
     expected_modes["bundle-manifest.json"] = 0o600
@@ -1513,8 +1574,15 @@ def verify_bundle(
         "effective_config_sha256": spec["lima_home"][
             "effective_config_sha256"
         ],
+        "local_create_effective_config_sha256": spec["lima_home"][
+            "local_create_effective_config_sha256"
+        ],
+        "local_create_disk_sha256": spec["lima_home"][
+            "local_create_disk_sha256"
+        ],
         "effective_config_command": "limactl validate --fill",
-        "create_start_authorized": False,
+        "create_authorized": True,
+        "start_authorized": False,
     }
     if manifest["host_contract"] != expected_host_contract:
         raise ValueError("bundle host contract differs from its embedded spec")
@@ -1535,7 +1603,7 @@ def verify_bundle(
             if enabled
         ),
         "host_prepare_apply_authorized": True,
-        "vm_create_apply_enabled": False,
+        "vm_create_apply_enabled": True,
         "vm_start_apply_enabled": False,
         "guest_mutation_apply_enabled": False,
         "router_activation_apply_enabled": False,

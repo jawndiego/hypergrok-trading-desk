@@ -3,7 +3,6 @@
     "guest_freeze": "VM start is disabled until an exact local-image create configuration and pre-start APT race boundary are reviewed",
     "guest_package_install": "Guest freeze and exact apt simulation receipts cannot exist while VM start is disabled",
     "router_activation": "Router keys, netplan, nftables and WireGuard activation are outside this artifact",
-    "vm_create": "The locked Lima YAML uses an HTTPS image location; a verified local-image import and its validate-fill digest are not locked",
     "vm_start": "A newly booted guest can race apt timers before the complete 663-package baseline is frozen and checked"
   },
   "host": {
@@ -29,8 +28,10 @@
     "lima_home": "/private/var/db/trading-desk-lima",
     "lima_install": "/opt/trading-desk-router-tools/lima-2.2.0",
     "lima_plan": "/opt/trading-desk-router-tools/plans/lima.yaml",
+    "local_image": "/opt/trading-desk-router-images/ubuntu-24.04-server-cloudimg-arm64-20260814.img",
+    "local_image_parent": "/opt/trading-desk-router-images",
     "media_parent": "/private/var/db/trading-desk-router-commission-v1/media",
-    "operator_home": "/private/var/db/trading-desk-lima/home",
+    "operator_home": "/private/var/db/trading-desk-lima",
     "quarantine_parent": "/private/var/db/trading-desk-router-commission-v1/quarantine",
     "receipt_parent": "/private/var/db/trading-desk-router-commission-v1/receipts",
     "socket_vmnet_install": "/opt/socket_vmnet",
@@ -43,13 +44,15 @@
     "guest_package_simulation_apply_enabled": false,
     "host_tools_apply_enabled": true,
     "lima_home_apply_enabled": true,
+    "local_image_apply_enabled": true,
     "media_seal_apply_enabled": true,
     "operator_verification_receipt_enabled": true,
     "quarantine_apply_enabled": true,
     "router_activation_apply_enabled": false,
     "runtime_qualification_receipt_enabled": true,
     "validate_fill_apply_enabled": true,
-    "vm_create_apply_enabled": false,
+    "vm_management_ssh_key_apply_enabled": true,
+    "vm_create_apply_enabled": true,
     "vm_start_apply_enabled": false
   },
   "python_runtime": {
@@ -64,15 +67,29 @@
     "qualification_receipt_path": "/opt/trading-desk/runtime-install-receipts/python-3.11.16-sealed-runtime.json",
     "version": "3.11.16"
   },
-  "review_status": "credential_free_host_preparation_enabled_vm_guest_network_disabled",
-  "schema_version": 2,
+  "review_status": "venue_credential_free_create_only_enabled_vm_start_guest_network_disabled",
+  "schema_version": 3,
+  "storage": {
+    "local_image_minimum_free_after_bytes": 5368709120,
+    "vm_create_minimum_free_before_bytes": 26843545600
+  },
   "stop_line": {
-    "credentials_authorized": false,
     "executor_init_authorized": false,
     "mainnet_authorized": false,
     "network_changes_authorized": false,
     "router_key_generation_authorized": false,
+    "venue_credentials_authorized": false,
     "venue_writes_authorized": false
+  },
+  "vm_management_ssh": {
+    "comment": "lima",
+    "private_key_path": "/private/var/db/trading-desk-lima/_config/user",
+    "public_key_path": "/private/var/db/trading-desk-lima/_config/user.pub",
+    "ssh_keygen_mode": "0755",
+    "ssh_keygen_path": "/usr/bin/ssh-keygen",
+    "ssh_keygen_sha256": "0d8b8fb52762fa19431b40e8b75cd00b045f10bf206fd67f0598e09bfaad77d0",
+    "ssh_keygen_size_bytes": 847120,
+    "type": "ed25519"
   },
   "verifier_toolchain": {
     "gh": {
