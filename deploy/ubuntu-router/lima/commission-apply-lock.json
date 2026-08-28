@@ -111,6 +111,29 @@
     "venue_credentials_authorized": false,
     "venue_writes_authorized": false
   },
+  "stopped_instance_adoption_continuation_v1": {
+    "failed_controller_manifest_sha256": "f1e1524c70cf4bb215fd50720a1d9bafbdb760f485110f6325594cb12d6e39d5",
+    "generated_file_modes": {
+      "cloud-config.yaml": "0400",
+      "disk": "0600",
+      "lima-version": "0400",
+      "lima.yaml": "0600",
+      "vz-identifier": "0600"
+    },
+    "generated_file_sizes": {
+      "cloud-config.yaml": 1268,
+      "disk": 21474836480,
+      "lima-version": 6,
+      "lima.yaml": 1546,
+      "vz-identifier": 70
+    },
+    "installing_marker_sha256": "531e47035de4abfe64d041000699e602f04a3d38f6ad0d9887abb6ee4bbd6b97",
+    "local_create_plan_sha256": "00228f7b613418647ae9718989f7d9a2a9bb1493692ed832977294171b324150",
+    "local_image_receipt_sha256": "ffb4ba06e88ebcc1acb5277c9196b6cb90ac0b0c0bead0ff6bff4c3b89463baf",
+    "producer_commission_apply_sha256": "9aca42b4664db7040264f81761f6053dd04844fbcc5ba6affa1cc3f9465d4d71",
+    "root_umask": "0077",
+    "vm_create_receipt_name": "07-vm-create.json"
+  },
   "vm_management_ssh": {
     "comment": "lima",
     "private_key_path": "/private/var/db/trading-desk-lima/_config/user",
@@ -123,7 +146,7 @@
       },
       "controller_manifest_sha256": "4d7495d4353ecf1bacee5a2fbcb82bfcb08b0ee2d70aa752c26882e8ca28cede",
       "installing_marker_sha256": "64ffbd5d71ae88f898a9ff071432f7ba5ad37076bba242ada019b18bd519c467",
-      "replacement_commission_apply_sha256": "9aca42b4664db7040264f81761f6053dd04844fbcc5ba6affa1cc3f9465d4d71",
+      "replacement_commission_apply_sha256": "cd071e8817a222f6edd573762e0d96db4673e00eff7202ae6119c8a7439c3646",
       "validate_fill_receipt_sha256": "a71f87dcc141dff4af9fd2d0afdcc1fa4f7be57deeb42886cd3e2d4c09b4af8f"
     },
     "ssh_keygen_mode": "0755",

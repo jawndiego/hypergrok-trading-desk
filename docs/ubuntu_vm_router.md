@@ -240,6 +240,18 @@ writable Lima state. The enabled host-only sequence is:
    cloud config still has an unlocked-password/admin model, so start remains
    blocked until the separately reviewed offline pre-frozen image and locked
    guest-account bootstrap replace it.
+   Lima inherits the root launcher's mode-`0077` umask, so the five generated
+   instance files are verified without repair as `0400` for `cloud-config.yaml`
+   and `lima-version`, and `0600` for `disk`, `lima.yaml` and `vz-identifier`.
+   One exact pre-receipt stopped instance from the pinned failed controller may
+   be adopted only with its exact local-image receipt, schema-v1 marker, plan,
+   five-file sizes/modes, full contents and singleton stopped status. The
+   recovery never invokes `limactl create`; future attempts use a producer-bound
+   schema-v2 marker, and receipt 07 records which path occurred.
+   Receipt publication precedes marker removal; a restart in that narrow window
+   revalidates receipt 07, the instance inode and every content hash, the exact
+   stopped status, key binding and unchanged network state before removing only
+   the matching marker. Replacement or corruption leaves the marker intact.
 
 The launcher proves its canonical root-owned/no-ACL controller chain and checks
 the sealed runtime's owner, write bits, ACLs, symlink containment, interpreter

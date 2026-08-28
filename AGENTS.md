@@ -228,7 +228,9 @@ This repository builds an agent-runtime-neutral trading research and execution h
   one nonprinting UID-454 VM-management SSH key with private/public files fixed
   at mode `0600`, one exact pre-fix-marker recovery gate and one exact
   completed-receipt continuation, an exact predecessor-media and unreceipted
-  empty-home retirement recovery, exact local-image installation,
+  empty-home retirement recovery, exact local-image installation, and one
+  no-recreate adoption of the pinned stopped instance under observed `0077`
+  artifact modes,
   and creation of one deterministically verified stopped VM. Its UID-501
   verification receipt remains informational and never root authority. VM
   start, guest/package apply, socket_vmnet activation and every network/router

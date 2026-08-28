@@ -438,6 +438,7 @@ def _locks() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         "schema_version",
         "storage",
         "stop_line",
+        "stopped_instance_adoption_continuation_v1",
         "verifier_toolchain",
         "vm_management_ssh",
     }
@@ -516,6 +517,30 @@ def _locks() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     }
     if apply_lock.get("stop_line") != expected_stop_line:
         raise CommissionError("commission stop line unexpectedly authorizes mutation")
+    if apply_lock.get("stopped_instance_adoption_continuation_v1") != {
+        "failed_controller_manifest_sha256": "f1e1524c70cf4bb215fd50720a1d9bafbdb760f485110f6325594cb12d6e39d5",
+        "generated_file_modes": {
+            "cloud-config.yaml": "0400",
+            "disk": "0600",
+            "lima-version": "0400",
+            "lima.yaml": "0600",
+            "vz-identifier": "0600",
+        },
+        "generated_file_sizes": {
+            "cloud-config.yaml": 1268,
+            "disk": 20 * 1024**3,
+            "lima-version": 6,
+            "lima.yaml": 1546,
+            "vz-identifier": 70,
+        },
+        "installing_marker_sha256": "531e47035de4abfe64d041000699e602f04a3d38f6ad0d9887abb6ee4bbd6b97",
+        "local_create_plan_sha256": "00228f7b613418647ae9718989f7d9a2a9bb1493692ed832977294171b324150",
+        "local_image_receipt_sha256": "ffb4ba06e88ebcc1acb5277c9196b6cb90ac0b0c0bead0ff6bff4c3b89463baf",
+        "producer_commission_apply_sha256": "9aca42b4664db7040264f81761f6053dd04844fbcc5ba6affa1cc3f9465d4d71",
+        "root_umask": "0077",
+        "vm_create_receipt_name": PHASE_RECEIPTS["vm-create"],
+    }:
+        raise CommissionError("stopped instance adoption continuation differs")
     expected_enabled = {
         "operator_verification_receipt_enabled": True,
         "media_seal_apply_enabled": True,
@@ -4172,26 +4197,27 @@ def _verify_created_vm(
     }
     if {item.name for item in instance.iterdir()} != expected_files:
         raise CommissionError("create-only instance file set differs")
+    artifact_contract = apply_lock["stopped_instance_adoption_continuation_v1"]
     expected_modes = {
-        "cloud-config.yaml": 0o444,
-        "disk": 0o600,
-        "lima-version": 0o444,
-        "lima.yaml": 0o644,
-        "vz-identifier": 0o644,
+        name: int(mode, 8)
+        for name, mode in artifact_contract["generated_file_modes"].items()
     }
+    expected_sizes = artifact_contract["generated_file_sizes"]
     for name, mode in expected_modes.items():
-        _assert_real_path(
+        metadata = _assert_real_path(
             instance / name,
             kind="file",
             owner_uid=uid,
             owner_gid=gid,
             mode=mode,
         )
+        if metadata.st_size != expected_sizes[name]:
+            raise CommissionError(f"created instance file size differs: {name}")
     stored_plan = _read_fd_bound_file(
         instance / "lima.yaml",
         owner_uid=uid,
         owner_gid=gid,
-        mode=0o644,
+        mode=expected_modes["lima.yaml"],
         maximum_size=1024 * 1024,
     )
     if stored_plan != plan_bytes:
@@ -4201,7 +4227,7 @@ def _verify_created_vm(
         instance / "lima-version",
         owner_uid=uid,
         owner_gid=gid,
-        mode=0o444,
+        mode=expected_modes["lima-version"],
         maximum_size=64,
     )
     if version != b"v2.2.0":
@@ -4217,7 +4243,7 @@ def _verify_created_vm(
         instance / "vz-identifier",
         owner_uid=uid,
         owner_gid=gid,
-        mode=0o644,
+        mode=expected_modes["vz-identifier"],
         maximum_size=1024,
     )
     try:
@@ -4237,7 +4263,7 @@ def _verify_created_vm(
         instance / "cloud-config.yaml",
         owner_uid=uid,
         owner_gid=gid,
-        mode=0o444,
+        mode=expected_modes["cloud-config.yaml"],
         maximum_size=64 * 1024,
     )
     public = _read_fd_bound_file(
@@ -4423,6 +4449,121 @@ def _verify_retained_vm_create_quarantine(
     return tuple(retained)
 
 
+def _expected_create_only_status(
+    instance_name: str, instance_path: Path
+) -> dict[str, Any]:
+    if instance_name != "trading-desk-router":
+        raise CommissionError("create-only instance name differs")
+    network = [
+        {
+            "lima": "td-router-ingress",
+            "macAddress": "02:74:64:00:00:01",
+            "interface": "td-ingress",
+            "metric": 200,
+        }
+    ]
+    return {
+        "name": instance_name,
+        "hostname": "lima-trading-desk-router",
+        "status": "Stopped",
+        "dir": str(instance_path),
+        "vmType": "vz",
+        "arch": "aarch64",
+        "cpus": 2,
+        "memory": 2 * 1024**3,
+        "disk": 20 * 1024**3,
+        "network": network,
+        "sshConfigFile": str(instance_path / "ssh.config"),
+        "config": {
+            "minimumLimaVersion": "2.2.0",
+            "vmType": "vz",
+            "vmOpts": {
+                "vz": {"rosetta": {"binfmt": False, "enabled": False}}
+            },
+            "os": "Linux",
+            "arch": "aarch64",
+            "images": [
+                {
+                    "location": (
+                        "file:///opt/trading-desk-router-images/"
+                        "ubuntu-24.04-server-cloudimg-arm64-20260814.img"
+                    ),
+                    "arch": "aarch64",
+                    "digest": (
+                        "sha256:4a281a921b8d7db952895ab619736f10efe9f63e111fa5b5779ed18f023818aa"
+                    ),
+                }
+            ],
+            "cpus": 2,
+            "memory": "2GiB",
+            "disk": "20GiB",
+            "mountInotify": False,
+            "ssh": {
+                "localPort": 0,
+                "loadDotSSHPubKeys": False,
+                "forwardAgent": False,
+                "forwardX11": False,
+                "forwardX11Trusted": False,
+                "overVsock": True,
+            },
+            "firmware": {"legacyBIOS": False},
+            "audio": {"device": "none", "interface": ""},
+            "video": {"display": "none"},
+            "upgradePackages": False,
+            "containerd": {
+                "system": False,
+                "user": False,
+                "archives": [
+                    {
+                        "location": (
+                            "https://github.com/containerd/nerdctl/releases/download/"
+                            "v2.3.5/nerdctl-full-2.3.5-linux-amd64.tar.gz"
+                        ),
+                        "arch": "x86_64",
+                        "digest": (
+                            "sha256:b697295c623639734aaab737523c808fd3cc8d3046039fd94fff1744e4c317aa"
+                        ),
+                    },
+                    {
+                        "location": (
+                            "https://github.com/containerd/nerdctl/releases/download/"
+                            "v2.3.5/nerdctl-full-2.3.5-linux-arm64.tar.gz"
+                        ),
+                        "arch": "aarch64",
+                        "digest": (
+                            "sha256:6e4b687f1d138e750a3c8372abc0f81d3d7490b6359c48c0562fc7dfe98859b2"
+                        ),
+                    },
+                ],
+            },
+            "guestInstallPrefix": "/usr/local",
+            "networks": network,
+            "hostResolver": {"enabled": False, "ipv6": False},
+            "propagateProxyEnv": False,
+            "caCerts": {"removeDefaults": False},
+            "plain": True,
+            "timezone": "",
+            "nestedVirtualization": False,
+            "user": {
+                "name": "routeradmin",
+                "comment": "Trading Desk Router Operator",
+                "home": "/var/lib/trading-desk-router",
+                "shell": "/bin/bash",
+                "uid": 1000,
+                "passwordlessSudo": False,
+            },
+            "tpm": False,
+        },
+        "sshAddress": "127.0.0.1",
+        "protected": False,
+        "limaVersion": "v2.2.0",
+        "HostOS": "darwin",
+        "HostArch": "aarch64",
+        "LimaHome": "/private/var/db/trading-desk-lima",
+        "IdentityFile": "/private/var/db/trading-desk-lima/_config/user",
+    }
+
+
 def _parse_create_only_status(
     raw: bytes,
     *,
@@ -4439,15 +4580,7 @@ def _parse_create_only_status(
     if len(values) != 1 or not isinstance(values[0], dict):
         raise CommissionError("create-only Lima status is not a singleton")
     value = values[0]
-    if (
-        value.get("name") != instance_name
-        or value.get("status") != "Stopped"
-        or value.get("vmType") != "vz"
-        or value.get("arch") != "aarch64"
-        or value.get("dir") != str(instance_path)
-        or value.get("protected") is not False
-        or value.get("errors") not in (None, [])
-    ):
+    if value != _expected_create_only_status(instance_name, instance_path):
         raise CommissionError("create-only Lima status differs")
     return _sha256_bytes(_canonical_json(value))
 
@@ -4478,6 +4611,292 @@ def _verify_create_only_status(
         instance_name=instance_name,
         instance_path=instance_path,
     )
+
+
+def _select_vm_create_marker(
+    args: argparse.Namespace,
+    apply_lock: dict[str, Any],
+    state: dict[str, Path],
+    *,
+    marker_path: Path,
+    current_marker: bytes,
+    plan_sha256: str,
+    instance: Path,
+) -> tuple[bytes, dict[str, Any], bool]:
+    current_value = _decode_json(current_marker, "current VM-create marker")
+    instance_present = instance.exists() or instance.is_symlink()
+    receipt_path = state["receipt_parent"] / PHASE_RECEIPTS["vm-create"]
+    if receipt_path.exists() or receipt_path.is_symlink():
+        raise CommissionError("completed VM-create receipt already exists")
+    if not marker_path.exists() and not marker_path.is_symlink():
+        if instance_present:
+            raise CommissionError("pre-existing VM instance lacks a retained marker")
+        _write_exact_file(marker_path, current_marker, mode=0o400, uid=0, gid=0)
+        return current_marker, current_value, False
+    observed = _read_fd_bound_file(
+        marker_path,
+        owner_uid=0,
+        owner_gid=0,
+        mode=0o400,
+        maximum_size=4096,
+    )
+    if observed == current_marker:
+        _sync_exact_existing_file(
+            marker_path, current_marker, uid=0, gid=0, mode=0o400
+        )
+        return current_marker, current_value, False
+    contract = apply_lock["stopped_instance_adoption_continuation_v1"]
+    observed_value = _decode_json(observed, "retained predecessor VM-create marker")
+    if (
+        not instance_present
+        or instance.is_symlink()
+        or _sha256_bytes(observed) != contract["installing_marker_sha256"]
+        or set(observed_value)
+        != {
+            "schema_version",
+            "kind",
+            "phase",
+            "local_image_receipt_sha256",
+            "local_create_plan_sha256",
+        }
+        or observed_value.get("schema_version") != 1
+        or observed_value.get("kind")
+        != "trading-desk.router-commission.installing"
+        or observed_value.get("phase") != "vm-create"
+        or observed_value.get("local_image_receipt_sha256")
+        != contract["local_image_receipt_sha256"]
+        or observed_value.get("local_create_plan_sha256")
+        != contract["local_create_plan_sha256"]
+        or args.expected_local_image_receipt_sha256
+        != contract["local_image_receipt_sha256"]
+        or plan_sha256 != contract["local_create_plan_sha256"]
+        or args.expected_controller_manifest_sha256
+        == contract["failed_controller_manifest_sha256"]
+        or _sha256_file(Path(__file__).resolve())
+        == contract["producer_commission_apply_sha256"]
+        or contract["vm_create_receipt_name"] != PHASE_RECEIPTS["vm-create"]
+    ):
+        raise CommissionError("retained predecessor VM-create state differs")
+    _assert_real_path(
+        instance,
+        kind="directory",
+        owner_uid=apply_lock["host"]["router_operator_uid"],
+        owner_gid=apply_lock["host"]["router_operator_gid"],
+        mode=0o700,
+    )
+    return observed, observed_value, True
+
+
+def _validate_vm_create_receipt(
+    receipt: dict[str, Any], apply_lock: dict[str, Any]
+) -> None:
+    contract = apply_lock["stopped_instance_adoption_continuation_v1"]
+    create_invoked = receipt.get("limactl_create_invoked")
+    pre_receipt_adoption = receipt.get("pre_receipt_instance_adoption")
+    legacy_adoption = receipt.get("legacy_pre_receipt_instance_adoption")
+    if (
+        receipt.get("schema_version") != 2
+        or receipt.get("kind") != "trading-desk.router-commission.vm-create"
+        or receipt.get("phase") != "vm-create"
+        or type(create_invoked) is not bool
+        or type(pre_receipt_adoption) is not bool
+        or type(legacy_adoption) is not bool
+        or pre_receipt_adoption is create_invoked
+        or receipt.get("generated_file_modes") != contract["generated_file_modes"]
+        or receipt.get("generated_file_sizes") != contract["generated_file_sizes"]
+        or receipt.get("active_controller_script_sha256")
+        != apply_lock["vm_management_ssh"][
+            "retained_public_mode_0600_resume_v1"
+        ]["replacement_commission_apply_sha256"]
+        or _sha256_file(Path(__file__).resolve())
+        != receipt.get("active_controller_script_sha256")
+        or receipt.get("vm_status") != "Stopped"
+        or receipt.get("headroom_verified") is not True
+        or receipt.get("create_or_exact_adoption_completed") is not True
+        or receipt.get("vm_created") is not True
+        or receipt.get("vm_started") is not False
+        or receipt.get("ready_to_start") is not False
+        or receipt.get("socket_vmnet_started") is not False
+        or receipt.get("qemu_img_absent") is not True
+        or receipt.get("network_changes_performed") is not False
+        or receipt.get("venue_credentials_touched") is not False
+        or receipt.get("router_key_generated") is not False
+        or receipt.get("venue_writes_authorized") is not False
+        or receipt.get("mainnet_authorized") is not False
+    ):
+        raise CommissionError("VM-create receipt contract differs")
+    if legacy_adoption:
+        if (
+            create_invoked
+            or not pre_receipt_adoption
+            or receipt.get("marker_schema_version") != 1
+            or receipt.get("installing_marker_sha256")
+            != contract["installing_marker_sha256"]
+            or receipt.get("local_image_receipt_sha256")
+            != contract["local_image_receipt_sha256"]
+            or receipt.get("local_create_plan_sha256")
+            != contract["local_create_plan_sha256"]
+            or receipt.get("marker_controller_manifest_sha256")
+            != contract["failed_controller_manifest_sha256"]
+            or receipt.get("producer_commission_apply_sha256")
+            != contract["producer_commission_apply_sha256"]
+        ):
+            raise CommissionError("legacy VM-create receipt continuation differs")
+    else:
+        marker = {
+            "schema_version": 2,
+            "kind": "trading-desk.router-commission.installing",
+            "phase": "vm-create",
+            "local_image_receipt_sha256": receipt.get(
+                "local_image_receipt_sha256"
+            ),
+            "local_create_plan_sha256": receipt.get("local_create_plan_sha256"),
+            "controller_manifest_sha256": receipt.get(
+                "active_controller_manifest_sha256"
+            ),
+            "controller_script_sha256": receipt.get(
+                "active_controller_script_sha256"
+            ),
+        }
+        if (
+            receipt.get("marker_schema_version") != 2
+            or receipt.get("installing_marker_sha256")
+            != _sha256_bytes(_canonical_json(marker))
+            or receipt.get("marker_controller_manifest_sha256")
+            != receipt.get("active_controller_manifest_sha256")
+            or receipt.get("producer_commission_apply_sha256")
+            != receipt.get("active_controller_script_sha256")
+        ):
+            raise CommissionError("current VM-create receipt marker differs")
+
+
+def _finalize_completed_vm_create_receipt(
+    args: argparse.Namespace,
+    apply_lock: dict[str, Any],
+    state: dict[str, Path],
+    *,
+    marker_path: Path,
+    current_marker: bytes,
+    plan_sha256: str,
+    plan_bytes: bytes,
+    cloud_template: bytes,
+    instance: Path,
+    vm_spec: dict[str, Any],
+    key_receipt: dict[str, Any],
+    networks_sha256: str,
+    limactl: Path,
+    create_environment: dict[str, str],
+) -> tuple[Path, str, bool] | None:
+    receipt_path = state["receipt_parent"] / PHASE_RECEIPTS["vm-create"]
+    if not receipt_path.exists() and not receipt_path.is_symlink():
+        return None
+    receipt_sha256 = _sha256_file(receipt_path)
+    receipt = _read_expected_receipt(
+        receipt_path,
+        receipt_sha256,
+        "trading-desk.router-commission.vm-create",
+        owner_uid=0,
+        owner_gid=0,
+        expected_schema_version=2,
+    )
+    _validate_vm_create_receipt(receipt, apply_lock)
+    if (
+        receipt.get("local_image_receipt_sha256")
+        != args.expected_local_image_receipt_sha256
+        or receipt.get("local_create_plan_sha256") != plan_sha256
+        or receipt.get("active_controller_manifest_sha256")
+        != args.expected_controller_manifest_sha256
+        or receipt.get("instance_path") != str(instance)
+    ):
+        raise CommissionError("completed VM-create finalization binding differs")
+    marker_present = marker_path.exists() or marker_path.is_symlink()
+    if marker_present:
+        if marker_path.is_symlink():
+            raise CommissionError("completed VM-create finalization marker differs")
+        marker = _read_fd_bound_file(
+            marker_path,
+            owner_uid=0,
+            owner_gid=0,
+            mode=0o400,
+            maximum_size=4096,
+        )
+        if receipt["legacy_pre_receipt_instance_adoption"]:
+            contract = apply_lock["stopped_instance_adoption_continuation_v1"]
+            expected_marker = _canonical_json(
+                {
+                    "schema_version": 1,
+                    "kind": "trading-desk.router-commission.installing",
+                    "phase": "vm-create",
+                    "local_image_receipt_sha256": contract[
+                        "local_image_receipt_sha256"
+                    ],
+                    "local_create_plan_sha256": contract[
+                        "local_create_plan_sha256"
+                    ],
+                }
+            )
+        else:
+            expected_marker = current_marker
+        if (
+            marker != expected_marker
+            or _sha256_bytes(marker) != receipt["installing_marker_sha256"]
+        ):
+            raise CommissionError("completed VM-create finalization marker differs")
+    _assert_real_path(
+        instance,
+        kind="directory",
+        owner_uid=apply_lock["host"]["router_operator_uid"],
+        owner_gid=apply_lock["host"]["router_operator_gid"],
+        mode=0o700,
+    )
+    _assert_no_vm_or_socket_vmnet_process()
+    _assert_qemu_img_absent(create_environment)
+    network_before = _network_state_snapshot()
+    evidence = _verify_created_vm(
+        apply_lock,
+        vm_spec,
+        plan_bytes=plan_bytes,
+        cloud_template=cloud_template,
+        key_receipt=key_receipt,
+        networks_sha256=networks_sha256,
+    )
+    evidence_bindings = {
+        "instance_path": "instance_path",
+        "instance_device": "instance_device",
+        "instance_inode": "instance_inode",
+        "disk_logical_bytes": "disk_logical_bytes",
+        "disk_sha256": "disk_sha256",
+        "stored_plan_sha256": "stored_plan_sha256",
+        "lima_version_sha256": "lima_version_sha256",
+        "cloud_config_sha256": "cloud_config_sha256",
+        "wan_mac": "wan_mac",
+        "vz_identifier_sha256": "vz_identifier_sha256",
+        "vz_identifier_uuid": "vz_identifier_uuid",
+    }
+    if any(
+        receipt.get(receipt_key) != evidence[evidence_key]
+        for receipt_key, evidence_key in evidence_bindings.items()
+    ):
+        raise CommissionError("completed VM-create instance evidence differs")
+    status_document_sha256 = _verify_create_only_status(
+        limactl,
+        create_environment,
+        uid=apply_lock["host"]["router_operator_uid"],
+        gid=apply_lock["host"]["router_operator_gid"],
+        instance_name=vm_spec["instance_name"],
+        instance_path=instance,
+    )
+    if receipt.get("status_document_sha256") != status_document_sha256:
+        raise CommissionError("completed VM-create status evidence differs")
+    _assert_no_vm_or_socket_vmnet_process()
+    _assert_qemu_img_absent(create_environment)
+    network_after = _network_state_snapshot()
+    if network_after != network_before:
+        raise CommissionError("host network state changed during receipt finalization")
+    if marker_present:
+        marker_path.unlink()
+        _sync_directory(state["state"])
+    return receipt_path, receipt_sha256, marker_present
 
 
 def _create_vm(args: argparse.Namespace) -> int:
@@ -4557,19 +4976,63 @@ def _create_vm(args: argparse.Namespace) -> int:
     free_before = _free_bytes(Path(apply_lock["paths"]["lima_home"]))
     if free_before < apply_lock["storage"]["vm_create_minimum_free_before_bytes"]:
         raise CommissionError("insufficient VM create headroom")
-    marker = _canonical_json(
+    active_controller_script_sha256 = _sha256_file(Path(__file__).resolve())
+    current_marker = _canonical_json(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "trading-desk.router-commission.installing",
             "phase": "vm-create",
             "local_image_receipt_sha256": args.expected_local_image_receipt_sha256,
             "local_create_plan_sha256": plan_sha256,
+            "controller_manifest_sha256": args.expected_controller_manifest_sha256,
+            "controller_script_sha256": active_controller_script_sha256,
         }
     )
     marker_path = state["state"] / ".vm-create.INSTALLING.json"
-    _write_exact_file(marker_path, marker, mode=0o400, uid=0, gid=0)
     lima_home = Path(apply_lock["paths"]["lima_home"])
     instance = lima_home / vm_spec["instance_name"]
+    networks_sha256 = _root_phase_receipt(
+        state,
+        "lima-home",
+        _root_phase_receipt(
+            state,
+            "validate-fill",
+            local_receipt["validate_fill_receipt_sha256"],
+        )["lima_home_receipt_sha256"],
+    )["networks_yaml_sha256"]
+    finalized = _finalize_completed_vm_create_receipt(
+        args,
+        apply_lock,
+        state,
+        marker_path=marker_path,
+        current_marker=current_marker,
+        plan_sha256=plan_sha256,
+        plan_bytes=plan_bytes,
+        cloud_template=cloud_template,
+        instance=instance,
+        vm_spec=vm_spec,
+        key_receipt=key_receipt,
+        networks_sha256=networks_sha256,
+        limactl=limactl,
+        create_environment=create_environment,
+    )
+    if finalized is not None:
+        path, digest, marker_removed = finalized
+        print(f"vm_create_receipt={path}")
+        print(f"vm_create_receipt_sha256={digest}")
+        print(f"completed_receipt_marker_removed={str(marker_removed).lower()}")
+        print("limactl_create_invoked=false")
+        print("network_changes_performed=false")
+        return 0
+    marker, marker_value, legacy_instance_adoption = _select_vm_create_marker(
+        args,
+        apply_lock,
+        state,
+        marker_path=marker_path,
+        current_marker=current_marker,
+        plan_sha256=plan_sha256,
+        instance=instance,
+    )
     retained_quarantine = _verify_retained_vm_create_quarantine(
         state,
         apply_lock,
@@ -4581,6 +5044,7 @@ def _create_vm(args: argparse.Namespace) -> int:
         Path(apply_lock["vm_management_ssh"]["private_key_path"]),
         Path(apply_lock["vm_management_ssh"]["public_key_path"]),
     )
+    limactl_create_invoked = False
     if not instance.exists() and not instance.is_symlink():
         uid = apply_lock["host"]["router_operator_uid"]
         gid = apply_lock["host"]["router_operator_gid"]
@@ -4600,6 +5064,7 @@ def _create_vm(args: argparse.Namespace) -> int:
             timeout=300,
             check=False,
         )
+        limactl_create_invoked = True
         if (
             len(result.stdout) > 1024 * 1024
             or len(result.stderr) > 4 * 1024 * 1024
@@ -4612,15 +5077,7 @@ def _create_vm(args: argparse.Namespace) -> int:
         plan_bytes=plan_bytes,
         cloud_template=cloud_template,
         key_receipt=key_receipt,
-        networks_sha256=_root_phase_receipt(
-            state,
-            "lima-home",
-            _root_phase_receipt(
-                state,
-                "validate-fill",
-                local_receipt["validate_fill_receipt_sha256"],
-            )["lima_home_receipt_sha256"],
-        )["networks_yaml_sha256"],
+        networks_sha256=networks_sha256,
     )
     status_document_sha256 = _verify_create_only_status(
         limactl,
@@ -4645,16 +5102,38 @@ def _create_vm(args: argparse.Namespace) -> int:
     free_after = _free_bytes(lima_home)
     if free_after < apply_lock["storage"]["local_image_minimum_free_after_bytes"]:
         raise CommissionError("VM create consumed emergency headroom")
-    marker_path.unlink()
-    _sync_directory(state["state"])
     receipt = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "trading-desk.router-commission.vm-create",
         "phase": "vm-create",
         "local_image_receipt_sha256": args.expected_local_image_receipt_sha256,
         "runtime_receipt_sha256": runtime_receipt_sha,
         "router_identity_receipt": identity_receipt,
         "local_create_plan_sha256": plan_sha256,
+        "installing_marker_sha256": _sha256_bytes(marker),
+        "marker_schema_version": marker_value["schema_version"],
+        "active_controller_manifest_sha256": args.expected_controller_manifest_sha256,
+        "active_controller_script_sha256": active_controller_script_sha256,
+        "marker_controller_manifest_sha256": (
+            apply_lock["stopped_instance_adoption_continuation_v1"][
+                "failed_controller_manifest_sha256"
+            ]
+            if legacy_instance_adoption
+            else marker_value["controller_manifest_sha256"]
+        ),
+        "producer_commission_apply_sha256": (
+            apply_lock["stopped_instance_adoption_continuation_v1"][
+                "producer_commission_apply_sha256"
+            ]
+            if legacy_instance_adoption
+            else active_controller_script_sha256
+        ),
+        "generated_file_modes": apply_lock[
+            "stopped_instance_adoption_continuation_v1"
+        ]["generated_file_modes"],
+        "generated_file_sizes": apply_lock[
+            "stopped_instance_adoption_continuation_v1"
+        ]["generated_file_sizes"],
         "instance_path": evidence["instance_path"],
         "instance_device": evidence["instance_device"],
         "instance_inode": evidence["instance_inode"],
@@ -4671,6 +5150,9 @@ def _create_vm(args: argparse.Namespace) -> int:
         ],
         "headroom_verified": True,
         "create_or_exact_adoption_completed": True,
+        "pre_receipt_instance_adoption": not limactl_create_invoked,
+        "legacy_pre_receipt_instance_adoption": legacy_instance_adoption,
+        "limactl_create_invoked": limactl_create_invoked,
         "retained_vm_create_quarantines": [
             str(path) for path in retained_quarantine
         ],
@@ -4688,9 +5170,12 @@ def _create_vm(args: argparse.Namespace) -> int:
         "venue_writes_authorized": False,
         "mainnet_authorized": False,
     }
+    _validate_vm_create_receipt(receipt, apply_lock)
     path, digest = _atomic_receipt(
         state["receipt_parent"], PHASE_RECEIPTS["vm-create"], receipt, uid=0, gid=0
     )
+    marker_path.unlink()
+    _sync_directory(state["state"])
     print(f"vm_create_receipt={path}")
     print(f"vm_create_receipt_sha256={digest}")
     print("vm_status=Stopped")

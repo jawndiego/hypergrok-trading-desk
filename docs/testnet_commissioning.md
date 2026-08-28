@@ -64,8 +64,10 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   exact retained pre-fix management-key marker/controller recovery and one
   exact completed schema-v2 key-receipt continuation. Its local-image recovery
   additionally pins the predecessor sealed-media receipt/manifest and the sole
-  unreceipted empty-home retirement left by the failed controller. VM start,
-  guest installation and every network/router-key phase remain disabled.
+  unreceipted empty-home retirement left by the failed controller. Its final
+  continuation verifies and adopts one exact already-created stopped instance
+  under the observed mode-`0077` artifact modes without invoking create again.
+  VM start, guest installation and every network/router-key phase remain disabled.
 - A TESTNET-only proposal-v2 model binds the staging document, ticket,
   protected plan, grant, displayed economics, account identity, policy,
   account/market snapshots, broker session and expiry. A separate control

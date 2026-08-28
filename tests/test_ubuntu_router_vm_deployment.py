@@ -1132,12 +1132,15 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
                 ),
             }
             modes = {
-                "cloud-config.yaml": 0o444,
+                "cloud-config.yaml": 0o400,
                 "disk": 0o600,
-                "lima-version": 0o444,
-                "lima.yaml": 0o644,
-                "vz-identifier": 0o644,
+                "lima-version": 0o400,
+                "lima.yaml": 0o600,
+                "vz-identifier": 0o600,
             }
+            apply_lock["stopped_instance_adoption_continuation_v1"][
+                "generated_file_sizes"
+            ] = {name: len(content) for name, content in files.items()}
             for name, content in files.items():
                 path = instance / name
                 path.write_bytes(content)
@@ -1176,7 +1179,7 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
                     hashlib.sha256(files["cloud-config.yaml"]).hexdigest(),
                     evidence["cloud_config_sha256"],
                 )
-                (instance / "lima.yaml").write_bytes(b"changed\n")
+                (instance / "lima.yaml").write_bytes(b"other-plan\n")
                 with self.assertRaisesRegex(
                     namespace["CommissionError"], "plan differs"
                 ):
@@ -1189,11 +1192,11 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
                         networks_sha256=hashlib.sha256(b"network").hexdigest(),
                     )
                 (instance / "lima.yaml").write_bytes(plan)
-                (instance / "cloud-config.yaml").chmod(0o644)
+                (instance / "cloud-config.yaml").chmod(0o600)
                 (instance / "cloud-config.yaml").write_bytes(
-                    cloud + b"runcmd: [malicious]\n"
+                    cloud.replace(b"routeradmin", b"routeradmix", 1)
                 )
-                (instance / "cloud-config.yaml").chmod(0o444)
+                (instance / "cloud-config.yaml").chmod(0o400)
                 with self.assertRaisesRegex(
                     namespace["CommissionError"], "cloud-config content"
                 ):
@@ -1254,6 +1257,7 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
                 "public_sha256": "p" * 64,
             }
             calls: list[list[str]] = []
+            created_receipt: dict[str, object] = {}
 
             def run(command, **_kwargs):
                 calls.append([str(value) for value in command])
@@ -1282,7 +1286,8 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
                     path.write_bytes(content)
                     path.chmod(0o400)
 
-            def receipt(_parent, name, _value, **_kwargs):
+            def receipt(_parent, name, value, **_kwargs):
+                created_receipt.update(value)
                 path = receipt_parent / name
                 path.write_bytes(b"receipt")
                 return path, "r" * 64
@@ -1362,20 +1367,437 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
                 calls[0],
             )
             self.assertNotIn("start", calls[0])
+            self.assertIs(True, created_receipt["limactl_create_invoked"])
+            self.assertIs(
+                False, created_receipt["legacy_pre_receipt_instance_adoption"]
+            )
+            self.assertEqual(2, created_receipt["marker_schema_version"])
+
+    def test_exact_stopped_instance_is_adopted_without_create_invocation(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_stopped_adoption_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        commission_lock = json.loads(
+            (LIMA_ROOT / "commission-lock.json").read_text(encoding="utf-8")
+        )
+        vm_spec = example_spec()
+        contract = apply_lock["stopped_instance_adoption_continuation_v1"]
+        self.assertEqual(
+            {
+                "cloud-config.yaml": "0400",
+                "disk": "0600",
+                "lima-version": "0400",
+                "lima.yaml": "0600",
+                "vz-identifier": "0600",
+            },
+            contract["generated_file_modes"],
+        )
+        self.assertEqual(
+            {
+                "cloud-config.yaml": 1268,
+                "disk": 20 * 1024**3,
+                "lima-version": 6,
+                "lima.yaml": 1546,
+                "vz-identifier": 70,
+            },
+            contract["generated_file_sizes"],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            state_root = root / "state"
+            receipt_parent = root / "receipts"
+            quarantine = root / "quarantine"
+            lima_home = root / "lima"
+            config = lima_home / "_config"
+            instance = lima_home / "trading-desk-router"
+            for path in (
+                state_root,
+                receipt_parent,
+                quarantine,
+                config,
+                instance,
+            ):
+                path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            lima_home.chmod(0o700)
+            uid = os.getuid()
+            gid = os.getgid()
+            apply_lock["host"]["router_operator_uid"] = uid
+            apply_lock["host"]["router_operator_gid"] = gid
+            apply_lock["paths"]["lima_home"] = str(lima_home)
+            apply_lock["paths"]["operator_home"] = str(lima_home)
+            image = root / "image.img"
+            image.write_bytes(b"image")
+            image.chmod(0o444)
+            apply_lock["paths"]["local_image"] = str(image)
+            networks = config / "networks.yaml"
+            networks.write_bytes(b"networks\n")
+            networks.chmod(0o600)
+            private = config / "user"
+            public = config / "user.pub"
+            private.write_bytes(b"private")
+            private.chmod(0o600)
+            public_text = "ssh-ed25519 AAAATEST lima\n"
+            public.write_text(public_text, encoding="ascii")
+            public.chmod(0o600)
+            apply_lock["vm_management_ssh"]["private_key_path"] = str(private)
+            apply_lock["vm_management_ssh"]["public_key_path"] = str(public)
+
+            plan = b"#" + b"p" * (contract["generated_file_sizes"]["lima.yaml"] - 2) + b"\n"
+            cloud_template = (
+                b'#cloud-config\n  - name: "routeradmin"\n'
+                b"    key: @@VM_MANAGEMENT_PUBLIC_KEY@@\n"
+                b"  for pair in @@WAN_MAC@@=eth0 "
+                b"02:74:64:00:00:01=td-ingress; do\n"
+            )
+            cloud = cloud_template.replace(
+                b"@@VM_MANAGEMENT_PUBLIC_KEY@@",
+                public_text.strip().encode("ascii"),
+            ).replace(b"@@WAN_MAC@@", b"52:55:55:12:34:56")
+            padding = contract["generated_file_sizes"]["cloud-config.yaml"] - len(
+                cloud
+            )
+            self.assertGreaterEqual(padding, 2)
+            cloud_template += b"#" + b"x" * (padding - 2) + b"\n"
+            cloud = cloud_template.replace(
+                b"@@VM_MANAGEMENT_PUBLIC_KEY@@",
+                public_text.strip().encode("ascii"),
+            ).replace(b"@@WAN_MAC@@", b"52:55:55:12:34:56")
+            identifier = plistlib.dumps(
+                {"UUID": b"1" * 16}, fmt=plistlib.FMT_BINARY
+            )
+            self.assertEqual(
+                contract["generated_file_sizes"]["vz-identifier"],
+                len(identifier),
+            )
+            files = {
+                "cloud-config.yaml": cloud,
+                "lima-version": b"v2.2.0",
+                "lima.yaml": plan,
+                "vz-identifier": identifier,
+            }
+            for name, content in files.items():
+                path = instance / name
+                path.write_bytes(content)
+                path.chmod(int(contract["generated_file_modes"][name], 8))
+            disk = instance / "disk"
+            with disk.open("wb") as stream:
+                stream.truncate(contract["generated_file_sizes"]["disk"])
+            disk.chmod(0o600)
+            marker_value = {
+                "schema_version": 1,
+                "kind": "trading-desk.router-commission.installing",
+                "phase": "vm-create",
+                "local_image_receipt_sha256": contract[
+                    "local_image_receipt_sha256"
+                ],
+                "local_create_plan_sha256": contract[
+                    "local_create_plan_sha256"
+                ],
+            }
+            marker = namespace["_canonical_json"](marker_value)
+            self.assertEqual(
+                contract["installing_marker_sha256"],
+                hashlib.sha256(marker).hexdigest(),
+            )
+            marker_path = state_root / ".vm-create.INSTALLING.json"
+            marker_path.write_bytes(marker)
+            marker_path.chmod(0o400)
+            image_sha256 = commission_lock["cloud_image"]["image_sha256"]
+            identity_receipt = {"sha256": "i" * 64}
+            local_receipt = {
+                "vm_management_key_receipt_sha256": "k" * 64,
+                "router_identity_receipt": identity_receipt,
+                "local_image_device": image.stat().st_dev,
+                "local_image_inode": image.stat().st_ino,
+                "local_image_size_bytes": image.stat().st_size,
+                "local_image_sha256": image_sha256,
+                "local_create_plan_sha256": contract[
+                    "local_create_plan_sha256"
+                ],
+                "local_create_effective_config_sha256": vm_spec["lima_home"][
+                    "local_create_effective_config_sha256"
+                ],
+                "validate_fill_receipt_sha256": "v" * 64,
+            }
+            key_receipt = {
+                "private_device": 1,
+                "private_inode": 2,
+                "public_sha256": "p" * 64,
+            }
+            captured: dict[str, object] = {}
+
+            def sha256_file(path: Path) -> str:
+                if path == image:
+                    return image_sha256
+                return hashlib.sha256(path.read_bytes()).hexdigest()
+
+            def root_receipt(_state, phase: str, _digest: str):
+                if phase == "validate-fill":
+                    return {"lima_home_receipt_sha256": "h" * 64}
+                self.assertEqual("lima-home", phase)
+                return {
+                    "networks_yaml_sha256": hashlib.sha256(
+                        networks.read_bytes()
+                    ).hexdigest()
+                }
+
+            def read_json(path: Path, _label: str):
+                if path.name == "bundle-manifest.json":
+                    return {
+                        "files": {
+                            "cloud-config-create.template": hashlib.sha256(
+                                cloud_template
+                            ).hexdigest()
+                        }
+                    }
+                return json.loads(path.read_text(encoding="utf-8"))
+
+            def read_file(path: Path, **_kwargs):
+                if path.name == "cloud-config-create.template":
+                    return cloud_template
+                return path.read_bytes()
+
+            def receipt(_parent, name, value, **_kwargs):
+                self.assertEqual("07-vm-create.json", name)
+                captured.update(value)
+                path = receipt_parent / name
+                write_json(path, value)
+                path.chmod(0o400)
+                return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+            exact_status = namespace["_expected_create_only_status"](
+                "trading-desk-router",
+                Path("/private/var/db/trading-desk-lima/trading-desk-router"),
+            )
+
+            def verify_status(*_args, **_kwargs):
+                return namespace["_parse_create_only_status"](
+                    (json.dumps(exact_status) + "\n").encode(),
+                    instance_name="trading-desk-router",
+                    instance_path=Path(
+                        "/private/var/db/trading-desk-lima/trading-desk-router"
+                    ),
+                )
+
+            key_evidence = {
+                "private_identity": (1, 2),
+                "private_device": 1,
+                "private_inode": 2,
+                "public_sha256": "p" * 64,
+            }
+            real_assert_path = namespace["_assert_real_path"]
+
+            def assert_path(path: Path, **kwargs):
+                if path == image or path.parent == receipt_parent:
+                    metadata = path.stat()
+                    expected_mode = 0o444 if path == image else 0o400
+                    self.assertEqual(expected_mode, stat.S_IMODE(metadata.st_mode))
+                    return metadata
+                return real_assert_path(path, **kwargs)
+
+            patches = {
+                "_locks": lambda: (apply_lock, commission_lock, vm_spec),
+                "_assert_root_apply": lambda *_args: "runtime",
+                "_router_operator_identity": lambda _lock: identity_receipt,
+                "_initialize_state": lambda _lock: {
+                    "state": state_root,
+                    "receipt_parent": receipt_parent,
+                    "quarantine_parent": quarantine,
+                },
+                "_acquire_state_lock": lambda _state: 1,
+                "_read_local_image_receipt": lambda *_args: local_receipt,
+                "_read_vm_management_key_receipt": lambda *_args: key_receipt,
+                "_root_phase_receipt": root_receipt,
+                "_assert_real_path": assert_path,
+                "_sha256_file": sha256_file,
+                "_compatible_validation_plan": lambda *_args, **_kwargs: (
+                    plan,
+                    contract["local_create_plan_sha256"],
+                ),
+                "_read_json": read_json,
+                "_read_fd_bound_file": read_file,
+                "_assert_no_vm_or_socket_vmnet_process": lambda: None,
+                "_verified_installed_limactl": lambda *_args: Path("/limactl"),
+                "_assert_qemu_img_absent": lambda _environment: None,
+                "_network_state_snapshot": lambda: {"stable": "1"},
+                "_free_bytes": lambda _path: 100 * 1024**3,
+                "_verify_retained_vm_create_quarantine": lambda *_args, **_kwargs: (),
+                "_verify_vm_management_key_pair": lambda *_args: key_evidence,
+                "_verify_created_disk_content": lambda *_args, **_kwargs: (
+                    2 * 1024**3,
+                    vm_spec["lima_home"]["local_create_disk_sha256"],
+                ),
+                "_verify_create_only_status": verify_status,
+                "_full_fsync_fd": lambda _descriptor: None,
+                "_sync_directory": lambda _path: None,
+                "_no_named_acl": lambda _path: None,
+                "_atomic_receipt": receipt,
+            }
+            class InjectedPostReceiptCrash(Exception):
+                pass
+
+            with (
+                mock.patch.dict(namespace, patches),
+                mock.patch.object(
+                    namespace["subprocess"],
+                    "run",
+                    side_effect=AssertionError("limactl create must not run"),
+                ),
+                mock.patch.object(
+                    Path, "unlink", side_effect=InjectedPostReceiptCrash
+                ),
+                self.assertRaises(InjectedPostReceiptCrash),
+                redirect_stdout(io.StringIO()),
+            ):
+                namespace["_create_vm"](
+                    SimpleNamespace(
+                        expected_local_image_receipt_sha256=contract[
+                            "local_image_receipt_sha256"
+                        ],
+                        expected_controller_manifest_sha256="f" * 64,
+                    )
+                )
+            self.assertTrue(marker_path.exists())
+            vm_receipt_path = receipt_parent / "07-vm-create.json"
+            self.assertTrue(vm_receipt_path.exists())
+            version_path = instance / "lima-version"
+            version_path.chmod(0o600)
+            version_path.write_bytes(b"v2.2.1")
+            version_path.chmod(0o400)
+            with (
+                mock.patch.dict(namespace, patches),
+                mock.patch.object(
+                    namespace["subprocess"],
+                    "run",
+                    side_effect=AssertionError("limactl create must not run"),
+                ),
+                self.assertRaisesRegex(
+                    namespace["CommissionError"], "Lima version differs"
+                ),
+            ):
+                namespace["_create_vm"](
+                    SimpleNamespace(
+                        expected_local_image_receipt_sha256=contract[
+                            "local_image_receipt_sha256"
+                        ],
+                        expected_controller_manifest_sha256="f" * 64,
+                    )
+                )
+            self.assertTrue(marker_path.exists())
+            version_path.chmod(0o600)
+            version_path.write_bytes(b"v2.2.0")
+            version_path.chmod(0o400)
+            retained_instance = root / "retained-original-instance"
+            instance.rename(retained_instance)
+            instance.mkdir(mode=0o700)
+            with (
+                mock.patch.dict(namespace, patches),
+                mock.patch.object(
+                    namespace["subprocess"],
+                    "run",
+                    side_effect=AssertionError("limactl create must not run"),
+                ),
+                self.assertRaisesRegex(
+                    namespace["CommissionError"], "instance file set differs"
+                ),
+            ):
+                namespace["_create_vm"](
+                    SimpleNamespace(
+                        expected_local_image_receipt_sha256=contract[
+                            "local_image_receipt_sha256"
+                        ],
+                        expected_controller_manifest_sha256="f" * 64,
+                    )
+                )
+            self.assertTrue(marker_path.exists())
+            instance.rmdir()
+            retained_instance.rename(instance)
+
+            class InjectedPostUnlinkCrash(Exception):
+                pass
+
+            def sync_after_unlink(path: Path) -> None:
+                if path == state_root:
+                    raise InjectedPostUnlinkCrash
+
+            post_unlink_patches = dict(patches)
+            post_unlink_patches["_sync_directory"] = sync_after_unlink
+            with (
+                mock.patch.dict(namespace, post_unlink_patches),
+                mock.patch.object(
+                    namespace["subprocess"],
+                    "run",
+                    side_effect=AssertionError("limactl create must not run"),
+                ),
+                self.assertRaises(InjectedPostUnlinkCrash),
+            ):
+                namespace["_create_vm"](
+                    SimpleNamespace(
+                        expected_local_image_receipt_sha256=contract[
+                            "local_image_receipt_sha256"
+                        ],
+                        expected_controller_manifest_sha256="f" * 64,
+                    )
+                )
+            self.assertFalse(marker_path.exists())
+            with (
+                mock.patch.dict(namespace, patches),
+                mock.patch.object(
+                    namespace["subprocess"],
+                    "run",
+                    side_effect=AssertionError("limactl create must not run"),
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                result = namespace["_create_vm"](
+                    SimpleNamespace(
+                        expected_local_image_receipt_sha256=contract[
+                            "local_image_receipt_sha256"
+                        ],
+                        expected_controller_manifest_sha256="f" * 64,
+                    )
+                )
+            self.assertEqual(0, result)
+            with (
+                mock.patch.dict(namespace, patches),
+                mock.patch.object(
+                    namespace["subprocess"],
+                    "run",
+                    side_effect=AssertionError("limactl create must not run"),
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                repeated = namespace["_create_vm"](
+                    SimpleNamespace(
+                        expected_local_image_receipt_sha256=contract[
+                            "local_image_receipt_sha256"
+                        ],
+                        expected_controller_manifest_sha256="f" * 64,
+                    )
+                )
+            self.assertEqual(0, repeated)
+            self.assertIs(False, captured["limactl_create_invoked"])
+            self.assertIs(True, captured["pre_receipt_instance_adoption"])
+            self.assertIs(
+                True, captured["legacy_pre_receipt_instance_adoption"]
+            )
+            self.assertEqual(
+                contract["installing_marker_sha256"],
+                captured["installing_marker_sha256"],
+            )
+            self.assertFalse(marker_path.exists())
 
     def test_create_status_requires_one_exact_stopped_instance(self) -> None:
         namespace = load_script_namespace(
             COMMISSION_APPLY_PATH, "commission_apply_create_status_test"
         )
         instance = Path("/private/var/db/trading-desk-lima/trading-desk-router")
-        value = {
-            "name": "trading-desk-router",
-            "status": "Stopped",
-            "vmType": "vz",
-            "arch": "aarch64",
-            "dir": str(instance),
-            "protected": False,
-        }
+        value = namespace["_expected_create_only_status"](
+            "trading-desk-router", instance
+        )
         raw = (json.dumps(value, separators=(",", ":")) + "\n").encode()
         observed = namespace["_parse_create_only_status"](
             raw,
@@ -1387,6 +1809,7 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
             {**value, "status": "Running"},
             {**value, "status": "Unknown"},
             {**value, "name": "other"},
+            {**value, "network": []},
         )
         for variant in variants:
             with self.assertRaises(namespace["CommissionError"]):
@@ -2875,7 +3298,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                     "dependency_closure_package_count": 116,
                     "immutable_public_inputs_locked": True,
                     "immutable_public_inputs_verified": False,
-                    "commission_apply_lock_sha256": "f05094c2d5f6e5bd3e88574c4ae208c96b0e429ba3dd7c21693a40ef084a57c0",
+                    "commission_apply_lock_sha256": "0f57291a80739242e0c9d8b500528141ac13cac84f5595c0db9f754fbb497ce0",
                     "enabled_host_prepare_phases": [
                         "host_tools_apply_enabled",
                         "lima_home_apply_enabled",
