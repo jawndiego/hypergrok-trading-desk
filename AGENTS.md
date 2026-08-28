@@ -147,6 +147,13 @@ This repository builds an agent-runtime-neutral trading research and execution h
   UID/GID 453. The companion UID-452 chat-store initializer accepts no
   arguments. This foreground exception does not waive role/ACL, VPN/PF,
   Keychain-reader, route-evidence, venue-lifecycle or mainnet gates.
+- After foreground state exists, replace the immutable application only through
+  `deploy/macos/testnet/08-migrate-commissioned-release.sh`. The uncommissioned
+  migration must reject that machine. The commissioned migration pins both
+  READY releases and all public commissioning receipts, requires quiescence,
+  snapshot-compares persistent state around the new release's credential-free
+  `status`/`dry-run`, atomically rolls back a failed qualification, and retains
+  both releases. Never patch an installed venv or hand-edit `current`.
 - Read `docs/testnet_chat_approval.md` before changing the remote TESTNET
   approval path. The fixed broker must run as UID 452, verify UID/GID 501 before
   reading, and be mutually verified by the UID-501 bridge before it sends. The
