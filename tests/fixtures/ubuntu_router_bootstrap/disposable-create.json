@@ -1,0 +1,15 @@
+{
+  "cloud_config_generated_sha256": "f3e47d9c8bd4d2a97516e499756f71c9b83750f57f9579958fab33e6862f979b",
+  "cloud_config_template_sha256": "ee4d159bae33ba541ef1b32c0f15e96e39c8b251e28b1cebc15738dace2de225",
+  "disk_sha256": "6403de2584166d8a803a42dee4fc58e0046aadf2f756b2256ff1d95824fd6c33",
+  "instance_name": "trading-desk-router",
+  "limactl_sha256": "f19a4fca3875e1017a5285672be4a62699c1e55918fb6a7afce86a14199e10d9",
+  "management_public_key_sha256": "8e48d1e892754a5616d38b24bee9cefafb6b72b82608a82190981ddd3daac96f",
+  "network_changes_performed": false,
+  "plan_sha256": "aea50ab9aeaf1022f1cf1fbd7055cb9d249e6c94cb5bbae96ff04944a67a9874",
+  "schema_version": 1,
+  "venue_writes_authorized": false,
+  "vm_started": false,
+  "vm_status": "Stopped",
+  "wan_mac": "52:55:55:1a:63:bb"
+}

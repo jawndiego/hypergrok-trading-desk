@@ -1,0 +1,2 @@
+deploy/ubuntu-router/lima-bootstrap/cloud-config-first-boot.yaml.example whitespace=-blank-at-eol,-blank-at-eof
+tests/fixtures/ubuntu_router_bootstrap/cloud-config.generated whitespace=-blank-at-eol,-blank-at-eof

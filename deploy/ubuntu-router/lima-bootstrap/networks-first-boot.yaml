@@ -1,0 +1,14 @@
+# Fixed host-only socket_vmnet network for the attended bootstrap.
+# The runtime directory is below /private/var/db rather than the daemon-writable
+# /private/var/run ancestor used by Lima's generic example.
+paths:
+  socketVMNet: "/opt/socket_vmnet/bin/socket_vmnet"
+  varRun: "/private/var/db/trading-desk-router-vmnet-runtime"
+  sudoers: "/private/etc/sudoers.d/trading-desk-router-lima"
+group: "trading-router-operator"
+networks:
+  td-router-ingress:
+    mode: "host"
+    gateway: "192.168.106.1"
+    dhcpEnd: "192.168.106.254"
+    netmask: "255.255.255.0"

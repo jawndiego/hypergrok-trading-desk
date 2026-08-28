@@ -152,6 +152,14 @@ their owning machines because their derived public keys are renderer inputs.
    profile/private key may not pass through chat, the repository, argv,
    environment or a host/guest shared directory. Import does not activate the
    tunnel or qualify the route.
+   Receipt 07 is now complete at
+   `1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601`.
+   The separately rendered `lima-bootstrap` continuation can recoverably
+   replace only that never-booted instance with a hardened stopped instance;
+   no start is enabled. Its eventual first boot requires a continuously
+   checked physical Mac air-gap until the guest's exact default-drop/lock/APT
+   verifier succeeds. UID-scoped PF is defense in depth, not the first-boot
+   isolation boundary.
 7. **Proxy/trust environment.** Prove the executor rejects ambient proxy and CA
    override variables and that its urllib openers install an empty proxy
    handler. Retain the root-owned CA path and TLS hostname-verification

@@ -281,6 +281,40 @@ gates. No host route, PF rule, tunnel, router/WireGuard key, venue credential or
 venue state is changed; only the explicitly named local VM-management SSH key
 is created.
 
+### Minimal attended canary continuation
+
+Receipt 07 has been published for the exact stopped, never-booted instance at
+SHA-256 `1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601`.
+It is still `ready_to_start=false`.
+
+`scripts/render_ubuntu_router_bootstrap.py` renders a distinct continuation
+under `deploy/ubuntu-router/lima-bootstrap`. Its sole enabled apply phase
+retains the receipt-07 instance and its network file, then creates an exact
+hardened replacement that remains stopped. It never invokes `limactl start`,
+never deletes a predecessor or partial instance, and performs no active
+network, credential or venue operation. The replacement cloud identity uses a
+locked password with the existing UID-454-owned management key and embeds:
+
+- an APT/unattended-upgrade mask and periodic-update disable;
+- IPv6 disablement;
+- a persistent default-drop nftables bootstrap table;
+- poweroff-on-error traps; and
+- a root-only exact-hash verifier and durable receipts.
+
+Those controls cannot protect packets sent before cloud-init reaches the
+custom boot command. Consequently the later first start must run while every
+Mac uplink is physically disconnected, with a host controller continuously
+proving that no IPv4 or IPv6 default route appears. It must stop the VM on any
+guest/provisioning failure and may authorize reconnect only after the exact
+guest verifier succeeds with the default-drop table active. That start phase
+is not yet exposed by the current launcher.
+
+For the reduced first canary, defer remote chat approval, launchd, sleep/reboot
+qualification and long-running PnL collection. Do not defer the physical
+first-boot air-gap, one Proton profile, guest default-drop remote policy,
+UID-451 PF confinement, exit-IP/DNS/IPv6/tunnel-loss checks, or the attended
+far-nonmarketable GTC/query/cancel qualification.
+
 ## VM network contract
 
 Use an Ubuntu 24.04 ARM64 VM with two distinct NICs. The reviewed Lima plan

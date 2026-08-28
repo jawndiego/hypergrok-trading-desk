@@ -1,0 +1,78 @@
+# Inert first-boot Lima template. Rendering or reviewing this file does not
+# authorize VM start. A separately reviewed host controller must enforce an
+# attended physical air-gap for the complete first boot.
+minimumLimaVersion: "2.2.0"
+vmType: "vz"
+arch: "aarch64"
+os: "Linux"
+images:
+  - location: __PINNED_HARDENED_IMAGE_LOCATION_YAML__
+    arch: "aarch64"
+    digest: __PINNED_HARDENED_IMAGE_DIGEST_YAML__
+cpus: 2
+memory: "2GiB"
+disk: "20GiB"
+plain: true
+mounts: []
+additionalDisks: []
+provision:
+  # Lima emits mode=boot as cloud-init bootcmd after its NIC/DHCP wait. The
+  # attended host air-gap is the sole boundary until this script loads nft.
+  - mode: boot
+    script: |
+      __EARLY_BOOT_HARDENING_SCRIPT_YAML__
+  - mode: data
+    path: /usr/local/libexec/trading-desk-verify-first-boot
+    content: |
+      __VERIFY_FIRST_BOOT_SCRIPT_YAML__
+    owner: "root:root"
+    permissions: 500
+    overwrite: true
+  - mode: system
+    script: |
+      __FINALIZE_FIRST_BOOT_SCRIPT_YAML__
+probes: []
+portForwards: []
+containerd:
+  system: false
+  user: false
+vmOpts:
+  vz:
+    rosetta:
+      enabled: false
+      binfmt: false
+ssh:
+  loadDotSSHPubKeys: false
+  forwardAgent: false
+  forwardX11: false
+  forwardX11Trusted: false
+  overVsock: true
+propagateProxyEnv: false
+hostResolver:
+  enabled: false
+  ipv6: false
+  hosts: {}
+env: {}
+param: {}
+upgradePackages: false
+nestedVirtualization: false
+# This remains the reviewed eventual router topology. It is unsafe to start
+# until a host-side attended air-gap controller is separately implemented.
+networks:
+  - lima: "td-router-ingress"
+    macAddress: "02:74:64:00:00:01"
+    interface: "td-ingress"
+    metric: 200
+user:
+  name: "routeradmin"
+  comment: "Trading Desk Router Operator"
+  uid: 1000
+  home: "/var/lib/trading-desk-router"
+  shell: "/bin/bash"
+  # Bootstrap-only authority. The guest hardener locks password login, but a
+  # later stopped-guest phase must revoke passwordless sudo before networking.
+  passwordlessSudo: true
+audio:
+  device: "none"
+video:
+  display: "none"

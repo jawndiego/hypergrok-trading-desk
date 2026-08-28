@@ -235,6 +235,18 @@ This repository builds an agent-runtime-neutral trading research and execution h
   verification receipt remains informational and never root authority. VM
   start, guest/package apply, socket_vmnet activation and every network/router
   key mutation remain hard-disabled behind named blockers.
+- Receipt 07 for the exact never-booted stopped VM is now
+  `1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601`.
+  The separate `deploy/ubuntu-router/lima-bootstrap` continuation may only
+  retain that exact instance and create an exact hardened replacement that
+  also remains stopped. It embeds password-locked/key-only bootstrap identity,
+  early APT masks, IPv6 disablement and a default-drop nftables policy, but
+  none of those guest controls exists until first boot. The first boot must
+  therefore remain attended under a host-proven physical air-gap for its whole
+  interval; no current launcher can start it. Do not substitute UID-based PF
+  for that initial air-gap. The continuation retains every predecessor and
+  partial create, performs no deletion, and never authorizes reconnect, router
+  keys, credentials, venue writes or mainnet.
 - The VM and router renderers share the fixed `192.168.106.1/32` Mac to
   `192.168.106.2/24` guest ingress contract. The rendered
   `local-nat-lab-test-plan` is print-only: PF enforcement, a remote VPN exit,

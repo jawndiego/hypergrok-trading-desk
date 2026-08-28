@@ -1,0 +1,307 @@
+#cloud-config
+# vim:syntax=yaml
+
+growpart:
+  mode: auto
+  devices: ['/']
+
+users:
+  - name: "routeradmin"
+    uid: "1000"
+    gecos: "Trading Desk Router Operator"
+    homedir: "/var/lib/trading-desk-router"
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh-authorized-keys:
+      - "@@VM_MANAGEMENT_PUBLIC_KEY@@"
+bootcmd:
+- |
+  # Work around the NIC rename race on Ubuntu 26.04 first boot (LP: #2136392):
+  # cloud-init cannot rename an already-up NIC, leaving it unconfigured.
+  # Re-attempt the rename (requires link down), then wait for the slirp NIC
+  # to be configured. No-op when interfaces already have their expected names.
+  for pair in @@WAN_MAC@@=eth0 02:74:64:00:00:01=td-ingress; do
+    mac="${pair%=*}"; want="${pair#*=}"
+    [ -e "/sys/class/net/$want" ] && continue
+    cur=$(grep -lix "$mac" /sys/class/net/*/address 2>/dev/null | awk -F/ 'NR==1{print $(NF-1)}')
+    [ -n "$cur" ] || continue
+    for i in 1 2 3; do
+      ip link set "$cur" down && ip link set "$cur" name "$want" && ip link set "$want" up && break
+      sleep 1
+    done
+  done
+  i=0
+  until ip -4 addr show dev eth0 2>/dev/null | grep -q inet || [ $((i += 1)) -gt 30 ]; do
+    sleep 1
+  done
+- |
+  # We need to embed the params.env as a here-doc because /mnt/lima-cidata is not yet mounted
+  while read -r line; do [ -n "$line" ] && export "$line"; done <<'EOF'
+  EOF
+  #!/bin/sh
+  # Lima mode=boot payload. Lima expands it as cloud-init bootcmd after its NIC
+  # heal/DHCP wait and before the mode=system finalizer. A separately enforced
+  # attended host air-gap is therefore the sole boundary until nftables loads.
+  set -eu
+  umask 077
+  PATH=/usr/sbin:/usr/bin:/sbin:/bin
+  export PATH
+  
+  shutdown_armed=1
+  emergency_shutdown() {
+      status=$?
+      trap - 0 HUP INT TERM
+      if [ "$shutdown_armed" = 1 ]; then
+          /bin/echo 'first_boot_hardening_failed: emergency poweroff' >&2
+          /usr/bin/systemctl poweroff --force --force >/dev/null 2>&1 || \
+              /sbin/poweroff -f >/dev/null 2>&1 || true
+      fi
+      [ "$status" -ne 0 ] || status=2
+      exit "$status"
+  }
+  trap emergency_shutdown 0 HUP INT TERM
+  
+  STATE=/var/lib/trading-desk-router-bootstrap
+  RETAINED=$STATE/retained
+  RECEIPT=$STATE/early-boot.json
+  NFTABLES=/etc/nftables.conf
+  APT_PERIODIC=/etc/apt/apt.conf.d/99-trading-desk-disable-periodic
+  IPV6_SYSCTL=/etc/sysctl.d/99-trading-desk-bootstrap-disable-ipv6.conf
+  APT_UNITS='apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service'
+  ROUTER_KEY=/etc/wireguard/trading-desk-router.key
+  
+  die() {
+      /bin/echo "first_boot_hardening_failed: $*" >&2
+      exit 2
+  }
+  
+  assert_wireguard_empty() {
+      if [ -e /etc/wireguard ] || [ -L /etc/wireguard ]; then
+          [ -d /etc/wireguard ] && [ ! -L /etc/wireguard ] && \
+              [ "$(/usr/bin/stat -c '%u:%g' /etc/wireguard)" = '0:0' ] || \
+              die 'WireGuard directory is unsafe'
+          directory_mode=$(/usr/bin/stat -c '%a' /etc/wireguard)
+          [ $((0$directory_mode & 0022)) -eq 0 ] || \
+              die 'WireGuard directory is writable'
+          [ -z "$(/usr/bin/find /etc/wireguard -mindepth 1 -print -quit)" ] || \
+              die 'WireGuard directory is not empty'
+      fi
+  }
+  
+  [ "$(/usr/bin/id -u)" = 0 ] && [ "$(/usr/bin/id -g)" = 0 ] || \
+      die 'root:root is required'
+  [ "$(/usr/bin/uname -s)" = Linux ] && \
+      [ "$(/usr/bin/uname -m)" = aarch64 ] || die 'Linux aarch64 is required'
+  assert_wireguard_empty
+  
+  ensure_state_dir() {
+      path=$1
+      if [ -e "$path" ] || [ -L "$path" ]; then
+          [ -d "$path" ] && [ ! -L "$path" ] && \
+              [ "$(/usr/bin/stat -c '%u:%g:%a' "$path")" = '0:0:700' ] || \
+              die 'bootstrap state directory is unsafe'
+      else
+          /bin/mkdir -m 0700 "$path"
+          /bin/chown root:root "$path"
+          /usr/bin/sync -f "$(/usr/bin/dirname "$path")"
+      fi
+  }
+  
+  ensure_state_dir "$STATE"
+  ensure_state_dir "$RETAINED"
+  exec 9>"$STATE/.early-boot.lock"
+  /usr/bin/flock -n 9 || die 'early-boot lock is already held'
+  
+  write_payload() {
+      target=$1
+      mode=$2
+      label=$3
+      parent=$(/usr/bin/dirname "$target")
+      [ -d "$parent" ] && [ ! -L "$parent" ] && \
+          [ "$(/usr/bin/stat -c '%u:%g' "$parent")" = '0:0' ] || \
+          die "$label parent is unsafe"
+      parent_mode=$(/usr/bin/stat -c '%a' "$parent")
+      [ $((0$parent_mode & 0022)) -eq 0 ] || die "$label parent is writable"
+      stage=$(/usr/bin/mktemp "$STATE/.${label}.XXXXXX")
+      /bin/cat >"$stage"
+      /bin/chown root:root "$stage"
+      /bin/chmod "$mode" "$stage"
+      /usr/bin/sync -f "$stage"
+      if [ -e "$target" ] || [ -L "$target" ]; then
+          [ -f "$target" ] && [ ! -L "$target" ] || die "$label target is unsafe"
+          [ "$(/usr/bin/stat -c '%u:%g:%h' "$target")" = '0:0:1' ] || \
+              die "$label target metadata is unsafe"
+          if /usr/bin/cmp -s "$stage" "$target" && \
+              [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$target")" = "0:0:$mode:1" ]; then
+              /bin/rm -f "$stage"
+              return
+          fi
+          old_sha=$(/usr/bin/sha256sum "$target" | /usr/bin/awk '{print $1}')
+          retained="$RETAINED/${label}.before.$old_sha"
+          if [ -e "$retained" ] || [ -L "$retained" ]; then
+              [ -f "$retained" ] && [ ! -L "$retained" ] && \
+                  [ "$(/usr/bin/stat -c '%u:%g:%a:%h' "$retained")" = '0:0:400:1' ] && \
+                  /usr/bin/cmp -s "$target" "$retained" || \
+                  die "$label retained predecessor differs"
+          else
+              /bin/cp -p "$target" "$retained"
+              /bin/chown root:root "$retained"
+              /bin/chmod 0400 "$retained"
+              /usr/bin/sync -f "$retained"
+              /usr/bin/sync -f "$RETAINED"
+          fi
+      fi
+      /bin/mv -f "$stage" "$target"
+      /usr/bin/sync -f "$target"
+      /usr/bin/sync -f "$parent"
+  }
+  
+  # Apply the deny policy before any mode=system provisioning and before the host
+  # is allowed to reconnect an uplink.
+  write_payload "$NFTABLES" 400 nftables <<'NFTABLES_EOF'
+  flush ruleset
+  table inet trading_desk_bootstrap {
+      chain input {
+          type filter hook input priority -300; policy drop;
+          iifname "lo" accept
+      }
+      chain forward {
+          type filter hook forward priority -300; policy drop;
+      }
+      chain output {
+          type filter hook output priority -300; policy drop;
+          oifname "lo" accept
+      }
+  }
+  NFTABLES_EOF
+  /usr/sbin/nft --check --file "$NFTABLES"
+  /usr/sbin/nft --file "$NFTABLES"
+  /usr/bin/systemctl enable nftables.service >/dev/null
+  /usr/bin/systemctl restart nftables.service
+  [ "$(/usr/bin/systemctl is-enabled nftables.service)" = enabled ] || \
+      die 'nftables service is not enabled'
+  /usr/bin/systemctl show nftables.service --property=Before --value | \
+      /usr/bin/grep -qw network-pre.target || \
+      die 'nftables is not ordered before network-pre.target'
+  
+  write_payload "$IPV6_SYSCTL" 444 ipv6-sysctl <<'IPV6_EOF'
+  net.ipv6.conf.all.disable_ipv6 = 1
+  net.ipv6.conf.default.disable_ipv6 = 1
+  IPV6_EOF
+  /usr/sbin/sysctl -q -p "$IPV6_SYSCTL"
+  for disable in /proc/sys/net/ipv6/conf/*/disable_ipv6; do
+      [ -f "$disable" ] || die 'IPv6 disable controls are absent'
+      /bin/echo 1 >"$disable"
+      [ "$(/bin/cat "$disable")" = 1 ] || die 'IPv6 remains enabled'
+  done
+  
+  write_payload "$APT_PERIODIC" 444 apt-periodic <<'APT_EOF'
+  APT::Periodic::Enable "0";
+  APT::Periodic::Update-Package-Lists "0";
+  APT::Periodic::Download-Upgradeable-Packages "0";
+  APT::Periodic::Unattended-Upgrade "0";
+  APT::Periodic::AutocleanInterval "0";
+  APT_EOF
+  /usr/bin/systemctl mask --now $APT_UNITS >/dev/null
+  for unit in $APT_UNITS; do
+      [ "$(/usr/bin/systemctl is-enabled "$unit" 2>/dev/null || true)" = masked ] || \
+          die "APT unit is not masked: $unit"
+  done
+  
+  assert_wireguard_empty
+  apt_sha=$(/usr/bin/sha256sum "$APT_PERIODIC" | /usr/bin/awk '{print $1}')
+  ipv6_sha=$(/usr/bin/sha256sum "$IPV6_SYSCTL" | /usr/bin/awk '{print $1}')
+  nft_sha=$(/usr/bin/sha256sum "$NFTABLES" | /usr/bin/awk '{print $1}')
+  nft_runtime_sha=$(/usr/sbin/nft --json list table inet trading_desk_bootstrap | \
+      /usr/bin/sha256sum | /usr/bin/awk '{print $1}')
+  
+  /usr/bin/python3 - "$RECEIPT" "$apt_sha" "$ipv6_sha" "$nft_sha" \
+      "$nft_runtime_sha" <<'PY_EOF'
+  import ctypes
+  import errno
+  import hashlib
+  import json
+  import os
+  from pathlib import Path
+  import sys
+  
+  path = Path(sys.argv[1])
+  value = {
+      "apt_periodic_sha256": sys.argv[2],
+      "apt_units_masked": [
+          "apt-daily.timer", "apt-daily-upgrade.timer", "apt-daily.service",
+          "apt-daily-upgrade.service", "unattended-upgrades.service",
+      ],
+      "external_airgap_verified_by_guest": False,
+      "ipv6_sysctl_sha256": sys.argv[3],
+      "kind": "trading-desk.router-bootstrap.early-boot",
+      "mainnet_authorized": False,
+      "network_reconnect_authorized": False,
+      "nft_runtime_sha256": sys.argv[5],
+      "nftables_sha256": sys.argv[4],
+      "phase": "guest-early-boot-hardening",
+      "requires_host_airgap_receipt": True,
+      "router_key_present": False,
+      "schema_version": 1,
+      "venue_credentials_touched": False,
+      "venue_writes_authorized": False,
+  }
+  content = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+  pending = path.parent / f".{path.name}.pending"
+  
+  def write_all(fd, data):
+      view = memoryview(data)
+      while view:
+          written = os.write(fd, view)
+          if written <= 0:
+              raise OSError("zero-length receipt write")
+          view = view[written:]
+  
+  if path.exists() or path.is_symlink():
+      if path.is_symlink() or path.read_bytes() != content:
+          raise SystemExit("existing early-boot receipt differs")
+  elif pending.exists() or pending.is_symlink():
+      if pending.is_symlink() or pending.read_bytes() != content:
+          raise SystemExit("pending early-boot receipt differs")
+  else:
+      fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+      try:
+          write_all(fd, content)
+          os.fchown(fd, 0, 0)
+          os.fchmod(fd, 0o400)
+          os.fsync(fd)
+      finally:
+          os.close(fd)
+  if not path.exists():
+      libc = ctypes.CDLL(None, use_errno=True)
+      renameat2 = libc.renameat2
+      renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+      renameat2.restype = ctypes.c_int
+      if renameat2(-100, os.fsencode(pending), -100, os.fsencode(path), 1) != 0:
+          number = ctypes.get_errno()
+          if number == errno.EEXIST:
+              raise SystemExit("early-boot receipt destination exists")
+          raise OSError(number, os.strerror(number))
+  metadata = path.lstat()
+  if (metadata.st_uid, metadata.st_gid, metadata.st_mode & 0o777, metadata.st_nlink) != (0, 0, 0o400, 1):
+      raise SystemExit("early-boot receipt metadata differs")
+  descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+  try:
+      os.fsync(descriptor)
+  finally:
+      os.close(descriptor)
+  directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+  try:
+      os.fsync(directory)
+  finally:
+      os.close(directory)
+  print(f"early_boot_receipt={path}")
+  print(f"early_boot_receipt_sha256={hashlib.sha256(content).hexdigest()}")
+  PY_EOF
+  
+  shutdown_armed=0
+  trap - 0 HUP INT TERM
+  /bin/echo 'network_reconnect_authorized=false'
+  /bin/echo 'router_key_present=false'
+  
