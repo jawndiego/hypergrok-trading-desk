@@ -64,6 +64,24 @@ acl_export() {
   acl_entries "$1" | /usr/bin/sed -E 's/^[[:space:]]*[0-9][0-9]*:[[:space:]]*//'
 }
 
+# Do not use chmod -C: deployed Darwin returns 1 for both canonical ACLs and
+# operational errors. Validate the documented canonical entry classes here.
+assert_acl_canonical() {
+  path=$1
+  acl_entries "$path" | /usr/bin/awk '
+  {
+    is_allow = ($0 ~ / allow /)
+    is_deny = ($0 ~ / deny /)
+    if (is_allow == is_deny) invalid = 1
+    score = (($0 ~ / inherited /) ? -5 : 0) + (is_deny ? 1 : 0)
+    if (seen && previous < score) invalid = 1
+    previous = score
+    seen = 1
+  }
+  END { exit (!seen || invalid) }
+  ' || die "non-canonical ACL order: $path"
+}
+
 prepare_recovery_dir() {
   RECOVERY_PARENT=/etc/trading-desk/acl-recovery
   STOP_MARKER=/etc/trading-desk/ACL-RECOVERY-REQUIRED
@@ -444,13 +462,15 @@ apply_postinit() {
   /bin/mkdir -m 0700 "$probe_root/execution" "$probe_root/learning"
   /bin/chmod -E "$probe_root/execution" < "$execution_after_acl"
   /bin/chmod -E "$probe_root/learning" < "$learning_after_acl"
-  /bin/chmod -C "$probe_root/execution" "$probe_root/learning" || die "candidate ACL is non-canonical"
+  assert_acl_canonical "$probe_root/execution"
+  assert_acl_canonical "$probe_root/learning"
   assert_postinit_parent "$probe_root/execution" 4 1
   assert_postinit_parent "$probe_root/learning" 7 2
 
   /bin/chmod -E "$EXECUTION" < "$execution_after_acl"
   /bin/chmod -E "$LEARNING" < "$learning_after_acl"
-  /bin/chmod -C "$EXECUTION" "$LEARNING" || die "installed post-init ACL is non-canonical"
+  assert_acl_canonical "$EXECUTION"
+  assert_acl_canonical "$LEARNING"
   assert_postinit_parent "$EXECUTION" 4 1
   assert_postinit_parent "$LEARNING" 7 2
   installed_acl=$(/usr/bin/mktemp /private/tmp/trading-desk-postinit-installed-acl.XXXXXX)

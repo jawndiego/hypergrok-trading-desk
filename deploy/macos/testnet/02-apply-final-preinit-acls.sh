@@ -64,6 +64,24 @@ acl_export() {
   acl_entries "$1" | /usr/bin/sed -E 's/^[[:space:]]*[0-9][0-9]*:[[:space:]]*//'
 }
 
+# Do not use chmod -C: deployed Darwin returns 1 for both canonical ACLs and
+# operational errors. Validate the documented canonical entry classes here.
+assert_acl_canonical() {
+  path=$1
+  acl_entries "$path" | /usr/bin/awk '
+  {
+    is_allow = ($0 ~ / allow /)
+    is_deny = ($0 ~ / deny /)
+    if (is_allow == is_deny) invalid = 1
+    score = (($0 ~ / inherited /) ? -5 : 0) + (is_deny ? 1 : 0)
+    if (seen && previous < score) invalid = 1
+    previous = score
+    seen = 1
+  }
+  END { exit (!seen || invalid) }
+  ' || die "non-canonical ACL order: $path"
+}
+
 prepare_recovery_dir() {
   RECOVERY_PARENT=/etc/trading-desk/acl-recovery
   STOP_MARKER=/etc/trading-desk/ACL-RECOVERY-REQUIRED
@@ -183,7 +201,7 @@ EOF
     /bin/chmod +a# "$index" "$entry" "$path"
     index=$((index + 1))
   done
-  /bin/chmod -C "$path" || die "non-canonical ACL order: $path"
+  assert_acl_canonical "$path"
   after=$(acl_entries "$path")
   /bin/echo "$after" | /usr/bin/grep -q delete_child && die "delete_child present: $path"
 }

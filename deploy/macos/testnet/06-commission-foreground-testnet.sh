@@ -111,6 +111,11 @@ cleanup() {
     fi
   fi
   if [ -n "$TEMP_ROOT" ] && [ -d "$TEMP_ROOT" ]; then
+    if [ -d "$TEMP_ROOT/acl-normalization-probe" ] && \
+       [ ! -L "$TEMP_ROOT/acl-normalization-probe" ]; then
+      /bin/chmod -N "$TEMP_ROOT/acl-normalization-probe" 2>/dev/null || true
+      /bin/rmdir "$TEMP_ROOT/acl-normalization-probe" 2>/dev/null || true
+    fi
     /bin/rm -f "$TEMP_ROOT"/* 2>/dev/null || true
     /bin/rmdir "$TEMP_ROOT" 2>/dev/null || true
   fi
@@ -132,6 +137,25 @@ acl_export() {
   local path
   path=$1
   acl_entries "$path" | /usr/bin/sed -E 's/^[[:space:]]*[0-9][0-9]*:[[:space:]]*//'
+}
+
+# Do not use chmod -C: deployed Darwin returns 1 for both canonical ACLs and
+# operational errors. Validate the documented canonical entry classes here.
+assert_acl_canonical() {
+  local path
+  path=$1
+  acl_entries "$path" | /usr/bin/awk '
+  {
+    is_allow = ($0 ~ / allow /)
+    is_deny = ($0 ~ / deny /)
+    if (is_allow == is_deny) invalid = 1
+    score = (($0 ~ / inherited /) ? -5 : 0) + (is_deny ? 1 : 0)
+    if (seen && previous < score) invalid = 1
+    previous = score
+    seen = 1
+  }
+  END { exit (!seen || invalid) }
+  ' || die "named ACL is non-canonical: $path"
 }
 
 assert_no_acl() {
@@ -161,7 +185,7 @@ assert_acl_exact() {
   /usr/bin/sort "$normalized" > "$expected_sorted"
   /usr/bin/sort "$actual" > "$actual_sorted"
   /usr/bin/cmp -s "$expected_sorted" "$actual_sorted" || die "named ACL differs: $path"
-  /bin/chmod -C "$path" || die "named ACL is non-canonical: $path"
+  assert_acl_canonical "$path"
   /bin/chmod -N "$probe"
   if [ -d "$probe" ]; then
     /bin/rmdir "$probe"
@@ -181,7 +205,7 @@ assert_acl_export_exact() {
   /usr/bin/sort "$expected" > "$expected_sorted"
   /usr/bin/sort "$actual" > "$actual_sorted"
   /usr/bin/cmp -s "$expected_sorted" "$actual_sorted" || die "exported named ACL differs: $path"
-  /bin/chmod -C "$path" || die "named ACL is non-canonical: $path"
+  assert_acl_canonical "$path"
 }
 
 set_or_assert_acl() {

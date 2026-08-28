@@ -221,6 +221,63 @@ class ForegroundCommissionerTests(unittest.TestCase):
         self.assertIn("--repair-router-birth-marker-v2", plan.stdout)
         self.assertIn("No phase runs executor init", plan.stdout)
 
+    def test_acl_order_check_is_internal_fail_closed_and_executable(self) -> None:
+        scripts = (
+            DEPLOY / "02-apply-final-preinit-acls.sh",
+            DEPLOY / "03-apply-final-postinit-acls.sh",
+            COMMISSIONER,
+        )
+        programs: list[str] = []
+        for script in scripts:
+            source = script.read_text(encoding="utf-8")
+            function = source[
+                source.index("assert_acl_canonical()") : source.index(
+                    "\n}\n", source.index("assert_acl_canonical()")
+                )
+            ]
+            match = re.search(
+                r"/usr/bin/awk '(?P<program>.*?)\n  ' \|\| die",
+                function,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(match, script)
+            assert match is not None
+            programs.append(match.group("program"))
+            self.assertNotIn("/bin/chmod -C", source)
+
+        self.assertEqual(1, len(set(programs)))
+        canonical = """\
+ 0: user:first deny read
+ 1: user:second allow read
+ 2: user:third inherited deny read
+ 3: user:fourth inherited allow read
+"""
+        rejected = (
+            "",
+            " 0: user:first allow read\n 1: user:second deny read\n",
+            " 0: user:first inherited deny read\n 1: user:second allow read\n",
+            " 0: user:first inherited allow read\n 1: user:second inherited deny read\n",
+            " 0: user:first inherited allow read\n 1: user:second allow read\n",
+            " 0: user:first allow deny read\n",
+            " 0: user:first read\n",
+        )
+        for program in programs:
+            accepted = subprocess.run(
+                ["/usr/bin/awk", program],
+                input=canonical,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, accepted.returncode)
+            for payload in rejected:
+                denied = subprocess.run(
+                    ["/usr/bin/awk", program],
+                    input=payload,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotEqual(0, denied.returncode, payload)
+
     def test_fixed_layout_matches_runtime_validators(self) -> None:
         source = COMMISSIONER.read_text(encoding="utf-8")
         fixed_paths = {
@@ -544,9 +601,17 @@ class ForegroundCommissionerTests(unittest.TestCase):
 
     def test_reviewed_commissioning_regressions_are_closed(self) -> None:
         source = COMMISSIONER.read_text(encoding="utf-8")
+        self.assertNotIn("/bin/chmod -C", source)
+        self.assertEqual(3, source.count("assert_acl_canonical"))
         self.assertIn(
             "user:trading-control inherited allow read,write,readattr",
             source,
+        )
+        cleanup = source[source.index("cleanup()") : source.index("trap cleanup EXIT")]
+        self.assertIn('$TEMP_ROOT/acl-normalization-probe', cleanup)
+        self.assertLess(
+            cleanup.index('/bin/rmdir "$TEMP_ROOT/acl-normalization-probe"'),
+            cleanup.index('/bin/rm -f "$TEMP_ROOT"/*'),
         )
         self.assertIn(
             'assert_acl_export_exact "$path" "$ACL_EXECUTION_MAIN"',

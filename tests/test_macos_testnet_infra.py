@@ -134,6 +134,10 @@ class PlanOnlyScriptTests(unittest.TestCase):
     def test_acl_phases_encode_two_phase_owner_model(self) -> None:
         preinit = PREINIT.read_text(encoding="utf-8")
         postinit = POSTINIT.read_text(encoding="utf-8")
+        self.assertNotIn("/bin/chmod -C", preinit)
+        self.assertNotIn("/bin/chmod -C", postinit)
+        self.assertEqual(2, preinit.count("assert_acl_canonical"))
+        self.assertEqual(5, postinit.count("assert_acl_canonical"))
         for text in (preinit, postinit):
             self.assertIn("BASE=/var/db/trading-desk-volumes", text)
             self.assertIn("script path must be canonical and absolute", text)
@@ -170,7 +174,7 @@ class PlanOnlyScriptTests(unittest.TestCase):
             "execution_before_acl=",
             "learning_before_acl=",
             "probe_root=",
-            "candidate ACL is non-canonical",
+            "non-canonical ACL order",
             "/bin/chmod -E",
             "committed=0",
             "receipt_temp=",
