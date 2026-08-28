@@ -135,6 +135,24 @@ class UbuntuRouterRendererTests(unittest.TestCase):
             self.assertEqual(manifest["mode"], "local_nat_lab")
             self.assertEqual(manifest["source_spec_sha256"], hashlib.sha256(raw).hexdigest())
             self.assertEqual(
+                manifest["topology"],
+                {
+                    "wan_interface": "enp0s1",
+                    "ingress_interface": "enp0s2",
+                    "management_source_cidr": "192.168.106.1/32",
+                    "router_endpoint_interface": "192.168.106.2/24",
+                    "listen_port": 51820,
+                    "router_ipv4_interface": "10.77.0.1/24",
+                    "router_ipv4_network": "10.77.0.0/24",
+                    "mac_ipv4_peer": "10.77.0.2/32",
+                    "router_ipv6_interface": "fd77:77::1/64",
+                    "mac_ipv6_peer": "fd77:77::2/128",
+                    "dns_ipv4": "1.1.1.1",
+                    "router_public_key": public_key(1),
+                    "mac_public_key": public_key(33),
+                },
+            )
+            self.assertEqual(
                 manifest["security_claims"],
                 {
                     "application_route_gate_default_ready": False,

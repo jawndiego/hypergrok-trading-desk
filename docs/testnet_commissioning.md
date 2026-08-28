@@ -54,12 +54,12 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   credentials whenever fixed installed remote-VPN evidence is unavailable.
 - Credential-free final-path APFS/ACL/install and storage-guard artifacts exist
   under `deploy/macos/testnet`; none has been applied.
-- A pinned Lima/VZ VM plan exists under `deploy/ubuntu-router/lima`; its apply
-  path is absent. The signed snapshot/cloud-image inputs, offline host
+- A pinned Lima/VZ VM plan exists under `deploy/ubuntu-router/lima`. The signed snapshot/cloud-image inputs, offline host
   attestations and 116-package no-recommends closure are locked with a
-  read-only replay verifier. A root media/host-tool specification is
-  implemented but its launcher/apply gates remain false; writable Lima state,
-  guest installation and preflight are also disabled.
+  read-only replay verifier. Its schema-v2 root launcher enables only
+  credential-free runtime qualification, media/host-tool preparation, exact
+  UID-454 Lima-home adoption and `validate --fill`; VM create/start, guest
+  installation and every network/key phase remain disabled.
 - A TESTNET-only proposal-v2 model binds the staging document, ticket,
   protected plan, grant, displayed economics, account identity, policy,
   account/market snapshots, broker session and expiry. A separate control
@@ -116,10 +116,10 @@ their owning machines because their derived public keys are renderer inputs.
    `deploy/macos/testnet` with the sealed runtime and pack. Prove UID 501 and all
    service identities cannot modify or replace source, runtime or venv paths.
 6. **Ubuntu router lab.** First render and verify the pinned Lima/VZ VM plan,
-   replay the immutable public-input lock and retain only its informational
-   receipt. Close and promote the sealed-runtime root launcher before any
-   media/host-tool apply; then resolve the non-agent Lima owner, local-image
-   config and first-boot APT blockers before provisioning any VM.
+   replay the immutable public-input lock, qualify the sealed runtime, seal the
+   public media, install the inert host tools, adopt the exact UID-454 Lima
+   home and retain `validate --fill`. Then resolve the local-image,
+   socket_vmnet activation and first-boot APT blockers before provisioning any VM.
    Pass guest preflight before generating the VM and Mac WireGuard private keys
    on their owning machines, derive and
    attest the public keys, then render and qualify `local_nat_lab` using
@@ -136,6 +136,13 @@ their owning machines because their derived public keys are renderer inputs.
    collector, helpers and durable submission-authority binding exist, but no
    helper/artifact/PF/tunnel/process or live evidence is installed. Do not inject test
    evidence into a commissioned process.
+   If Proton supplies the remote `wg-egress` peer, use only the attended
+   guest-side importer in `docs/ubuntu_vm_router.md`: inspect a root-only staged
+   profile, bind its exact profile hash and sanitized public-field hash to the
+   reviewed overlay, and atomically install only the guest egress key. The
+   profile/private key may not pass through chat, the repository, argv,
+   environment or a host/guest shared directory. Import does not activate the
+   tunnel or qualify the route.
 7. **Proxy/trust environment.** Prove the executor rejects ambient proxy and CA
    override variables and that its urllib openers install an empty proxy
    handler. Retain the root-owned CA path and TLS hostname-verification

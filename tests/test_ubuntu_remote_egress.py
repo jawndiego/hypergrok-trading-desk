@@ -100,6 +100,7 @@ class RemoteEgressTemplateTests(unittest.TestCase):
             "remote-egress-test-plan.sh.example",
             "wg-egress.service.override.conf.example",
             "wg-exec.service.remote-egress.conf.example",
+            "import-proton-wireguard.py",
         }
         files = [path for path in REMOTE_ROOT.iterdir() if path.is_file()]
         self.assertEqual(expected, {path.name for path in files})
@@ -145,6 +146,7 @@ class RemoteEgressRendererTests(unittest.TestCase):
                 "remote-egress-test-plan",
                 "wg-egress.service.override.conf",
                 "wg-exec.service.remote-egress.conf",
+                "mac-wireguard.remote-egress.conf.fragment",
                 "bundle-manifest.json",
             }
             self.assertEqual(expected_files, {path.name for path in output.iterdir()})
@@ -157,6 +159,16 @@ class RemoteEgressRendererTests(unittest.TestCase):
             self.assertIs(True, manifest["security_claims"]["fixed_policy_routing_emitted"])
             self.assertIs(False, manifest["security_claims"]["apply_enabled"])
             self.assertIs(False, manifest["security_claims"]["vpn_qualified"])
+            self.assertEqual(
+                remote_renderer.wireguard_profile_public_binding_sha256(
+                    egress_ipv4_interface="10.64.0.2/32",
+                    egress_endpoint_ipv4="8.8.4.4",
+                    egress_endpoint_port=51820,
+                    egress_public_key=public_key(65),
+                    egress_dns_ipv4="10.64.0.1",
+                ),
+                manifest["wireguard_profile_public_binding_sha256"],
+            )
 
             for name in ("trading-desk-remote-egress-check", "remote-egress-test-plan"):
                 self.assertEqual(0o700, stat.S_IMODE((output / name).stat().st_mode))
@@ -175,6 +187,11 @@ class RemoteEgressRendererTests(unittest.TestCase):
             self.assertIn("priority 11010 not fwmark 51821", wireguard)
             self.assertIn("trading-desk-egress.key", wireguard)
             self.assertNotRegex(wireguard, r"(?im)^\s*PrivateKey\s*=")
+            mac_fragment = (
+                output / "mac-wireguard.remote-egress.conf.fragment"
+            ).read_text(encoding="utf-8")
+            self.assertIn("DNS = 10.64.0.1", mac_fragment)
+            self.assertNotRegex(mac_fragment, r"(?im)^\s*PrivateKey\s*=")
             self.assertIn(
                 "BindsTo=nftables.service",
                 (output / "wg-egress.service.override.conf").read_text(
@@ -301,6 +318,28 @@ class RemoteEgressRendererTests(unittest.TestCase):
             spec_path.write_text(json.dumps(extra), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "keys differ"):
                 remote_renderer._load_spec(spec_path)
+
+            for field, value in (
+                ("wan_interface", "enp9s9"),
+                ("ingress_interface", "enp8s8"),
+                ("router_listen_port", 51821),
+                ("router_ipv4_network", "10.77.0.0/25"),
+                ("mac_ipv4_peer", "10.77.0.3/32"),
+                ("mac_public_key", public_key(97)),
+            ):
+                with self.subTest(base_topology_field=field):
+                    candidate = remote_spec(local_hash)
+                    candidate[field] = value
+                    mismatch = root / f"base-mismatch-{field}.json"
+                    mismatch.write_text(json.dumps(candidate), encoding="utf-8")
+                    with self.assertRaisesRegex(
+                        ValueError, "topology differs from the base router"
+                    ):
+                        remote_renderer.render_bundle(
+                            mismatch,
+                            local_bundle,
+                            root / f"base-mismatch-output-{field}",
+                        )
 
             (local_bundle / "wg-exec.conf").write_text("tampered\n", encoding="utf-8")
             spec_path = root / "bound.json"

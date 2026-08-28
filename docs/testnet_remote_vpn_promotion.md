@@ -19,9 +19,14 @@ executor UID 451 + macOS resolver UID 65
   -> Hyperliquid TESTNET
 ```
 
-It does not change the meaning of `local_nat_lab`. The remote expectation
-must bind the exact `TestnetRouteHealthExpectation` hash, executor-config hash,
-base router bundle, VM bundle and Mac WireGuard configuration. The local
+It does not change the meaning of `local_nat_lab`. The schema-v2 remote
+expectation must bind the exact `TestnetRouteHealthExpectation` hash,
+executor-config hash, base router bundle, VM bundle and the distinct remote
+Mac WireGuard configuration. The base expectation retains the local-lab Mac
+fragment and public resolver; the remote expectation binds the provider-DNS
+fragment independently. The base expectation hash commits to the complete
+local contract, so neither remote value is required to equal its base value.
+The local
 schema continues to report `host_direct_bypass_prevented=false`,
 `remote_vpn_exit_configured=false` and `vpn_qualified=false`.
 
@@ -143,6 +148,20 @@ bundle; `--mode render` then requires that exact PF/remote manifest binding and
 `--mode verify` replays all sources. The plan/apply
 installer `deploy/macos/testnet/05-install-remote-vpn-health.sh` requires that
 expected hash and never loads PF or starts networking/services.
+
+For Proton, the secret-bearing downloaded WireGuard profile is handled only
+inside the Ubuntu guest by the attended fixed-path importer documented in
+`docs/ubuntu_vm_router.md`. Its inspection exposes the five required public
+fields plus fingerprints but not the private or derived local public key. The
+remote-egress manifest binds those fields as
+`wireguard_profile_public_binding_sha256`; key installation additionally
+requires the exact full-profile SHA-256 observed during inspection. Successful
+import atomically creates only the root-owned guest egress key and a redacted
+receipt. It does not activate the tunnel or satisfy this promotion guard.
+The remote overlay also rejects any public topology that differs from its
+exact base-router manifest and emits the attended Mac fragment with Proton's
+tunnel DNS; do not reuse the local-lab fragment's global resolver for the
+remote profile.
 
 ## Promotion stop line
 

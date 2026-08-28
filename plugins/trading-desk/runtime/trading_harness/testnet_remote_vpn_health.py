@@ -259,7 +259,7 @@ class TestnetRemoteVpnHealthExpectation:
             _port(self.remote_endpoint_port, "remote_endpoint_port"),
         )
         expected = domain_hash(
-            "trading-harness/testnet-remote-vpn-health-expectation/v1",
+            "trading-harness/testnet-remote-vpn-health-expectation/v2",
             self.payload(),
         )
         if self.expectation_hash and _hash(
@@ -270,7 +270,7 @@ class TestnetRemoteVpnHealthExpectation:
 
     def payload(self) -> dict[str, object]:
         return {
-            "schema_version": "testnet_remote_vpn_health_expectation.v1",
+            "schema_version": "testnet_remote_vpn_health_expectation.v2",
             "mode": REMOTE_VPN_MODE,
             "environment": REMOTE_VPN_ENVIRONMENT,
             "executor_config_hash": self.executor_config_hash,
@@ -337,14 +337,15 @@ class TestnetRemoteVpnHealthExpectation:
                 base.router_bundle_manifest_sha256
             ),
             "vm_bundle_manifest_sha256": base.vm_bundle_manifest_sha256,
-            "mac_wireguard_configuration_hash": (
-                base.mac_wireguard_configuration_hash
-            ),
         }
         if any(getattr(self, field) != value for field, value in expected.items()):
             raise ValidationError("remote VPN expectation differs from local-lab base")
-        if base.dns_ipv4 != self.tunnel_dns_ipv4:
-            raise ValidationError("remote VPN tunnel DNS differs from local-lab base")
+        # The base expectation binds the qualified local-lab Mac fragment and
+        # its public resolver. The remote expectation intentionally binds a
+        # different Mac fragment and provider-private tunnel DNS. Requiring
+        # either value to equal the base would make a real remote VPN profile
+        # impossible while adding no integrity: base_route_expectation_hash
+        # already commits to every base field.
 
 
 @dataclass(frozen=True, slots=True)
@@ -1103,7 +1104,7 @@ def testnet_remote_vpn_health_expectation_from_dict(
     value: Mapping[str, Any],
 ) -> TestnetRemoteVpnHealthExpectation:
     fixed = {
-        "schema_version": "testnet_remote_vpn_health_expectation.v1",
+        "schema_version": "testnet_remote_vpn_health_expectation.v2",
         "mode": REMOTE_VPN_MODE,
         "environment": REMOTE_VPN_ENVIRONMENT,
         "mac_tunnel_name": "wg-exec",

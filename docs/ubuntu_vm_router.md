@@ -1,11 +1,11 @@
 # Local Ubuntu VM router for TESTNET qualification
 
-Status: **repository-rendered guest configuration plus a pinned, plan-only
-Lima/VZ VM bundle; immutable public-input replay and a root host-preparation
-artifact plus a default-unavailable application route-health gate are
-implemented, while every phase remains unapplied and writable Lima state, VM
-apply, live health collection and boot orchestration remain
-disabled/unqualified; not VPN-qualified or a capital security boundary**.
+Status: **repository-rendered guest configuration plus a pinned Lima/VZ VM
+bundle; immutable public-input replay and credential-free root host preparation
+through `limactl validate --fill` are implemented but remain unapplied on a new
+host. VM creation/start, guest mutation, socket_vmnet activation, router/network
+changes, live health collection and boot orchestration remain disabled and
+unqualified; this is not VPN-qualified or a capital security boundary**.
 
 This design keeps the signer/executor on macOS, where the reviewed System
 Keychain and UID/ACL model exist, and puts only network routing in a dedicated
@@ -96,9 +96,10 @@ record; checking against a digest stored only inside the same directory is not
 authentication.
 
 The guest-config renderer does not create or define the VM. The separate
-plan-only Lima renderer below pins the host/image envelope, but neither tool
-creates a VM, attaches a live NIC, bootstraps packages, installs files or
-arranges boot ordering. Those remain explicit commissioning tasks.
+nonmutating Lima renderer below pins the host/image envelope. Rendering creates
+no VM or live NIC; its bundle includes the distinct reviewed host-preparation
+commissioner described below, while VM/guest/network work remains separately
+disabled.
 
 ## Plan-only Lima VM bundle
 
@@ -120,7 +121,9 @@ python3 scripts/render_ubuntu_router_vm.py \
 limactl validate /absolute/new/router-vm-plan/lima.yaml
 ```
 
-The output is apply-disabled and contains no private key. It disables host mounts,
+The renderer itself is nonmutating and its output contains no private key. The
+separate bundled commissioner enables only credential-free host preparation;
+VM lifecycle and network apply remain disabled. The VM plan disables host mounts,
 containerd, Rosetta, host DNS/proxy propagation, SSH-agent forwarding and port
 forwards. Package-lock schema v3 binds a separate commission lock containing:
 
@@ -165,51 +168,64 @@ dependency ambiguity and any package-transaction widening. `gh` uses only the
 embedded offline bundles and trusted root; credential/token variables and
 ambient config/cache locations are not passed to it.
 
-## Root host-preparation specification — apply disabled
+## Root host preparation — credential-free phases enabled
 
-The rendered VM bundle now includes `commission-apply.py`, its root-only
+The rendered VM bundle includes `commission-apply.py`, its root-only
 `commission-apply-launcher.sh`, dormant `commission-guest.py`, and the exact
-`commission-apply-lock.json`. Running the Python commissioners with no argument
-prints their plans. Only the unprivileged informational receipt is enabled:
+schema-v2 `commission-apply-lock.json`. Running the Python commissioners with no
+argument prints their plans. The lock separates UID 501 public-evidence replay
+from the disabled `trading-router-operator` UID/GID 454 that exclusively owns
+writable Lima state. The enabled host-only sequence is:
 
 1. `operator-verify` replays the public verifier with the exact current
    `gh`/`gpgv` binaries, their complete Homebrew dylib closure and the pinned
    root-owned `llvm-otool`. Its durable receipt is informational only. A root
    phase never executes those UID-501/Homebrew paths and never treats that
    receipt as installation authority.
-2. The disabled `apply-seal-media` implementation independently matches every public evidence file to the
+2. `qualify-runtime` verifies the installed root-owned Python tree, contained
+   symlinks, pinned interpreter and Apple `llvm-otool`, and retained
+   payload-only load scan before creating a fixed root-only receipt.
+3. `apply-seal-media` independently matches every public evidence file to the
    root-sealed commission lock and copies only a fixed basename allowlist from
    the already root-sealed controller. It publishes root-owned mode-`0500`
    media with exclusive rename and exact `INSTALLING`/`READY` markers.
-3. The disabled `apply-host-tools` implementation extracts the exact attested archives into
-   `/opt/trading-desk-router-tools/lima-2.2.0` and `/opt/socket_vmnet`. Every
+4. `apply-host-tools` extracts the exact attested archives into
+   `/opt/trading-desk-router-tools/lima-2.2.0` and `/opt/socket_vmnet`, and
+   installs the exact public plan at
+   `/opt/trading-desk-router-tools/plans/lima.yaml`. Every
    installed path is root-owned and non-writable, the entire archive tree is
    byte-compared, and the three installed binaries retain their locked hashes
    and valid code signatures.
 
-The root launcher currently prints `root_apply_enabled=false` and exits before
-Python. The drafted boundary requires a canonical root-owned/no-ACL controller
-chain, retained controller-manifest digest, and schema-bound sealed-Python
-receipt; Python itself requires `-I -B` and an empty environment. All drafted
-promotions use Darwin `renameatx_np(RENAME_EXCL)` and full file/directory
-durability barriers. Exact interrupted state is modeled as resumable, while
-non-adoptable state uses a transaction-receipted resumable quarantine. None of
-that root code is reachable until the launcher's pre-exec runtime symlink and
-dynamic-library closure can be proved. Nothing is automatically deleted or
-silently replaced.
-The VM manifest's top-level and nested apply-authority fields are false. The
-only enabled phase name is the UID-501 informational verification receipt; no
-root host mutator is exposed.
+5. `apply-lima-home` verifies the exact commissioned UID/GID-454 identity and
+   schema-v3 identity receipt. It can adopt only the exact pre-existing empty
+   mode-`0700` home created by macOS commissioning, using a durable root marker,
+   then installs only `_config/networks.yaml` and a dedicated empty HOME. The
+   socket_vmnet group is the exact `trading-router-operator` primary group, not
+   `admin` or `everyone`; no sudoers rule or daemon is installed by this phase.
+6. `apply-validate-fill` drops to UID/GID 454 with an empty bounded environment,
+   reads only the immutable root-owned plan, and retains the exact effective
+   configuration digest.
 
-Although code drafts describe later behavior, the lock keeps Lima-home,
-validate-fill, VM create/start, guest freeze/simulation/install and router
-activation false. In particular, a UID-501-owned writable `LIMA_HOME` would
-also be writable by desktop agents. No separate reviewed non-agent operator
-identity exists, so neither the permanent Lima home nor `validate --fill` may
-be applied yet. The locked YAML also still uses an HTTPS image URL rather than
-a reviewed local-image import, and a first boot could race APT timers before a
-complete 663-package baseline check. Those are hard blockers, not steps to
-improvise.
+The launcher proves its canonical root-owned/no-ACL controller chain and checks
+the sealed runtime's owner, write bits, ACLs, symlink containment, interpreter
+digest and direct Mach-O load closure before `exec`. Python requires `-I -B`,
+revalidates the complete runtime-tree receipt, and every phase uses Darwin
+`renameatx_np(RENAME_EXCL)` plus full file/directory durability barriers. Exact
+interrupted state is resumable; non-adoptable media/tool state requires an
+explicit transaction-receipted quarantine. Nothing is automatically deleted or
+silently replaced. A host-tool retry permits only retained quarantine names
+bound by the exact transaction and completed quarantine receipt; it never
+adopts or removes them. The VM manifest still has global/VM apply false while its
+narrow host-preparation authority is true.
+
+The stop line remains before VM creation. The locked YAML still uses an HTTPS
+image URL instead of a reviewed local-image import, socket_vmnet sudoers and
+daemon activation are absent, and a first boot could race APT timers before the
+complete 663-package baseline is frozen. VM create/start, guest
+freeze/simulation/install and router activation therefore remain literal false
+gates. No host route, PF rule, tunnel, router key, credential or venue state is
+changed by the enabled host-preparation phases.
 
 ## VM network contract
 
@@ -268,31 +284,30 @@ The current host was updated from macOS 15.3.1 to 26.6.2 build 25G83 on
 requalified. Repeat after any later OS/runtime change. Apple publishes current
 security releases at <https://support.apple.com/100100>.
 
-No root-host, VM, guest-package, network or key command is authorized yet. A
-narrowly bounded root media/host-tool implementation exists behind false
-gates. The legacy unpinned
+Only the bounded credential-free root host-preparation sequence is authorized:
+runtime qualification, public-media sealing, inert host-tool installation,
+UID-454 Lima-home initialization and `validate --fill`. VM creation/start,
+guest-package, network and key commands remain unauthorized. The legacy unpinned
 `apt-get update`, unversioned package install and immediate `wg genkey`
 sequence has been removed because it bypassed the reviewed locks.
 
-The next attended change must first close the root runtime/launcher blocker and
-then separately promote the reviewed media/host-tool phases. After that later
+Run each host phase only through a newly root-sealed rendered bundle and carry
+forward the exact receipt hash printed by the preceding phase. After that
 host-only stop line, another review must:
 
-1. establish a non-agent operator identity for writable Lima instance state,
-   create its dedicated mode-`0700` `LIMA_HOME`, install only the rendered
-   `networks.yaml`, and prove `default.yaml` and `override.yaml` are absent;
-2. run the rendered `host-preflight.sh --check` and retain the exact
+1. bind a local verified image into a newly rendered create configuration;
+2. rerun the rendered `host-preflight.sh --check` and retain the exact
    `limactl validate --fill` digest before every create/start;
-3. bind a local verified image into the validated config and create the VM
+3. create the VM from that validated local-image config
    without mounts, forwarded agent, proxy/DNS inheritance or a third NIC;
 4. start it only after a race-free first-boot APT freeze exists, run
    `guest-preflight.sh --pre-key`, and prove from a console-side
    `apt-get --simulate` that the local package proposes exactly
    `wireguard-tools` with no upgrade/removal before guest package mutation;
 5. install the separately rendered guest router bundle, apply netplan from
-   the console, and passes `guest-preflight.sh --post-netplan` with exactly
+   the console, and pass `guest-preflight.sh --post-netplan` with exactly
    `192.168.106.2/24`; and only then
-6. generates the VM WireGuard private key in the VM and the Mac key in the
+6. generate the VM WireGuard private key in the VM and the Mac key in the
    official WireGuard app. Only derived public keys may enter the reviewed
    router spec. Private keys never enter chat, the repo, cloud-init, argv,
    environment, shared folders or evidence logs.
@@ -427,27 +442,21 @@ not a host kill switch or VPN qualification.
 
 ## Current stop line and shortest attended sequence
 
-Today the safe sequence stops after rendering and verifying both manifests,
-running all plan modes, and optionally replaying the exact public evidence and
-retaining its informational receipt. There is no reviewed root command that
-seals media or installs host tools, and no command that creates writable
-Lima instance state, creates or starts the VM, installs guest packages,
-activates nftables/WireGuard or changes Mac routes. Do not improvise those
-apply steps from this document.
+Today the safe sequence stops after replaying the immutable public inputs,
+qualifying the sealed runtime, sealing media, installing inert Lima/socket_vmnet
+files, adopting the exact empty UID-454 `LIMA_HOME`, and retaining
+`limactl validate --fill`. These phases do not create or start a VM, install a
+sudoers rule, start socket_vmnet, mutate guest packages, activate
+nftables/WireGuard or change Mac routes.
 
-The exact remaining apply blockers are intentional: the root controller and
-sealed Python runtime do not yet have a pre-exec-contained symlink/dylib proof;
-no non-agent identity owns
-writable Lima state; socket_vmnet sudoers/launchd activation is absent; the
-verified image has no locked local-image create configuration; and there is no
-race-free first-boot APT freeze or console simulation transcript. Lima-home,
-VM create/start, package mutation and network/key activation therefore remain
-disabled; host-tool preparation has not been promoted or run.
+The remaining blockers are intentional: socket_vmnet sudoers/daemon activation
+is absent; the verified image has no locked local-image create configuration;
+and there is no race-free first-boot APT freeze or console simulation
+transcript. VM create/start, guest package mutation and every network/key phase
+remain disabled.
 
-After a later promotion consumes (without weakening) the
-immutable-input gate, the shortest attended sequence is: replay archive hashes,
-signatures, closure and attestations; create
-the dedicated `LIMA_HOME`; retain `limactl validate --fill`; create the exact
+After a later promotion, the shortest continued sequence is: bind the verified
+local image and revalidate the exact configuration; create and start the exact
 two-NIC VM; pass guest pre-key and post-netplan checks; generate each router-only
 key on its owning machine; render and verify the router bundle; install it from
 the VM console; activate the Mac tunnel; then execute and retain the rendered
@@ -493,15 +502,95 @@ python3 scripts/render_ubuntu_remote_egress.py \
 
 The output contains the public `wg-egress.conf`, complete replacement
 `nftables.conf`, fixed policy-routing/sysctl values, systemd drop-ins that make
-`wg-exec` require nftables plus `wg-egress`, a guest checker and a print-only
-failure/leak test plan. Its fixed table 51821, fwmark 51821 and rule priorities
+`wg-exec` require nftables plus `wg-egress`, a guest checker, a print-only
+failure/leak test plan, and a derived Mac WireGuard fragment that replaces the
+local-lab resolver with the provider tunnel DNS. The renderer requires the
+remote spec's repeated interfaces, listen port, WireGuard network, Mac peer and
+Mac public key to exactly match the hashed base-router topology; a merely
+hash-valid but semantically different composition is rejected. Its fixed table
+51821, fwmark 51821 and rule priorities
 11000/11010 must be absent before installation. The rendered plan requires the
 replacement firewall to be installed and validated from the VM console before
 either tunnel is exposed. It does not install anything, create
 `/etc/wireguard/trading-desk-egress.key`, start a service, contact the provider,
-or change routes. The private key must later be
-generated inside the guest and supplied to `wg` through that fixed root-only
-file; it must never enter the spec, repository, environment, argv or chat.
+or change routes. A locally generated provider-compatible key may later be
+created inside the guest. For Proton, the separately reviewed attended
+importer below may instead extract the client key from Proton's downloaded
+WireGuard profile directly into that fixed root-only file. In either case the
+private key must never enter the spec, repository, environment, argv, chat or
+a host/guest shared directory.
+
+### Attended Proton profile import
+
+`deploy/ubuntu-router/remote-egress/import-proton-wireguard.py` is a standalone
+Ubuntu-guest importer for a Proton WireGuard configuration downloaded through
+the operator's Proton account. It is not included in a rendered public bundle
+and is not an authorization to create/start the VM or activate networking.
+Before use, install a reviewed sealed copy at the fixed guest path
+`/usr/local/libexec/trading-desk-import-proton-wireguard` as root:root mode
+`0500`. The importer's mutating mode refuses any other program path, a
+non-Ubuntu-24.04 ARM64 guest, a non-root or background session, any process
+environment beyond the fixed locale/path allowlist, or Python without
+isolated/no-bytecode flags. It also refuses active swap and disables process
+and child core dumps before reading the profile.
+
+The source profile is secret-bearing because it contains `PrivateKey`. It must
+arrive through an attended operator-controlled secret transfer directly into
+`/root/trading-desk-proton-import-v1`, never through chat, the repository, a
+host/guest shared directory, an environment variable or argv. That directory
+must be root:root mode `0700`; the selected direct-child `.conf` must be a real,
+ACL/xattr-free, single-link root:root mode-`0400` file. Do not paste the profile
+or its private key into a task or retain it in shell history.
+
+The importer accepts exactly one `[Interface]` containing `PrivateKey`,
+`Address` and `DNS`, followed by exactly one `[Peer]` containing `PublicKey`,
+`AllowedIPs`, an IPv4 `Endpoint`, and an optional canonical
+`PersistentKeepalive = 25`. Hooks, tables, preshared keys, hostnames, split
+routes, extra peers and unknown fields fail closed. It accepts the
+Proton IPv4 full-tunnel form and its optional IPv6 address/default route, but
+installs only the base64 client private key required by the repository's
+IPv4-only `wg-egress` policy. It invokes fixed `/usr/bin/wg pubkey` with the key
+on a pipe, never in argv or the environment.
+
+From the attended guest root console, first inspect the root-only source:
+
+```sh
+/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+  /usr/bin/python3 -I -B \
+  /usr/local/libexec/trading-desk-import-proton-wireguard \
+  inspect --source /root/trading-desk-proton-import-v1/PROFILE.conf
+```
+
+Inspection returns only the sanitized public profile, the full-profile and
+public-binding SHA-256 fingerprints, derived-local-public-key and remote-key
+fingerprints, and false authority/network claims. It never returns the private
+key, source path or derived local public key. Copy only its `public_profile`
+fields into the reviewed remote-egress spec, render and verify the public
+bundle, and require its `wireguard_profile_public_binding_sha256` to equal the
+inspection result. Then run the one-time import with both independently
+retained fingerprints:
+
+```sh
+/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C LC_ALL=C \
+  /usr/bin/python3 -I -B \
+  /usr/local/libexec/trading-desk-import-proton-wireguard \
+  install --source /root/trading-desk-proton-import-v1/PROFILE.conf \
+  --expected-profile-sha256 REVIEWED_PROFILE_SHA256 \
+  --expected-public-binding-sha256 REVIEWED_PUBLIC_BINDING_SHA256
+```
+
+The importer atomically creates only
+`/etc/wireguard/trading-desk-egress.key` as root:root mode `0600` and a
+redacted, root-only receipt at
+`/var/lib/trading-desk-router-commission/state/04-proton-wireguard-import.json`.
+It never overwrites a different key or receipt; an interrupted same-key import
+is resumably adopted only after the retained pending inode, metadata, xattrs
+and bytes are reverified and synced. A partial, different or unsafe pending
+file is retained for attended review and is never automatically deleted. It
+does not delete the source, install public config,
+start WireGuard, change routes, contact Proton/Hyperliquid or authorize a venue
+write. Retire the source separately through the operator's reviewed secret
+retention procedure after the receipt is retained.
 
 A separate render-only macOS PF anchor for executor UID 451 plus resolver UID
 65, typed root-owned remote cache, fixed sample/probe helpers, continuous
@@ -551,5 +640,9 @@ tests above are active.
   <https://ubuntu.com/server/docs/how-to/wireguard-vpn/vpn-as-the-default-gateway/>
 - WireGuard key generation and persistent keepalive:
   <https://www.wireguard.com/quickstart/>
+- Proton WireGuard configuration download:
+  <https://protonvpn.com/support/wireguard-configurations>
+- Proton manual WireGuard setup for Linux:
+  <https://protonvpn.com/support/wireguard-linux>
 - Hyperliquid TESTNET WebSocket endpoint:
   <https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket>

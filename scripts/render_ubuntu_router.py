@@ -87,6 +87,24 @@ SECURITY_CLAIMS = {
     "vpn_qualified": False,
 }
 
+TOPOLOGY_KEYS = frozenset(
+    {
+        "wan_interface",
+        "ingress_interface",
+        "management_source_cidr",
+        "router_endpoint_interface",
+        "listen_port",
+        "router_ipv4_interface",
+        "router_ipv4_network",
+        "mac_ipv4_peer",
+        "router_ipv6_interface",
+        "mac_ipv6_peer",
+        "dns_ipv4",
+        "router_public_key",
+        "mac_public_key",
+    }
+)
+
 
 def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
@@ -406,6 +424,33 @@ def render_bundle(spec_path: Path, output_dir: Path) -> dict[str, Any]:
             "mode": "local_nat_lab",
             "source_spec_sha256": _sha256(raw_spec),
             "security_claims": SECURITY_CLAIMS,
+            "topology": {
+                "wan_interface": replacements["__REVIEWED_WAN_INTERFACE__"],
+                "ingress_interface": replacements["__REVIEWED_INGRESS_INTERFACE__"],
+                "management_source_cidr": replacements[
+                    "__REVIEWED_MANAGEMENT_SOURCE_CIDR__"
+                ],
+                "router_endpoint_interface": replacements[
+                    "__REVIEWED_ROUTER_ENDPOINT_INTERFACE__"
+                ],
+                "listen_port": int(replacements["__REVIEWED_LISTEN_PORT__"]),
+                "router_ipv4_interface": replacements[
+                    "__REVIEWED_ROUTER_IPV4_INTERFACE__"
+                ],
+                "router_ipv4_network": replacements[
+                    "__REVIEWED_ROUTER_IPV4_NETWORK__"
+                ],
+                "mac_ipv4_peer": replacements["__REVIEWED_MAC_IPV4_PEER__"],
+                "router_ipv6_interface": replacements[
+                    "__REVIEWED_ROUTER_IPV6_INTERFACE__"
+                ],
+                "mac_ipv6_peer": replacements["__REVIEWED_MAC_IPV6_PEER__"],
+                "dns_ipv4": replacements["__REVIEWED_DNS_IPV4__"],
+                "router_public_key": replacements[
+                    "__REVIEWED_ROUTER_PUBLIC_KEY__"
+                ],
+                "mac_public_key": replacements["__REVIEWED_MAC_PUBLIC_KEY__"],
+            },
             "files": file_hashes,
         }
         manifest_bytes = (
@@ -480,6 +525,7 @@ def verify_bundle(
         "mode",
         "source_spec_sha256",
         "security_claims",
+        "topology",
         "files",
     }:
         raise ValueError("bundle manifest keys differ from the contract")
@@ -491,6 +537,23 @@ def verify_bundle(
         raise ValueError("bundle manifest mode is invalid")
     if manifest["security_claims"] != SECURITY_CLAIMS:
         raise ValueError("bundle security claims differ from the contract")
+    topology = manifest["topology"]
+    if not isinstance(topology, dict) or set(topology) != TOPOLOGY_KEYS:
+        raise ValueError("bundle topology differs from the contract")
+    if type(topology["listen_port"]) is not int:
+        raise ValueError("bundle topology listen port is invalid")
+    topology_spec = {
+        "schema_version": 1,
+        "mode": "local_nat_lab",
+        **{
+            key: value
+            for key, value in topology.items()
+            if key != "router_ipv4_network"
+        },
+    }
+    # Reuse the public-input validator so a manifest with valid-looking hashes
+    # cannot smuggle a noncanonical or widened topology into an overlay.
+    validate_spec(topology_spec)
     source_hash = manifest["source_spec_sha256"]
     if not isinstance(source_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", source_hash):
         raise ValueError("bundle source spec hash is invalid")

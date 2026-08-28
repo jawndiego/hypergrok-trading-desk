@@ -3,9 +3,8 @@ set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
-# This artifact is deliberately plan-only. A later reviewed commissioning step
-# must implement installation after image, package, host, and effective Lima
-# configuration evidence has been retained.
+# This artifact is deliberately plan-only. The separate root-sealed launcher
+# owns the enabled credential-free host-preparation phases.
 if [ "$#" -ne 1 ] || [ "$1" != "--plan" ]; then
     printf '%s\n' 'bootstrap_apply_disabled: only --plan is accepted' >&2
     exit 64
@@ -16,11 +15,13 @@ printf '%s\n' \
     'network_changes_performed=false' \
     'packages_installed=false' \
     'host_tool_downloads_performed=false' \
-    'host_tool_install_apply_enabled=false' \
+    'host_tool_install_apply_enabled=true' \
     'separate_commission_apply_artifact_present=true' \
-    'separate_media_seal_apply_enabled=false' \
-    'separate_host_tool_apply_enabled=false' \
-    'separate_lima_home_apply_enabled=false' \
+    'separate_runtime_qualification_enabled=true' \
+    'separate_media_seal_apply_enabled=true' \
+    'separate_host_tool_apply_enabled=true' \
+    'separate_lima_home_apply_enabled=true' \
+    'separate_validate_fill_apply_enabled=true' \
     'separate_vm_create_apply_enabled=false' \
     'separate_guest_mutation_apply_enabled=false' \
     'host_tool_attestation_required=true' \

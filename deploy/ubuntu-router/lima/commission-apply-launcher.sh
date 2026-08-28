@@ -35,8 +35,11 @@ controller=$(/usr/bin/dirname "$launcher")
 script=$controller/commission-apply.py
 runtime=/opt/trading-desk/runtime/python-3.11.16
 python=$runtime/bin/python3.11
+otool=/Library/Developer/CommandLineTools/usr/bin/llvm-otool
+expected_python_sha256=b1e82855accbd41dc26f83a8722b3cdc745fb23484cfc645823bc8446144aa0f
+expected_otool_sha256=61ff2c63cf68eeeadf9c4700dadb8271740ff4960f98500f30db82b31521c0de
 
-ROOT_APPLY_ENABLED=0
+ROOT_APPLY_ENABLED=1
 if [ "$ROOT_APPLY_ENABLED" != 1 ]; then
     /bin/echo 'root_apply_enabled=false'
     /bin/echo 'blocker=sealed Python runtime lacks a pre-exec symlink and dynamic-library closure proof'
@@ -63,9 +66,43 @@ first_writable=$(/usr/bin/find "$runtime" ! -type l -perm +022 -print -quit)
 first_acl=$(/usr/bin/find "$runtime" -acl -print -quit)
 [ -z "$first_acl" ] || die "sealed Python tree has a named ACL: $first_acl"
 
+escaped_link=$(
+    /usr/bin/find "$runtime" -type l -exec /bin/sh -eu -c '
+        runtime=$1
+        shift
+        for path do
+            resolved=$(/bin/realpath "$path")
+            case "$resolved" in
+                "$runtime"/*) ;;
+                *) /bin/echo "$path"; exit 0 ;;
+            esac
+        done
+    ' sh "$runtime" {} +
+)
+[ -z "$escaped_link" ] || die "sealed Python symlink escapes its root: $escaped_link"
+[ "$(/usr/bin/shasum -a 256 "$python" | /usr/bin/awk '{print $1}')" = \
+    "$expected_python_sha256" ] || die 'sealed Python executable digest differs'
+[ -f "$otool" ] && [ ! -L "$otool" ] || die 'pinned llvm-otool is unavailable'
+assert_root_chain "$otool"
+[ "$(/usr/bin/stat -f '%u:%g:%Lp:%l' "$otool")" = '0:0:755:1' ] || \
+    die 'pinned llvm-otool metadata differs'
+[ "$(/usr/bin/shasum -a 256 "$otool" | /usr/bin/awk '{print $1}')" = \
+    "$expected_otool_sha256" ] || die 'pinned llvm-otool digest differs'
+/usr/bin/codesign --verify --strict --test-requirement '=anchor apple' "$otool" \
+    >/dev/null 2>&1 || die 'pinned llvm-otool signature differs'
+python_loads=$(
+    "$otool" -L "$python" | /usr/bin/sed '1d' | /usr/bin/awk '{print $1}' | \
+        LC_ALL=C /usr/bin/sort
+)
+[ "$python_loads" = '/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
+/usr/lib/libSystem.B.dylib' ] || die 'sealed Python direct load closure differs'
+if "$otool" -l "$python" | /usr/bin/grep -Fq 'LC_RPATH'; then
+    die 'sealed Python has an unexpected runtime search path'
+fi
+
 case "${1-}" in
-    apply-seal-media|apply-host-tools|quarantine-incomplete) ;;
-    *) die 'launcher accepts only reviewed root media/host/quarantine phases' ;;
+    qualify-runtime|apply-seal-media|apply-host-tools|apply-lima-home|apply-validate-fill|quarantine-incomplete) ;;
+    *) die 'launcher accepts only reviewed host-preparation phases' ;;
 esac
 
 exec /usr/bin/env -i \

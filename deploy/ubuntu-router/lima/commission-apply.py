@@ -1,9 +1,11 @@
 #!/usr/bin/false
-"""Phased, credential-free macOS commissioning for the Lima router.
+"""Phased, credential-free macOS host preparation for the Lima router.
 
-Only the informational UID-501 verification receipt is enabled. Root media,
-host tools, writable Lima state, validate-fill, VM creation/start and every
-guest or network mutation remain unreachable behind reviewed blockers.
+The reviewed root path can qualify the sealed Python runtime, seal immutable
+public media, install inert host tools, initialize the dedicated UID-454 Lima
+home, and retain ``limactl validate --fill`` evidence. VM creation/start,
+guest mutation, socket_vmnet activation, router keys, network changes and all
+venue authority remain unreachable behind literal false gates.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import argparse
 import ctypes
 import errno
 import fcntl
+import grp
 import hashlib
 import json
 import os
@@ -36,12 +39,45 @@ F_FULLFSYNC = 51
 AT_FDCWD = -2
 RENAME_EXCL = 0x00000004
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+UUID_RE = re.compile(
+    r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}"
+)
+REVIEWED_ROUTER_GROUP_PRINCIPALS = (
+    "12:everyone:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:none,"
+    "61:localaccounts:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D:none,"
+    "100:_lpoperator:ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000064:"
+    "ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D+"
+    "ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000062,"
+    "701:com.apple.sharepoint.group.1:"
+    "EE977B55-20FF-44D2-81CD-3A51B6BBC5DC:"
+    "ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C"
+)
+REVIEWED_ROUTER_GROUPS = (
+    (12, "everyone", "ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C", ()),
+    (61, "localaccounts", "ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D", ()),
+    (
+        100,
+        "_lpoperator",
+        "ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000064",
+        (
+            "ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D",
+            "ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000062",
+        ),
+    ),
+    (
+        701,
+        "com.apple.sharepoint.group.1",
+        "EE977B55-20FF-44D2-81CD-3A51B6BBC5DC",
+        ("ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C",),
+    ),
+)
 PHASE_RECEIPTS = {
     "media": "01-media.json",
     "host-tools": "02-host-tools.json",
     "lima-home": "03-lima-home.json",
     "validate-fill": "04-validate-fill.json",
 }
+RUNTIME_RECEIPT_NAME = "python-3.11.16-sealed-runtime.json"
 EXPECTED_BUNDLE_FILES = {
     "bootstrap-public.sh",
     "commission-apply-lock.json",
@@ -371,26 +407,80 @@ def _locks() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         "stop_line",
         "verifier_toolchain",
     }
-    if set(apply_lock) != expected_apply_keys or apply_lock.get("schema_version") != 1:
+    if set(apply_lock) != expected_apply_keys or apply_lock.get("schema_version") != 2:
         raise CommissionError("commission apply lock schema differs")
     if apply_lock.get("review_status") != (
-        "operator_evidence_only_all_root_vm_guest_apply_disabled"
+        "credential_free_host_preparation_enabled_vm_guest_network_disabled"
     ):
         raise CommissionError("commission apply review status differs")
-    if any(apply_lock["stop_line"].values()):
+    host = apply_lock.get("host")
+    if (
+        not isinstance(host, dict)
+        or set(host)
+        != {
+            "architecture",
+            "build_version",
+            "os",
+            "product_version",
+            "public_verifier_gid",
+            "public_verifier_uid",
+            "router_identity_receipt_path",
+            "router_operator_account",
+            "router_operator_gid",
+            "router_operator_group_principals",
+            "router_operator_supplementary_groups",
+            "router_operator_uid",
+        }
+        or host["public_verifier_uid"] != 501
+        or host["public_verifier_gid"] != 20
+        or host["router_operator_uid"] != 454
+        or host["router_operator_gid"] != 454
+        or host["router_operator_account"] != "trading-router-operator"
+        or host["router_operator_supplementary_groups"] != [12, 61, 100, 701]
+        or host["router_operator_group_principals"]
+        != REVIEWED_ROUTER_GROUP_PRINCIPALS
+        or host["router_identity_receipt_path"]
+        != "/private/etc/trading-desk/testnet-foreground-router-identity.receipt"
+    ):
+        raise CommissionError("commission host role contract differs")
+    expected_paths = {
+        "lima_home": "/private/var/db/trading-desk-lima",
+        "lima_install": "/opt/trading-desk-router-tools/lima-2.2.0",
+        "lima_plan": "/opt/trading-desk-router-tools/plans/lima.yaml",
+        "media_parent": "/private/var/db/trading-desk-router-commission-v1/media",
+        "operator_home": "/private/var/db/trading-desk-lima/home",
+        "quarantine_parent": "/private/var/db/trading-desk-router-commission-v1/quarantine",
+        "receipt_parent": "/private/var/db/trading-desk-router-commission-v1/receipts",
+        "socket_vmnet_install": "/opt/socket_vmnet",
+        "state_root": "/private/var/db/trading-desk-router-commission-v1",
+        "tools_parent": "/opt/trading-desk-router-tools",
+    }
+    if apply_lock.get("paths") != expected_paths:
+        raise CommissionError("commission path contract differs")
+    expected_stop_line = {
+        "credentials_authorized": False,
+        "executor_init_authorized": False,
+        "mainnet_authorized": False,
+        "network_changes_authorized": False,
+        "router_key_generation_authorized": False,
+        "venue_writes_authorized": False,
+    }
+    if apply_lock.get("stop_line") != expected_stop_line:
         raise CommissionError("commission stop line unexpectedly authorizes mutation")
     expected_enabled = {
         "operator_verification_receipt_enabled": True,
-        "media_seal_apply_enabled": False,
-        "host_tools_apply_enabled": False,
-        "lima_home_apply_enabled": False,
-        "validate_fill_apply_enabled": False,
+        "media_seal_apply_enabled": True,
+        "host_tools_apply_enabled": True,
+        "lima_home_apply_enabled": True,
+        "validate_fill_apply_enabled": True,
         "vm_create_apply_enabled": False,
         "vm_start_apply_enabled": False,
         "guest_freeze_apply_enabled": False,
         "guest_package_simulation_apply_enabled": False,
         "guest_package_install_apply_enabled": False,
+        "quarantine_apply_enabled": True,
         "router_activation_apply_enabled": False,
+        "runtime_qualification_receipt_enabled": True,
     }
     if apply_lock.get("phases") != expected_enabled:
         raise CommissionError("commission phase gates differ")
@@ -412,9 +502,10 @@ def _plan() -> int:
     for phase, blocker in sorted(apply_lock["blockers"].items()):
         print(f"blocker_{phase}={blocker}")
     print(
-        "enabled_sequence=operator-verify-informational-only"
+        "enabled_sequence=operator-verify,qualify-runtime,seal-media,"
+        "host-tools,lima-home,validate-fill"
     )
-    print("stop_before=root-media,host-tools,lima-home,validate-fill,vm-create,vm-start,guest-mutation,router-key,netplan,nftables,wireguard")
+    print("stop_before=vm-create,vm-start,guest-mutation,router-key,netplan,nftables,wireguard")
     print("credentials_touched=false")
     print("venue_calls_authorized=false")
     print("operator_verification_receipt_is_informational_not_root_authority=true")
@@ -453,6 +544,395 @@ def _host_identity(apply_lock: dict[str, Any]) -> None:
         or observed.get("BuildVersion") != host["build_version"]
     ):
         raise CommissionError("host macOS build differs from the apply lock")
+
+
+def _dscl_value(node: str, attribute: str) -> str:
+    result = subprocess.run(
+        ["/usr/bin/dscl", ".", "-read", node, attribute],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=5,
+        check=False,
+    )
+    prefix = f"{attribute}: "
+    lines = result.stdout.splitlines()
+    if result.returncode != 0 or len(lines) != 1 or not lines[0].startswith(prefix):
+        raise CommissionError(f"router identity {attribute} is unavailable")
+    return lines[0][len(prefix) :]
+
+
+def _parse_dscl_hidden_output(stdout: str, returncode: int) -> str:
+    if returncode != 0 or stdout.splitlines() not in (
+        ["IsHidden: 1"],
+        ["dsAttrTypeNative:IsHidden: 1"],
+    ):
+        raise CommissionError("router identity IsHidden is unavailable")
+    return "1"
+
+
+def _dscl_hidden_value(node: str) -> str:
+    result = subprocess.run(
+        ["/usr/bin/dscl", ".", "-read", node, "IsHidden"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=5,
+        check=False,
+    )
+    return _parse_dscl_hidden_output(result.stdout, result.returncode)
+
+
+def _parse_group_id_inventory(stdout: str) -> dict[int, str]:
+    result: dict[int, str] = {}
+    names: set[str] = set()
+    for line in stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or re.fullmatch(r"-?[0-9]+", fields[1]) is None:
+            raise CommissionError("Darwin group ID inventory is malformed")
+        name, raw_gid = fields
+        gid = int(raw_gid, 10)
+        if str(gid) != raw_gid or name in names or gid in result:
+            raise CommissionError("Darwin group ID inventory is non-unique")
+        names.add(name)
+        result[gid] = name
+    if not result:
+        raise CommissionError("Darwin group ID inventory is empty")
+    return result
+
+
+def _parse_generated_uid_inventory(stdout: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    names: set[str] = set()
+    for line in stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or UUID_RE.fullmatch(fields[1]) is None:
+            raise CommissionError("Darwin GeneratedUID inventory is malformed")
+        name, generated_uid = fields
+        if name in names or generated_uid in result:
+            raise CommissionError("Darwin GeneratedUID inventory is non-unique")
+        names.add(name)
+        result[generated_uid] = name
+    if not result:
+        raise CommissionError("Darwin GeneratedUID inventory is empty")
+    return result
+
+
+def _generated_uid_inventories() -> tuple[dict[str, str], dict[str, str]]:
+    inventories: list[dict[str, str]] = []
+    for node in ("/" + "Users", "/Groups"):
+        result = subprocess.run(
+            ["/usr/bin/dscl", ".", "-list", node, "GeneratedUID"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise CommissionError("Darwin GeneratedUID inventory is unavailable")
+        inventories.append(_parse_generated_uid_inventory(result.stdout))
+    return inventories[0], inventories[1]
+
+
+def _require_globally_unique_generated_uid(
+    generated_uid: str,
+    account: str,
+    *,
+    user_inventory: dict[str, str],
+    group_inventory: dict[str, str],
+    node: str,
+) -> None:
+    user_match = user_inventory.get(generated_uid)
+    group_match = group_inventory.get(generated_uid)
+    if node == "user":
+        exact = user_match == account and group_match is None
+    elif node == "group":
+        exact = group_match == account and user_match is None
+    else:
+        raise CommissionError("GeneratedUID node is invalid")
+    if not exact:
+        raise CommissionError("Darwin GeneratedUID is not globally unique")
+
+
+def _parse_reviewed_group_record(
+    stdout: str,
+    *,
+    expected_gid: int,
+    expected_uuid: str,
+    expected_nested: tuple[str, ...],
+) -> None:
+    values: dict[str, str] = {}
+    for line in stdout.splitlines():
+        for key in (
+            "GeneratedUID",
+            "PrimaryGroupID",
+            "GroupMembership",
+            "GroupMembers",
+            "NestedGroups",
+        ):
+            prefix = f"{key}:"
+            if line.startswith(prefix):
+                if key in values:
+                    raise CommissionError("reviewed Darwin group record is ambiguous")
+                values[key] = line[len(prefix) :].strip()
+    if "GroupMembership" in values or "GroupMembers" in values:
+        raise CommissionError("reviewed Darwin group has explicit members")
+    if (
+        values.get("GeneratedUID") != expected_uuid
+        or values.get("PrimaryGroupID") != str(expected_gid)
+    ):
+        raise CommissionError("reviewed Darwin group identity differs")
+    nested = tuple(sorted(values.get("NestedGroups", "").split()))
+    if (
+        any(UUID_RE.fullmatch(value) is None for value in nested)
+        or len(nested) != len(set(nested))
+        or nested != tuple(sorted(expected_nested))
+    ):
+        raise CommissionError("reviewed Darwin group nesting differs")
+
+
+def _verify_reviewed_group_principals() -> None:
+    user_inventory, group_inventory = _generated_uid_inventories()
+    inventory_result = subprocess.run(
+        ["/usr/bin/dscl", ".", "-list", "/Groups", "PrimaryGroupID"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=10,
+        check=False,
+    )
+    if inventory_result.returncode != 0:
+        raise CommissionError("Darwin group ID inventory is unavailable")
+    inventory = _parse_group_id_inventory(inventory_result.stdout)
+    for gid, name, generated_uid, nested in REVIEWED_ROUTER_GROUPS:
+        if inventory.get(gid) != name:
+            raise CommissionError("reviewed Darwin group name/GID differs")
+        record = subprocess.run(
+            ["/usr/bin/dscl", ".", "-read", f"/Groups/{name}"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=5,
+            check=False,
+        )
+        if record.returncode != 0:
+            raise CommissionError("reviewed Darwin group record is unavailable")
+        _parse_reviewed_group_record(
+            record.stdout,
+            expected_gid=gid,
+            expected_uuid=generated_uid,
+            expected_nested=nested,
+        )
+        _require_globally_unique_generated_uid(
+            generated_uid,
+            name,
+            user_inventory=user_inventory,
+            group_inventory=group_inventory,
+            node="group",
+        )
+
+
+def _verify_router_primary_group(account: str, gid: int, generated_uid: str) -> None:
+    inventory_result = subprocess.run(
+        ["/usr/bin/dscl", ".", "-list", "/Groups", "PrimaryGroupID"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=10,
+        check=False,
+    )
+    if (
+        inventory_result.returncode != 0
+        or _parse_group_id_inventory(inventory_result.stdout).get(gid) != account
+    ):
+        raise CommissionError("router primary group name/GID differs")
+    record = subprocess.run(
+        ["/usr/bin/dscl", ".", "-read", f"/Groups/{account}"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=5,
+        check=False,
+    )
+    if record.returncode != 0:
+        raise CommissionError("router primary group record is unavailable")
+    _parse_reviewed_group_record(
+        record.stdout,
+        expected_gid=gid,
+        expected_uuid=generated_uid,
+        expected_nested=(),
+    )
+
+
+def _router_operator_identity(apply_lock: dict[str, Any]) -> dict[str, str]:
+    host = apply_lock["host"]
+    account = host["router_operator_account"]
+    uid = host["router_operator_uid"]
+    gid = host["router_operator_gid"]
+    try:
+        user = pwd.getpwnam(account)
+        group = grp.getgrnam(account)
+        supplementary = sorted(
+            value for value in os.getgrouplist(account, gid) if value != gid
+        )
+    except (KeyError, OSError) as error:
+        raise CommissionError("router operator identity is unavailable") from error
+    if (
+        user.pw_uid != uid
+        or user.pw_gid != gid
+        or user.pw_dir != apply_lock["paths"]["lima_home"]
+        or user.pw_shell != "/usr/bin/false"
+        or group.gr_gid != gid
+        or supplementary != host["router_operator_supplementary_groups"]
+    ):
+        raise CommissionError("router operator identity differs from the lock")
+    _verify_reviewed_group_principals()
+    receipt_path = Path(host["router_identity_receipt_path"])
+    _assert_real_path(
+        receipt_path, kind="file", owner_uid=0, owner_gid=0, mode=0o400
+    )
+    receipt_bytes = _read_fd_bound_file(
+        receipt_path,
+        owner_uid=0,
+        owner_gid=0,
+        mode=0o400,
+        maximum_size=64 * 1024,
+    )
+    try:
+        lines = receipt_bytes.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise CommissionError("router identity receipt is not UTF-8") from error
+    receipt: dict[str, str] = {}
+    for line in lines:
+        if line.count("=") != 1:
+            raise CommissionError("router identity receipt is noncanonical")
+        key, value = line.split("=", 1)
+        if not key or key in receipt:
+            raise CommissionError("router identity receipt is noncanonical")
+        receipt[key] = value
+    required = {
+        "schema_version": "3",
+        "role": "router",
+        "account": account,
+        "uid": str(uid),
+        "gid": str(gid),
+        "home": apply_lock["paths"]["lima_home"],
+        "shell": "/usr/bin/false",
+        "authentication": "password-star-and-false-shell",
+        "authentication_authority": receipt.get("authentication_authority", ""),
+        "hidden": "1",
+        "supplementary_groups": ",".join(
+            str(value) for value in host["router_operator_supplementary_groups"]
+        ),
+        "supplementary_group_model": "matches-existing-trading-role-baseline",
+        "supplementary_group_principals": host[
+            "router_operator_group_principals"
+        ],
+        "primary_group_members": "none",
+        "primary_group_nested_groups": "none",
+        "credential_loaded": "false",
+        "network_changed": "false",
+        "service_started": "false",
+        "venue_write_attempted": "false",
+        "mainnet_authorized": "false",
+    }
+    expected_keys = set(required) | {"user_generated_uid", "group_generated_uid"}
+    if set(receipt) != expected_keys or any(
+        receipt.get(key) != value for key, value in required.items()
+    ):
+        raise CommissionError("router identity receipt differs from the lock")
+    user_uuid = receipt["user_generated_uid"]
+    group_uuid = receipt["group_generated_uid"]
+    user_node = "/" + "Users/" + account
+    group_node = "/Groups/" + account
+    if (
+        not UUID_RE.fullmatch(user_uuid)
+        or not UUID_RE.fullmatch(group_uuid)
+        or user_uuid == group_uuid
+        or _dscl_value(user_node, "GeneratedUID") != user_uuid
+        or _dscl_value(group_node, "GeneratedUID") != group_uuid
+        or _dscl_value(user_node, "Password") != "*"
+        or _dscl_hidden_value(user_node) != "1"
+    ):
+        raise CommissionError("router identity receipt UUID/security binding differs")
+    user_inventory, group_inventory = _generated_uid_inventories()
+    _require_globally_unique_generated_uid(
+        user_uuid,
+        account,
+        user_inventory=user_inventory,
+        group_inventory=group_inventory,
+        node="user",
+    )
+    _require_globally_unique_generated_uid(
+        group_uuid,
+        account,
+        user_inventory=user_inventory,
+        group_inventory=group_inventory,
+        node="group",
+    )
+    _verify_router_primary_group(account, gid, group_uuid)
+    authority = receipt["authentication_authority"]
+    authority_result = subprocess.run(
+        [
+            "/usr/bin/dscl",
+            ".",
+            "-read",
+            user_node,
+            "AuthenticationAuthority",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=5,
+        check=False,
+    )
+    expected_authority = (
+        "absent"
+        if authority_result.returncode != 0 or not authority_result.stdout.strip()
+        else "disabled-user"
+        if authority_result.stdout.strip()
+        == "AuthenticationAuthority: ;DisabledUser;"
+        else "invalid"
+    )
+    if authority != expected_authority or authority not in {"absent", "disabled-user"}:
+        raise CommissionError("router identity authentication authority differs")
+    return {
+        "path": str(receipt_path),
+        "sha256": _sha256_bytes(receipt_bytes),
+    }
 
 
 def _tool_file(path: Path, contract: dict[str, Any], label: str) -> None:
@@ -522,7 +1002,7 @@ def _verify_toolchain(apply_lock: dict[str, Any]) -> dict[str, Any]:
             raise CommissionError(f"Homebrew load path resolves unexpectedly: {link}")
         augmented = {
             **dependency,
-            "owner_uid": apply_lock["host"]["operator_uid"],
+            "owner_uid": apply_lock["host"]["public_verifier_uid"],
             "owner_gid": 80,
         }
         _tool_file(path, augmented, path.name)
@@ -691,8 +1171,8 @@ def _operator_receipt(args: argparse.Namespace) -> int:
     apply_lock, commission_lock, _ = _locks()
     if not apply_lock["phases"]["operator_verification_receipt_enabled"]:
         raise CommissionError("operator verification receipt phase is disabled")
-    operator_uid = apply_lock["host"]["operator_uid"]
-    operator_gid = apply_lock["host"]["operator_gid"]
+    operator_uid = apply_lock["host"]["public_verifier_uid"]
+    operator_gid = apply_lock["host"]["public_verifier_gid"]
     if os.geteuid() != operator_uid or os.getegid() != operator_gid:
         raise CommissionError("operator verification must run as the fixed operator UID/GID")
     _verify_bundle_manifest(SCRIPT_DIR, args.expected_bundle_manifest_sha256, operator_uid)
@@ -746,7 +1226,7 @@ def _operator_receipt(args: argparse.Namespace) -> int:
     return 0
 
 
-def _assert_runtime_receipt(args: argparse.Namespace, apply_lock: dict[str, Any]) -> str:
+def _assert_runtime_process(apply_lock: dict[str, Any]) -> Path:
     runtime = apply_lock["python_runtime"]
     if (
         sys.flags.isolated != 1
@@ -761,11 +1241,69 @@ def _assert_runtime_receipt(args: argparse.Namespace, apply_lock: dict[str, Any]
         raise CommissionError("commissioner is not running under the sealed Python path")
     if platform.python_version() != runtime["version"] or sys.prefix != runtime["prefix"]:
         raise CommissionError("sealed Python version/prefix differs")
-    _assert_real_path(Path(sys.executable), kind="file", owner_uid=0)
+    executable = Path(sys.executable)
+    metadata = _assert_real_path(executable, kind="file", owner_uid=0)
+    if (
+        metadata.st_size != runtime["python_size_bytes"]
+        or _sha256_file(executable) != runtime["python_sha256"]
+    ):
+        raise CommissionError("sealed Python executable differs from the lock")
     runtime_prefix = Path(runtime["prefix"])
     _assert_real_path(runtime_prefix, kind="directory", owner_uid=0)
     _assert_root_owned_chain(runtime_prefix)
+    return runtime_prefix
+
+
+def _runtime_load_scan_evidence(apply_lock: dict[str, Any]) -> dict[str, str]:
+    runtime = apply_lock["python_runtime"]
+    path = Path(runtime["load_scan_path"])
+    _assert_real_path(path, kind="file", owner_uid=0, owner_gid=0, mode=0o400)
+    content = _read_fd_bound_file(
+        path,
+        owner_uid=0,
+        owner_gid=0,
+        mode=0o400,
+        maximum_size=2 * 1024 * 1024,
+    )
+    if not content or any(
+        forbidden in content
+        for forbidden in (
+            b"/" + b"Users/",
+            b"/opt/homebrew",
+            b".runtime-stage",
+        )
+    ):
+        raise CommissionError("sealed Python load-scan evidence is invalid")
+    otool = Path(runtime["llvm_otool_path"])
+    metadata = _assert_real_path(
+        otool, kind="file", owner_uid=0, owner_gid=0, mode=0o755
+    )
+    if (
+        metadata.st_size <= 0
+        or _sha256_file(otool) != runtime["llvm_otool_sha256"]
+    ):
+        raise CommissionError("sealed Python llvm-otool differs from the lock")
+    result = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", "=anchor apple", str(otool)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise CommissionError("sealed Python llvm-otool signature is invalid")
+    return {"path": str(path), "sha256": _sha256_bytes(content)}
+
+
+def _assert_runtime_receipt(args: argparse.Namespace, apply_lock: dict[str, Any]) -> str:
+    runtime = apply_lock["python_runtime"]
+    runtime_prefix = _assert_runtime_process(apply_lock)
+    load_scan = _runtime_load_scan_evidence(apply_lock)
     receipt = args.runtime_receipt.resolve(strict=True)
+    if receipt != Path(runtime["qualification_receipt_path"]):
+        raise CommissionError("runtime qualification receipt path differs from the lock")
     _assert_real_path(receipt, kind="file", owner_uid=0, owner_gid=0, mode=0o400)
     if not SHA256_RE.fullmatch(args.expected_runtime_receipt_sha256):
         raise CommissionError("expected runtime receipt SHA-256 is invalid")
@@ -786,15 +1324,32 @@ def _assert_runtime_receipt(args: argparse.Namespace, apply_lock: dict[str, Any]
         "runtime_prefix",
         "runtime_version",
         "runtime_tree_sha256",
+        "python_sha256",
+        "load_scan_path",
+        "load_scan_sha256",
+        "llvm_otool_sha256",
+        "credentials_touched",
+        "network_changes_performed",
+        "venue_writes_authorized",
+        "mainnet_authorized",
     }
     if (
         set(runtime_receipt) != expected_receipt_fields
-        or runtime_receipt.get("schema_version") != 1
+        or runtime_receipt.get("schema_version") != 2
         or runtime_receipt.get("kind")
         != "trading-desk.sealed-python-runtime"
         or runtime_receipt.get("runtime_path") != runtime["path"]
         or runtime_receipt.get("runtime_prefix") != runtime["prefix"]
         or runtime_receipt.get("runtime_version") != runtime["version"]
+        or runtime_receipt.get("python_sha256") != runtime["python_sha256"]
+        or runtime_receipt.get("load_scan_path") != load_scan["path"]
+        or runtime_receipt.get("load_scan_sha256") != load_scan["sha256"]
+        or runtime_receipt.get("llvm_otool_sha256")
+        != runtime["llvm_otool_sha256"]
+        or runtime_receipt.get("credentials_touched") is not False
+        or runtime_receipt.get("network_changes_performed") is not False
+        or runtime_receipt.get("venue_writes_authorized") is not False
+        or runtime_receipt.get("mainnet_authorized") is not False
         or not isinstance(runtime_receipt.get("runtime_tree_sha256"), str)
         or not SHA256_RE.fullmatch(runtime_receipt["runtime_tree_sha256"])
     ):
@@ -890,7 +1445,7 @@ def _assert_root_owned_chain(path: Path) -> None:
         current = current.parent
 
 
-def _assert_root_apply(args: argparse.Namespace, apply_lock: dict[str, Any]) -> str:
+def _assert_root_controller(args: argparse.Namespace, apply_lock: dict[str, Any]) -> None:
     if os.geteuid() != 0 or os.getegid() != 0:
         raise CommissionError("root apply phase requires root:wheel")
     _host_identity(apply_lock)
@@ -905,7 +1460,66 @@ def _assert_root_apply(args: argparse.Namespace, apply_lock: dict[str, Any]) -> 
     _verify_bundle_manifest(
         SCRIPT_DIR, args.expected_controller_manifest_sha256, 0
     )
+
+
+def _assert_root_apply(args: argparse.Namespace, apply_lock: dict[str, Any]) -> str:
+    _assert_root_controller(args, apply_lock)
     return _assert_runtime_receipt(args, apply_lock)
+
+
+def _qualify_runtime(args: argparse.Namespace) -> int:
+    apply_lock, _, _ = _locks()
+    if not apply_lock["phases"]["runtime_qualification_receipt_enabled"]:
+        raise CommissionError("runtime qualification receipt phase is disabled")
+    _assert_root_controller(args, apply_lock)
+    runtime = apply_lock["python_runtime"]
+    runtime_prefix = _assert_runtime_process(apply_lock)
+    load_scan = _runtime_load_scan_evidence(apply_lock)
+    receipt = {
+        "schema_version": 2,
+        "kind": "trading-desk.sealed-python-runtime",
+        "runtime_path": runtime["path"],
+        "runtime_prefix": runtime["prefix"],
+        "runtime_version": runtime["version"],
+        "runtime_tree_sha256": _runtime_tree_sha256(runtime_prefix),
+        "python_sha256": runtime["python_sha256"],
+        "load_scan_path": load_scan["path"],
+        "load_scan_sha256": load_scan["sha256"],
+        "llvm_otool_sha256": runtime["llvm_otool_sha256"],
+        "credentials_touched": False,
+        "network_changes_performed": False,
+        "venue_writes_authorized": False,
+        "mainnet_authorized": False,
+    }
+    destination = Path(runtime["qualification_receipt_path"])
+    parent = destination.parent
+    _assert_real_path(
+        parent, kind="directory", owner_uid=0, owner_gid=0, mode=0o755
+    )
+    lock_path = parent / ".runtime-qualification.lock"
+    lock_descriptor = os.open(
+        lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
+    )
+    os.fchown(lock_descriptor, 0, 0)
+    os.fchmod(lock_descriptor, 0o600)
+    lock_metadata = os.fstat(lock_descriptor)
+    if not stat.S_ISREG(lock_metadata.st_mode) or lock_metadata.st_nlink != 1:
+        os.close(lock_descriptor)
+        raise CommissionError("runtime qualification lock is unsafe")
+    fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    _full_fsync_fd(lock_descriptor)
+    _sync_directory(parent)
+    if destination.name != RUNTIME_RECEIPT_NAME:
+        raise CommissionError("runtime qualification receipt basename differs")
+    path, digest = _atomic_receipt(
+        parent, destination.name, receipt, uid=0, gid=0
+    )
+    print(f"runtime_qualification_receipt={path}")
+    print(f"runtime_qualification_receipt_sha256={digest}")
+    print("credentials_touched=false")
+    print("network_changes_performed=false")
+    print("venue_writes_authorized=false")
+    return 0
 
 
 def _initialize_state(apply_lock: dict[str, Any]) -> dict[str, Path]:
@@ -1001,9 +1615,21 @@ def _evidence_hashes(lock: dict[str, Any]) -> dict[str, str]:
     return result
 
 
-def _copy_locked_file(source: Path, destination: Path, expected_sha256: str) -> None:
+def _copy_locked_file(
+    source: Path,
+    destination: Path,
+    expected_sha256: str,
+    *,
+    destination_mode: int = 0o400,
+) -> None:
     if destination.exists() or destination.is_symlink():
-        _assert_real_path(destination, kind="file", owner_uid=0, owner_gid=0, mode=0o400)
+        _assert_real_path(
+            destination,
+            kind="file",
+            owner_uid=0,
+            owner_gid=0,
+            mode=destination_mode,
+        )
         if _sha256_file(destination) != expected_sha256:
             raise CommissionError(f"resumed media file differs: {destination}")
         return
@@ -1016,7 +1642,7 @@ def _copy_locked_file(source: Path, destination: Path, expected_sha256: str) -> 
         destination_fd = os.open(
             destination,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o400,
+            destination_mode,
         )
         digest = hashlib.sha256()
         while True:
@@ -1036,7 +1662,7 @@ def _copy_locked_file(source: Path, destination: Path, expected_sha256: str) -> 
         if digest.hexdigest() != expected_sha256:
             raise CommissionError(f"media source digest differs: {source}")
         os.fchown(destination_fd, 0, 0)
-        os.fchmod(destination_fd, 0o400)
+        os.fchmod(destination_fd, destination_mode)
         _full_fsync_fd(destination_fd)
     finally:
         os.close(source_fd)
@@ -1141,7 +1767,7 @@ def _seal_media(args: argparse.Namespace) -> int:
     runtime_receipt_sha = _assert_root_apply(args, apply_lock)
     state = _initialize_state(apply_lock)
     _acquire_state_lock(state)
-    operator_uid = apply_lock["host"]["operator_uid"]
+    operator_uid = apply_lock["host"]["public_verifier_uid"]
     controller_manifest = _verify_bundle_manifest(
         SCRIPT_DIR, args.expected_controller_manifest_sha256, 0
     )
@@ -1150,7 +1776,7 @@ def _seal_media(args: argparse.Namespace) -> int:
         evidence_dir,
         kind="directory",
         owner_uid=operator_uid,
-        owner_gid=apply_lock["host"]["operator_gid"],
+        owner_gid=apply_lock["host"]["public_verifier_gid"],
         mode=0o700,
     )
     expected_evidence = _evidence_hashes(commission_lock)
@@ -1249,6 +1875,9 @@ def _seal_media(args: argparse.Namespace) -> int:
         "ready_marker_sha256": ready_digest,
         "network_changes_performed": False,
         "vm_created": False,
+        "credentials_touched": False,
+        "venue_writes_authorized": False,
+        "mainnet_authorized": False,
     }
     path, digest = _atomic_receipt(
         state["receipt_parent"], PHASE_RECEIPTS["media"], receipt, uid=0, gid=0
@@ -1269,13 +1898,23 @@ def _root_phase_receipt(
         "lima-home": "trading-desk.router-commission.lima-home",
         "validate-fill": "trading-desk.router-commission.validate-fill",
     }
-    return _read_expected_receipt(
+    receipt = _read_expected_receipt(
         state["receipt_parent"] / PHASE_RECEIPTS[phase],
         expected_sha256,
         expected_kinds[phase],
         owner_uid=0,
         owner_gid=0,
     )
+    required_false = (
+        "network_changes_performed",
+        "vm_created",
+        "credentials_touched",
+        "venue_writes_authorized",
+        "mainnet_authorized",
+    )
+    if any(receipt.get(field) is not False for field in required_false):
+        raise CommissionError(f"phase receipt stop line differs: {phase}")
+    return receipt
 
 
 def _safe_tar_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
@@ -1496,6 +2135,122 @@ def _extract_archive_resume(
     return verified_hash
 
 
+def _verified_retained_host_tool_quarantines(
+    state: dict[str, Path],
+    *,
+    marker: bytes,
+    marker_digest: str,
+    allowed_sources: frozenset[Path],
+    tools_parent: Path,
+) -> tuple[Path, ...]:
+    transaction_path = state["quarantine_parent"] / (
+        f"quarantine-transaction-host-tools-{marker_digest}.json"
+    )
+    receipt_path = state["quarantine_parent"] / (
+        f"quarantine-host-tools-{marker_digest}.json"
+    )
+    transaction_present = transaction_path.exists() or transaction_path.is_symlink()
+    receipt_present = receipt_path.exists() or receipt_path.is_symlink()
+    if not transaction_present and not receipt_present:
+        return ()
+    if not transaction_present or not receipt_present:
+        raise CommissionError("incomplete host-tool quarantine requires review")
+    for path in (transaction_path, receipt_path):
+        _assert_real_path(
+            path, kind="file", owner_uid=0, owner_gid=0, mode=0o400
+        )
+    transaction = _read_json(transaction_path, "host-tool quarantine transaction")
+    receipt = _read_json(receipt_path, "host-tool quarantine receipt")
+    if (
+        set(transaction)
+        != {
+            "schema_version",
+            "kind",
+            "phase",
+            "installing_marker_sha256",
+            "moves",
+        }
+        or transaction.get("schema_version") != 1
+        or transaction.get("kind")
+        != "trading-desk.router-commission.quarantine-transaction"
+        or transaction.get("phase") != "host-tools"
+        or transaction.get("installing_marker_sha256") != marker_digest
+        or not isinstance(transaction.get("moves"), list)
+        or not 1 <= len(transaction["moves"]) <= 4
+    ):
+        raise CommissionError("host-tool quarantine transaction differs")
+    expected_receipt_keys = {
+        "schema_version",
+        "kind",
+        "phase",
+        "installing_marker_sha256",
+        "transaction_receipt_sha256",
+        "quarantined_paths",
+        "automatic_delete_performed",
+        "network_changes_performed",
+        "vm_created",
+        "credentials_touched",
+        "venue_writes_authorized",
+        "mainnet_authorized",
+    }
+    if (
+        set(receipt) != expected_receipt_keys
+        or receipt.get("schema_version") != 1
+        or receipt.get("kind") != "trading-desk.router-commission.quarantine"
+        or receipt.get("phase") != "host-tools"
+        or receipt.get("installing_marker_sha256") != marker_digest
+        or receipt.get("transaction_receipt_sha256")
+        != _sha256_file(transaction_path)
+        or receipt.get("automatic_delete_performed") is not False
+        or receipt.get("network_changes_performed") is not False
+        or receipt.get("vm_created") is not False
+        or receipt.get("credentials_touched") is not False
+        or receipt.get("venue_writes_authorized") is not False
+        or receipt.get("mainnet_authorized") is not False
+        or not isinstance(receipt.get("quarantined_paths"), list)
+    ):
+        raise CommissionError("host-tool quarantine receipt differs")
+    retained: list[Path] = []
+    seen_sources: set[Path] = set()
+    seen_destinations: set[Path] = set()
+    for move in transaction["moves"]:
+        if not isinstance(move, dict) or set(move) != {"source", "destination"}:
+            raise CommissionError("host-tool quarantine move differs")
+        source = Path(move["source"])
+        destination = Path(move["destination"])
+        if (
+            source not in allowed_sources
+            or source in seen_sources
+            or destination in seen_destinations
+            or source.parent != destination.parent
+            or source.exists()
+            or source.is_symlink()
+        ):
+            raise CommissionError("host-tool quarantine move differs")
+        _assert_real_path(
+            destination, kind="directory", owner_uid=0, owner_gid=0, mode=0o500
+        )
+        expected_name = (
+            f".quarantine-host-tools-{destination.stat().st_ino}-{marker_digest}"
+        )
+        if destination.name != expected_name:
+            raise CommissionError("host-tool quarantine destination differs")
+        marker_path = destination / ".INSTALLING.json"
+        _assert_real_path(
+            marker_path, kind="file", owner_uid=0, owner_gid=0, mode=0o400
+        )
+        if marker_path.read_bytes() != marker:
+            raise CommissionError("host-tool quarantine marker differs")
+        seen_sources.add(source)
+        seen_destinations.add(destination)
+        retained.append(destination)
+    if receipt["quarantined_paths"] != [str(path) for path in retained]:
+        raise CommissionError("host-tool quarantine receipt paths differ")
+    if any(path.parent not in {tools_parent, Path("/opt")} for path in retained):
+        raise CommissionError("host-tool quarantine escaped fixed parents")
+    return tuple(retained)
+
+
 def _host_tools(args: argparse.Namespace) -> int:
     apply_lock, commission_lock, _ = _locks()
     if not apply_lock["phases"]["host_tools_apply_enabled"]:
@@ -1552,10 +2307,21 @@ def _host_tools(args: argparse.Namespace) -> int:
             "opt/socket_vmnet",
         ),
     ]
+    retained_quarantines = _verified_retained_host_tool_quarantines(
+        state,
+        marker=marker,
+        marker_digest=marker_digest,
+        allowed_sources=frozenset(
+            {stage for _label, _archive, stage, _final, _strip in installs}
+            | {final for _label, _archive, _stage, final, _strip in installs}
+        ),
+        tools_parent=tools_parent,
+    )
     allowed_tool_entries = {
         Path(apply_lock["paths"]["lima_install"]).name,
         installs[0][2].name,
-    }
+        Path(apply_lock["paths"]["lima_plan"]).parent.name,
+    } | {path.name for path in retained_quarantines if path.parent == tools_parent}
     unexpected_tool_entries = {
         path.name for path in tools_parent.iterdir()
     } - allowed_tool_entries
@@ -1612,10 +2378,49 @@ def _host_tools(args: argparse.Namespace) -> int:
         )
         if result.returncode != 0:
             raise CommissionError(f"installed host binary signature differs: {path}")
+    plan = Path(apply_lock["paths"]["lima_plan"])
+    plans_parent = plan.parent
+    if plans_parent.parent != tools_parent or plan.name != "lima.yaml":
+        raise CommissionError("immutable Lima plan path differs")
+    if not plans_parent.exists():
+        plans_parent.mkdir(mode=0o700)
+        os.chown(plans_parent, 0, 0)
+        _sync_directory(tools_parent)
+    elif plans_parent.is_symlink():
+        raise CommissionError("immutable Lima plan parent is unsafe")
+    if stat.S_IMODE(plans_parent.stat().st_mode) == 0o555:
+        _assert_real_path(
+            plans_parent,
+            kind="directory",
+            owner_uid=0,
+            owner_gid=0,
+            mode=0o555,
+        )
+    else:
+        _assert_real_path(
+            plans_parent,
+            kind="directory",
+            owner_uid=0,
+            owner_gid=0,
+            mode=0o700,
+        )
+    manifest = _read_json(media / "bundle" / "bundle-manifest.json", "sealed manifest")
+    plan_digest = manifest["files"]["lima.yaml"]
+    _copy_locked_file(
+        media / "bundle" / "lima.yaml",
+        plan,
+        plan_digest,
+        destination_mode=0o444,
+    )
+    if {item.name for item in plans_parent.iterdir()} != {"lima.yaml"}:
+        raise CommissionError("immutable Lima plan file set differs")
+    os.chmod(plans_parent, 0o555)
+    _sync_directory(plans_parent)
     os.chmod(tools_parent, 0o555)
     if {path.name for path in tools_parent.iterdir()} != {
-        Path(apply_lock["paths"]["lima_install"]).name
-    }:
+        Path(apply_lock["paths"]["lima_install"]).name,
+        plans_parent.name,
+    } | {path.name for path in retained_quarantines if path.parent == tools_parent}:
         raise CommissionError("root Lima tool directory set differs after promotion")
     receipt = {
         "schema_version": 1,
@@ -1629,9 +2434,15 @@ def _host_tools(args: argparse.Namespace) -> int:
             "socket_vmnet": apply_lock["paths"]["socket_vmnet_install"],
         },
         "tree_hashes": tree_hashes,
+        "lima_plan_path": str(plan),
+        "lima_plan_sha256": plan_digest,
         "installing_marker_sha256": marker_digest,
+        "retained_quarantine_paths": [str(path) for path in retained_quarantines],
         "vm_created": False,
         "network_changes_performed": False,
+        "credentials_touched": False,
+        "venue_writes_authorized": False,
+        "mainnet_authorized": False,
     }
     path, digest = _atomic_receipt(
         state["receipt_parent"], PHASE_RECEIPTS["host-tools"], receipt, uid=0, gid=0
@@ -1645,9 +2456,11 @@ def _host_tools(args: argparse.Namespace) -> int:
 
 
 def _verify_lima_home(path: Path, apply_lock: dict[str, Any], networks_digest: str) -> None:
-    uid = apply_lock["host"]["operator_uid"]
-    gid = apply_lock["host"]["operator_gid"]
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
     _assert_real_path(path, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700)
+    if {item.name for item in path.iterdir()} != {"_config", "home"}:
+        raise CommissionError("LIMA_HOME root file set differs")
     config = path / "_config"
     home = path / "home"
     for directory in (config, home):
@@ -1663,11 +2476,72 @@ def _verify_lima_home(path: Path, apply_lock: dict[str, Any], networks_digest: s
         raise CommissionError("dedicated Lima HOME is not empty")
 
 
+def _populate_lima_home(
+    path: Path,
+    apply_lock: dict[str, Any],
+    networks_source: Path,
+    networks_digest: str,
+    marker: bytes,
+) -> None:
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
+    _assert_real_path(path, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700)
+    entries = {item.name for item in path.iterdir()}
+    if entries == {"_config", "home"}:
+        _verify_lima_home(path, apply_lock, networks_digest)
+        return
+    allowed = {".COMMISSIONING.json", "_config", "home"}
+    if not entries.issubset(allowed):
+        raise CommissionError("pre-existing LIMA_HOME is not safely adoptable")
+    marker_path = path / ".COMMISSIONING.json"
+    if not entries:
+        _write_exact_file(marker_path, marker, mode=0o400, uid=0, gid=0)
+    elif ".COMMISSIONING.json" not in entries:
+        raise CommissionError("partial LIMA_HOME has no exact commissioning marker")
+    _assert_real_path(
+        marker_path, kind="file", owner_uid=0, owner_gid=0, mode=0o400
+    )
+    if marker_path.read_bytes() != marker:
+        raise CommissionError("LIMA_HOME commissioning marker differs")
+    for name in ("_config", "home"):
+        directory = path / name
+        if not directory.exists():
+            directory.mkdir(mode=0o700)
+            os.chown(directory, uid, gid)
+            _sync_directory(path)
+        _assert_real_path(
+            directory, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700
+        )
+    if any((path / "home").iterdir()):
+        raise CommissionError("partial dedicated Lima HOME is not empty")
+    config = path / "_config"
+    config_entries = {item.name for item in config.iterdir()}
+    if not config_entries.issubset({"networks.yaml"}):
+        raise CommissionError("partial LIMA_HOME global config set differs")
+    networks = config / "networks.yaml"
+    source = _read_fd_bound_file(
+        networks_source,
+        owner_uid=0,
+        owner_gid=0,
+        mode=0o400,
+        maximum_size=1024 * 1024,
+    )
+    if _sha256_bytes(source) != networks_digest:
+        raise CommissionError("sealed networks.yaml changed")
+    _write_exact_file(networks, source, mode=0o600, uid=uid, gid=gid)
+    if {item.name for item in path.iterdir()} != allowed:
+        raise CommissionError("commissioning LIMA_HOME file set differs")
+    marker_path.unlink()
+    _sync_directory(path)
+    _verify_lima_home(path, apply_lock, networks_digest)
+
+
 def _lima_home(args: argparse.Namespace) -> int:
     apply_lock, commission_lock, _ = _locks()
     if not apply_lock["phases"]["lima_home_apply_enabled"]:
         raise CommissionError("LIMA_HOME phase is disabled")
     runtime_receipt_sha = _assert_root_apply(args, apply_lock)
+    identity_receipt = _router_operator_identity(apply_lock)
     state = _initialize_state(apply_lock)
     _acquire_state_lock(state)
     host_receipt = _root_phase_receipt(
@@ -1689,8 +2563,8 @@ def _lima_home(args: argparse.Namespace) -> int:
     networks_digest = bundle_manifest["files"]["networks.yaml"]
     final = Path(apply_lock["paths"]["lima_home"])
     stage = final.parent / f".{final.name}.installing-{host_receipt['bundle_manifest_sha256']}"
-    uid = apply_lock["host"]["operator_uid"]
-    gid = apply_lock["host"]["operator_gid"]
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
     marker_value = {
         "schema_version": 1,
         "kind": "trading-desk.router-commission.installing",
@@ -1702,34 +2576,18 @@ def _lima_home(args: argparse.Namespace) -> int:
     marker = _canonical_json(marker_value)
     marker_digest = _sha256_bytes(marker)
     if final.exists() or final.is_symlink():
-        _verify_lima_home(final, apply_lock, networks_digest)
+        _populate_lima_home(
+            final, apply_lock, networks_source, networks_digest, marker
+        )
     else:
         if not stage.exists():
             stage.mkdir(mode=0o700)
             os.chown(stage, uid, gid)
             _sync_directory(stage.parent)
         _assert_real_path(stage, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700)
-        marker_path = stage / ".COMMISSIONING.json"
-        _write_exact_file(marker_path, marker, mode=0o400, uid=0, gid=0)
-        for name in ("_config", "home"):
-            directory = stage / name
-            if not directory.exists():
-                directory.mkdir(mode=0o700)
-                os.chown(directory, uid, gid)
-                _sync_directory(stage)
-        networks = stage / "_config" / "networks.yaml"
-        if not networks.exists():
-            source = networks_source.read_bytes()
-            if _sha256_bytes(source) != networks_digest:
-                raise CommissionError("sealed networks.yaml changed")
-            _write_exact_file(networks, source, mode=0o600, uid=uid, gid=gid)
-        # Marker is removed only after every adoptable staged object is exact.
-        _assert_real_path(marker_path, kind="file", owner_uid=0, owner_gid=0, mode=0o400)
-        if marker_path.read_bytes() != marker:
-            raise CommissionError("LIMA_HOME commissioning marker differs")
-        marker_path.unlink()
-        _sync_directory(stage)
-        _verify_lima_home(stage, apply_lock, networks_digest)
+        _populate_lima_home(
+            stage, apply_lock, networks_source, networks_digest, marker
+        )
         _rename_exclusive(stage, final)
         _verify_lima_home(final, apply_lock, networks_digest)
     receipt = {
@@ -1738,6 +2596,7 @@ def _lima_home(args: argparse.Namespace) -> int:
         "phase": "lima-home",
         "host_tools_receipt_sha256": args.expected_host_tools_receipt_sha256,
         "runtime_receipt_sha256": runtime_receipt_sha,
+        "router_identity_receipt": identity_receipt,
         "bundle_manifest_sha256": host_receipt["bundle_manifest_sha256"],
         "lima_home": str(final),
         "lima_home_device": final.stat().st_dev,
@@ -1748,6 +2607,9 @@ def _lima_home(args: argparse.Namespace) -> int:
         "installing_marker_sha256": marker_digest,
         "vm_created": False,
         "network_changes_performed": False,
+        "credentials_touched": False,
+        "venue_writes_authorized": False,
+        "mainnet_authorized": False,
     }
     path, digest = _atomic_receipt(
         state["receipt_parent"], PHASE_RECEIPTS["lima-home"], receipt, uid=0, gid=0
@@ -1776,15 +2638,29 @@ def _validate_fill(args: argparse.Namespace) -> int:
     if not apply_lock["phases"]["validate_fill_apply_enabled"]:
         raise CommissionError("validate-fill phase is disabled")
     runtime_receipt_sha = _assert_root_apply(args, apply_lock)
+    identity_receipt = _router_operator_identity(apply_lock)
     state = _initialize_state(apply_lock)
     _acquire_state_lock(state)
     lima_receipt = _root_phase_receipt(
         state, "lima-home", args.expected_lima_home_receipt_sha256
     )
+    if lima_receipt.get("router_identity_receipt") != identity_receipt:
+        raise CommissionError("LIMA_HOME receipt router identity differs")
     media = state["media_parent"] / lima_receipt["bundle_manifest_sha256"]
     host_receipt = _root_phase_receipt(
         state, "host-tools", lima_receipt["host_tools_receipt_sha256"]
     )
+    plan = Path(apply_lock["paths"]["lima_plan"])
+    if (
+        host_receipt.get("lima_plan_path") != str(plan)
+        or host_receipt.get("lima_plan_sha256") is None
+    ):
+        raise CommissionError("host-tools receipt lacks the immutable Lima plan")
+    _assert_real_path(
+        plan, kind="file", owner_uid=0, owner_gid=0, mode=0o444
+    )
+    if _sha256_file(plan) != host_receipt["lima_plan_sha256"]:
+        raise CommissionError("immutable Lima plan differs from host-tools receipt")
     media_receipt = _root_phase_receipt(
         state, "media", host_receipt["media_receipt_sha256"]
     )
@@ -1802,8 +2678,8 @@ def _validate_fill(args: argparse.Namespace) -> int:
     _assert_real_path(limactl, kind="file", owner_uid=0, owner_gid=0, mode=0o555)
     if _sha256_file(limactl) != expected_limactl:
         raise CommissionError("installed limactl digest differs before validate-fill")
-    uid = apply_lock["host"]["operator_uid"]
-    gid = apply_lock["host"]["operator_gid"]
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
     environment = {
         "HOME": apply_lock["paths"]["operator_home"],
         "LIMA_HOME": apply_lock["paths"]["lima_home"],
@@ -1812,7 +2688,7 @@ def _validate_fill(args: argparse.Namespace) -> int:
         "PATH": f"{apply_lock['paths']['lima_install']}/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     }
     result = subprocess.run(
-        [str(limactl), "validate", "--fill", str(media / "bundle" / "lima.yaml")],
+        [str(limactl), "validate", "--fill", str(plan)],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1840,11 +2716,15 @@ def _validate_fill(args: argparse.Namespace) -> int:
         "phase": "validate-fill",
         "lima_home_receipt_sha256": args.expected_lima_home_receipt_sha256,
         "runtime_receipt_sha256": runtime_receipt_sha,
+        "router_identity_receipt": identity_receipt,
         "bundle_manifest_sha256": lima_receipt["bundle_manifest_sha256"],
         "effective_config_sha256": observed_digest,
         "effective_config_evidence": str(observation),
         "vm_created": False,
         "network_changes_performed": False,
+        "credentials_touched": False,
+        "venue_writes_authorized": False,
+        "mainnet_authorized": False,
     }
     path, digest = _atomic_receipt(
         state["receipt_parent"], PHASE_RECEIPTS["validate-fill"], receipt, uid=0, gid=0
@@ -1860,28 +2740,18 @@ def _validate_fill(args: argparse.Namespace) -> int:
 def _disabled_phase(args: argparse.Namespace, phase: str) -> int:
     apply_lock, _, _ = _locks()
     gate = {
-        "media-seal": "media_seal_apply_enabled",
-        "host-tools": "host_tools_apply_enabled",
-        "lima-home": "lima_home_apply_enabled",
-        "validate-fill": "validate_fill_apply_enabled",
         "vm-create": "vm_create_apply_enabled",
         "vm-start": "vm_start_apply_enabled",
         "guest-freeze": "guest_freeze_apply_enabled",
         "guest-package": "guest_package_install_apply_enabled",
-        "quarantine": "media_seal_apply_enabled",
     }[phase]
     if apply_lock["phases"][gate]:
         raise CommissionError(f"unexpectedly enabled phase requires implementation review: {phase}")
     blocker_key = {
-        "media-seal": "media_seal",
-        "host-tools": "host_tools",
-        "lima-home": "lima_home",
-        "validate-fill": "validate_fill",
         "vm-create": "vm_create",
         "vm-start": "vm_start",
         "guest-freeze": "guest_freeze",
         "guest-package": "guest_package_install",
-        "quarantine": "media_seal",
     }[phase]
     print(f"phase={phase}")
     print("apply_enabled=false")
@@ -1893,6 +2763,8 @@ def _disabled_phase(args: argparse.Namespace, phase: str) -> int:
 
 def _quarantine_incomplete(args: argparse.Namespace) -> int:
     apply_lock, _, _ = _locks()
+    if not apply_lock["phases"]["quarantine_apply_enabled"]:
+        raise CommissionError("quarantine phase is disabled")
     _assert_root_apply(args, apply_lock)
     state = _initialize_state(apply_lock)
     _acquire_state_lock(state)
@@ -2023,6 +2895,9 @@ def _quarantine_incomplete(args: argparse.Namespace) -> int:
         "automatic_delete_performed": False,
         "network_changes_performed": False,
         "vm_created": False,
+        "credentials_touched": False,
+        "venue_writes_authorized": False,
+        "mainnet_authorized": False,
     }
     name = f"quarantine-{phase}-{args.expected_marker_sha256}.json"
     path, digest = _atomic_receipt(
@@ -2065,17 +2940,33 @@ def _parser() -> argparse.ArgumentParser:
     operator.add_argument("--receipt-parent", type=Path, required=True)
     operator.add_argument("--expected-bundle-manifest-sha256", required=True)
 
-    subparsers.add_parser("apply-seal-media")
-    subparsers.add_parser("apply-host-tools")
+    qualify = subparsers.add_parser("qualify-runtime")
+    qualify.add_argument("--expected-controller-manifest-sha256", required=True)
 
-    subparsers.add_parser("apply-lima-home")
-    subparsers.add_parser("apply-validate-fill")
+    seal = subparsers.add_parser("apply-seal-media")
+    _add_root_receipt_args(seal)
+    seal.add_argument("--evidence-dir", type=Path, required=True)
+
+    host = subparsers.add_parser("apply-host-tools")
+    _add_root_receipt_args(host)
+    host.add_argument("--expected-media-receipt-sha256", required=True)
+
+    lima_home = subparsers.add_parser("apply-lima-home")
+    _add_root_receipt_args(lima_home)
+    lima_home.add_argument("--expected-host-tools-receipt-sha256", required=True)
+
+    validate_fill = subparsers.add_parser("apply-validate-fill")
+    _add_root_receipt_args(validate_fill)
+    validate_fill.add_argument("--expected-lima-home-receipt-sha256", required=True)
 
     subparsers.add_parser("apply-create-vm")
     subparsers.add_parser("apply-start-vm")
     subparsers.add_parser("apply-freeze-guest")
     subparsers.add_parser("apply-guest-package")
-    subparsers.add_parser("quarantine-incomplete")
+    quarantine = subparsers.add_parser("quarantine-incomplete")
+    _add_root_receipt_args(quarantine)
+    quarantine.add_argument("--incomplete-phase", choices=("media", "host-tools"), required=True)
+    quarantine.add_argument("--expected-marker-sha256", required=True)
     return parser
 
 
@@ -2092,14 +2983,16 @@ def main(argv: list[str] | None = None) -> int:
             return _audit()
         if args.phase == "operator-verify":
             return _operator_receipt(args)
+        if args.phase == "qualify-runtime":
+            return _qualify_runtime(args)
         if args.phase == "apply-seal-media":
-            return _disabled_phase(args, "media-seal")
+            return _seal_media(args)
         if args.phase == "apply-host-tools":
-            return _disabled_phase(args, "host-tools")
+            return _host_tools(args)
         if args.phase == "apply-lima-home":
-            return _disabled_phase(args, "lima-home")
+            return _lima_home(args)
         if args.phase == "apply-validate-fill":
-            return _disabled_phase(args, "validate-fill")
+            return _validate_fill(args)
         if args.phase == "apply-create-vm":
             return _disabled_phase(args, "vm-create")
         if args.phase == "apply-start-vm":
@@ -2109,7 +3002,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.phase == "apply-guest-package":
             return _disabled_phase(args, "guest-package")
         if args.phase == "quarantine-incomplete":
-            return _disabled_phase(args, "quarantine")
+            return _quarantine_incomplete(args)
         raise CommissionError("unknown commissioning phase")
     except (CommissionError, OSError, KeyError, TypeError, ValueError, tarfile.TarError) as error:
         print(f"router_commission_failed: {error}", file=sys.stderr)

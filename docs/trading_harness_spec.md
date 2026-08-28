@@ -316,6 +316,12 @@ direct-WAN forwarding or HTTPS output rule may exist. `wg-exec` MUST require
 both nftables and `wg-egress` at boot. Rendering MUST remain credential-free,
 apply-disabled and unqualified until installed state, both handshakes, expected
 exit and leak/failure/reboot evidence pass.
+The remote-health expectation schema v2 MUST bind the complete local-lab base
+through its base-expectation hash while independently binding the remote Mac
+WireGuard fragment and provider tunnel DNS. The local-lab fragment may retain
+a globally routable resolver; a Proton-style remote fragment may use a private
+tunnel resolver. Requiring those two DNS or configuration values to be equal
+is invalid composition, not a security property.
 
 Normal TESTNET entry MUST additionally hold a fresh route-health capability.
 The schema-v1 evidence contract binds the exact executor config, retained

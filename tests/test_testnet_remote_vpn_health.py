@@ -31,7 +31,7 @@ def remote_expectation(base=None) -> TestnetRemoteVpnHealthExpectation:
         vm_bundle_manifest_sha256=base.vm_bundle_manifest_sha256,
         remote_egress_bundle_manifest_sha256=digest("remote-egress-bundle"),
         remote_qualification_hash=digest("remote-qualification"),
-        mac_wireguard_configuration_hash=base.mac_wireguard_configuration_hash,
+        mac_wireguard_configuration_hash=digest("remote-mac-wireguard-config"),
         mac_pf_policy_hash=digest("mac-pf-policy"),
         mac_pf_active_rules_hash=digest("mac-pf-active-rules"),
         mac_pf_root_rules_hash=digest("mac-pf-root-rules"),
@@ -48,7 +48,7 @@ def remote_expectation(base=None) -> TestnetRemoteVpnHealthExpectation:
         wan_interface="enp0s1",
         remote_endpoint_ipv4="8.8.4.4",
         remote_endpoint_port=51820,
-        tunnel_dns_ipv4=base.dns_ipv4,
+        tunnel_dns_ipv4="10.64.0.1",
         expected_exit_ipv4="9.9.9.9",
     )
 
@@ -156,6 +156,11 @@ class RemoteVpnHealthTests(unittest.TestCase):
 
         self.assertTrue(report.qualified)
         self.assertEqual(base.expectation_hash, report.base_route_expectation_hash)
+        self.assertNotEqual(
+            base.mac_wireguard_configuration_hash,
+            expectation.mac_wireguard_configuration_hash,
+        )
+        self.assertNotEqual(base.dns_ipv4, expectation.tunnel_dns_ipv4)
         self.assertEqual(
             expectation,
             testnet_remote_vpn_health_expectation_from_dict(expectation.as_dict()),
@@ -317,6 +322,11 @@ class RemoteVpnHealthTests(unittest.TestCase):
         self.assertFalse(stale.qualified)
 
     def test_decoder_rejects_false_proof_authority_and_submission_claims(self) -> None:
+        legacy = remote_expectation().as_dict()
+        legacy["schema_version"] = "testnet_remote_vpn_health_expectation.v1"
+        with self.assertRaisesRegex(ValidationError, "schema_version"):
+            testnet_remote_vpn_health_expectation_from_dict(legacy)
+
         evidence = remote_evidence(remote_expectation())
         for field, value in (
             ("environment", "mainnet"),

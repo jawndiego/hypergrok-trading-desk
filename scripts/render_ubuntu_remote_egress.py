@@ -30,6 +30,9 @@ TEMPLATE_ROOT = ROOT / "deploy" / "ubuntu-router" / "remote-egress"
 PLACEHOLDER_RE = re.compile(r"__[A-Z0-9_]+__")
 INTERFACE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,14}")
 HASH_RE = re.compile(r"[0-9a-f]{64}")
+WIREGUARD_PROFILE_BINDING_DOMAIN = (
+    b"trading-desk/wireguard-profile-public-binding/v1\x00"
+)
 
 SPEC_KEYS = frozenset(
     {
@@ -52,6 +55,12 @@ SPEC_KEYS = frozenset(
         "expected_exit_ipv4",
     }
 )
+
+TOPOLOGY_KEYS = SPEC_KEYS - {
+    "schema_version",
+    "mode",
+    "base_router_manifest_sha256",
+}
 
 BASE_FILES = frozenset(
     {
@@ -87,6 +96,8 @@ TEMPLATES: dict[str, tuple[str, int]] = {
     ),
 }
 
+DERIVED_FILES = {"mac-wireguard.remote-egress.conf.fragment": 0o600}
+
 SECURITY_CLAIMS = {
     "apply_enabled": False,
     "base_local_router_required": True,
@@ -113,6 +124,65 @@ SECURITY_CLAIMS = {
 
 def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def wireguard_profile_public_binding_sha256(
+    *,
+    egress_ipv4_interface: str,
+    egress_endpoint_ipv4: str,
+    egress_endpoint_port: int,
+    egress_public_key: str,
+    egress_dns_ipv4: str,
+) -> str:
+    """Bind the five public fields imported from a provider profile."""
+
+    document = {
+        "egress_dns_ipv4": egress_dns_ipv4,
+        "egress_endpoint_ipv4": egress_endpoint_ipv4,
+        "egress_endpoint_port": egress_endpoint_port,
+        "egress_ipv4_interface": egress_ipv4_interface,
+        "egress_public_key": egress_public_key,
+        "mode": "testnet_remote_vpn_exit",
+        "schema_version": 1,
+    }
+    encoded = json.dumps(
+        document,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(WIREGUARD_PROFILE_BINDING_DOMAIN + encoded).hexdigest()
+
+
+def _manifest_topology(replacements: dict[str, str]) -> dict[str, object]:
+    return {
+        "wan_interface": replacements["__REVIEWED_WAN_INTERFACE__"],
+        "ingress_interface": replacements["__REVIEWED_INGRESS_INTERFACE__"],
+        "management_source_cidr": replacements[
+            "__REVIEWED_MANAGEMENT_SOURCE_CIDR__"
+        ],
+        "router_listen_port": int(
+            replacements["__REVIEWED_ROUTER_LISTEN_PORT__"]
+        ),
+        "router_ipv4_network": replacements[
+            "__REVIEWED_ROUTER_IPV4_NETWORK__"
+        ],
+        "mac_ipv4_peer": replacements["__REVIEWED_MAC_IPV4_PEER__"],
+        "mac_public_key": replacements["__REVIEWED_MAC_PUBLIC_KEY__"],
+        "egress_interface": replacements["__REVIEWED_EGRESS_INTERFACE__"],
+        "egress_ipv4_interface": replacements[
+            "__REVIEWED_EGRESS_IPV4_INTERFACE__"
+        ],
+        "egress_endpoint_ipv4": replacements[
+            "__REVIEWED_EGRESS_ENDPOINT_IPV4__"
+        ],
+        "egress_endpoint_port": int(
+            replacements["__REVIEWED_EGRESS_ENDPOINT_PORT__"]
+        ),
+        "egress_public_key": replacements["__REVIEWED_EGRESS_PUBLIC_KEY__"],
+        "egress_dns_ipv4": replacements["__REVIEWED_EGRESS_DNS_IPV4__"],
+        "expected_exit_ipv4": replacements["__REVIEWED_EXPECTED_EXIT_IPV4__"],
+    }
 
 
 def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -246,6 +316,7 @@ def _verify_base_bundle(path: Path, expected_manifest_sha256: str) -> dict[str, 
         or manifest.get("mode") != "local_nat_lab"
         or not isinstance(manifest.get("files"), dict)
         or frozenset(manifest["files"]) != BASE_FILES
+        or not isinstance(manifest.get("topology"), dict)
     ):
         raise ValueError("base router manifest is not the reviewed local bundle")
     for name in sorted(BASE_FILES):
@@ -255,6 +326,44 @@ def _verify_base_bundle(path: Path, expected_manifest_sha256: str) -> dict[str, 
         if _sha256(raw_file) != expected:
             raise ValueError(f"base router file hash differs: {name}")
     return manifest
+
+
+def _require_base_topology_match(
+    base_manifest: dict[str, Any], spec: dict[str, Any]
+) -> None:
+    topology = base_manifest["topology"]
+    expected = {
+        "wan_interface": spec["wan_interface"],
+        "ingress_interface": spec["ingress_interface"],
+        "management_source_cidr": spec["management_source_cidr"],
+        "listen_port": spec["router_listen_port"],
+        "router_ipv4_network": spec["router_ipv4_network"],
+        "mac_ipv4_peer": spec["mac_ipv4_peer"],
+        "mac_public_key": spec["mac_public_key"],
+    }
+    if any(topology.get(field) != value for field, value in expected.items()):
+        raise ValueError("remote-egress topology differs from the base router bundle")
+
+
+def _remote_mac_fragment(
+    base_bundle: Path,
+    base_manifest: dict[str, Any],
+    replacements: dict[str, str],
+) -> bytes:
+    path = base_bundle / "mac-wireguard.conf.fragment"
+    content = _read_regular_file(path, label="base Mac WireGuard fragment")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("base Mac WireGuard fragment is not UTF-8") from error
+    old = f"DNS = {base_manifest['topology']['dns_ipv4']}\n"
+    new = f"DNS = {replacements['__REVIEWED_EGRESS_DNS_IPV4__']}\n"
+    if text.count(old) != 1 or re.search(r"(?im)^\s*PrivateKey\s*=", text):
+        raise ValueError("base Mac WireGuard fragment DNS contract differs")
+    result = text.replace(old, new, 1).encode("utf-8")
+    if re.search(rb"(?im)^\s*PrivateKey\s*=", result):
+        raise ValueError("remote Mac WireGuard fragment emitted a private key field")
+    return result
 
 
 def validate_spec(spec: dict[str, Any]) -> dict[str, str]:
@@ -372,7 +481,10 @@ def _write_file(path: Path, content: bytes, mode: int) -> None:
 def render_bundle(spec_path: Path, base_bundle: Path, output_dir: Path) -> dict[str, Any]:
     spec, raw_spec = _load_spec(spec_path)
     replacements = validate_spec(spec)
-    _verify_base_bundle(base_bundle, spec["base_router_manifest_sha256"])
+    base_manifest = _verify_base_bundle(
+        base_bundle, spec["base_router_manifest_sha256"]
+    )
+    _require_base_topology_match(base_manifest, spec)
     if not output_dir.is_absolute():
         raise ValueError("output directory must be absolute")
     output_dir = output_dir.resolve(strict=False)
@@ -387,6 +499,10 @@ def render_bundle(spec_path: Path, base_bundle: Path, output_dir: Path) -> dict[
         if not template.is_file() or template.is_symlink():
             raise ValueError(f"remote-egress template is missing or unsafe: {template_name}")
         rendered[output_name] = (_render_template(template, replacements), mode)
+    rendered["mac-wireguard.remote-egress.conf.fragment"] = (
+        _remote_mac_fragment(base_bundle, base_manifest, replacements),
+        0o600,
+    )
 
     try:
         output_dir.mkdir(mode=0o700)
@@ -400,8 +516,31 @@ def render_bundle(spec_path: Path, base_bundle: Path, output_dir: Path) -> dict[
             "mode": "testnet_remote_vpn_exit",
             "source_spec_sha256": _sha256(raw_spec),
             "base_router_manifest_sha256": spec["base_router_manifest_sha256"],
+            "topology": _manifest_topology(replacements),
+            "wireguard_profile_public_binding_sha256": (
+                wireguard_profile_public_binding_sha256(
+                    egress_ipv4_interface=replacements[
+                        "__REVIEWED_EGRESS_IPV4_INTERFACE__"
+                    ],
+                    egress_endpoint_ipv4=replacements[
+                        "__REVIEWED_EGRESS_ENDPOINT_IPV4__"
+                    ],
+                    egress_endpoint_port=int(
+                        replacements["__REVIEWED_EGRESS_ENDPOINT_PORT__"]
+                    ),
+                    egress_public_key=replacements[
+                        "__REVIEWED_EGRESS_PUBLIC_KEY__"
+                    ],
+                    egress_dns_ipv4=replacements[
+                        "__REVIEWED_EGRESS_DNS_IPV4__"
+                    ],
+                )
+            ),
             "security_claims": SECURITY_CLAIMS,
             "install_targets": {
+                "mac-wireguard.remote-egress.conf.fragment": (
+                    "attended official macOS WireGuard tunnel update"
+                ),
                 "nftables.conf": "/etc/nftables.conf",
                 "trading-desk-remote-egress-check": (
                     "/usr/local/libexec/trading-desk-remote-egress-check"
@@ -452,6 +591,8 @@ def verify_bundle(
         "mode",
         "source_spec_sha256",
         "base_router_manifest_sha256",
+        "topology",
+        "wireguard_profile_public_binding_sha256",
         "security_claims",
         "install_targets",
         "files",
@@ -468,17 +609,44 @@ def verify_bundle(
     base_hash = _digest(
         manifest["base_router_manifest_sha256"], "base_router_manifest_sha256"
     )
-    _verify_base_bundle(base_bundle, base_hash)
+    _digest(
+        manifest["wireguard_profile_public_binding_sha256"],
+        "wireguard_profile_public_binding_sha256",
+    )
+    base_manifest = _verify_base_bundle(base_bundle, base_hash)
+    topology = manifest["topology"]
+    if not isinstance(topology, dict) or set(topology) != TOPOLOGY_KEYS:
+        raise ValueError("remote-egress manifest topology differs")
+    replay_spec = {
+        "schema_version": 1,
+        "mode": "testnet_remote_vpn_exit",
+        "base_router_manifest_sha256": base_hash,
+        **topology,
+    }
+    replay_replacements = validate_spec(replay_spec)
+    if topology != _manifest_topology(replay_replacements):
+        raise ValueError("remote-egress manifest topology is noncanonical")
+    _require_base_topology_match(base_manifest, replay_spec)
+    expected_profile_binding = wireguard_profile_public_binding_sha256(
+        egress_ipv4_interface=str(topology["egress_ipv4_interface"]),
+        egress_endpoint_ipv4=str(topology["egress_endpoint_ipv4"]),
+        egress_endpoint_port=int(topology["egress_endpoint_port"]),
+        egress_public_key=str(topology["egress_public_key"]),
+        egress_dns_ipv4=str(topology["egress_dns_ipv4"]),
+    )
+    if manifest["wireguard_profile_public_binding_sha256"] != expected_profile_binding:
+        raise ValueError("WireGuard profile public binding differs")
     files = manifest["files"]
-    if not isinstance(files, dict) or set(files) != {value[0] for value in TEMPLATES.values()}:
+    expected_files = {value[0] for value in TEMPLATES.values()} | set(DERIVED_FILES)
+    if not isinstance(files, dict) or set(files) != expected_files:
         raise ValueError("remote-egress manifest file inventory differs")
     expected_entries = set(files) | {"bundle-manifest.json"}
     if {entry.name for entry in bundle_dir.iterdir()} != expected_entries:
         raise ValueError("remote-egress bundle directory inventory differs")
-    for name, (_, expected_mode) in (
-        (output_name, (template, mode))
-        for template, (output_name, mode) in TEMPLATES.items()
-    ):
+    expected_modes = {
+        output_name: mode for output_name, mode in TEMPLATES.values()
+    } | DERIVED_FILES
+    for name, expected_mode in expected_modes.items():
         path = bundle_dir / name
         raw = _read_regular_file(path, label=f"remote-egress file {name}")
         if _sha256(raw) != _digest(files[name], f"files.{name}"):
@@ -488,6 +656,16 @@ def verify_bundle(
             raise ValueError(f"remote-egress file mode differs: {name}")
         if require_owner_uid is not None and metadata.st_uid != require_owner_uid:
             raise ValueError(f"remote-egress file owner differs: {name}")
+    fragment = (bundle_dir / "mac-wireguard.remote-egress.conf.fragment").read_bytes()
+    expected_fragment = _remote_mac_fragment(
+        base_bundle,
+        base_manifest,
+        {
+            "__REVIEWED_EGRESS_DNS_IPV4__": str(topology["egress_dns_ipv4"])
+        },
+    )
+    if fragment != expected_fragment:
+        raise ValueError("remote Mac WireGuard fragment differs")
     manifest_metadata = manifest_path.stat()
     if stat.S_IMODE(manifest_metadata.st_mode) != 0o600:
         raise ValueError("remote-egress manifest mode differs")

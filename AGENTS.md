@@ -221,12 +221,14 @@ This repository builds an agent-runtime-neutral trading research and execution h
   and a dated Ubuntu image. Its schema-v3 commission lock binds offline host
   attestations, the signed Noble snapshot/cloud manifest and the 116-package
   no-recommends dependency closure. `commission-public.py` may only plan or
-  verify those public bytes. A separate commissioner specifies exact media and
-  root-owned non-writable Lima/socket_vmnet installation, but every root gate
-  and its launcher remain false pending a pre-exec sealed-runtime symlink/dylib
-  proof. Its UID-501 verification receipt is informational and never root
-  authority. Writable Lima-home, validate-fill, VM/guest/package apply and
-  network/key mutation also remain hard-disabled behind named blockers.
+  verify those public bytes. The separate schema-v2 commissioner enables only
+  credential-free host preparation: sealed-runtime qualification, exact media
+  sealing, root-owned non-writable Lima/socket_vmnet installation, adoption of
+  the exact empty UID/GID-454 Lima home, and retained `validate --fill`
+  evidence. Its UID-501 verification receipt remains informational and never
+  root authority. VM create/start, guest/package apply, socket_vmnet
+  activation and every network/key mutation remain hard-disabled behind named
+  blockers.
 - The VM and router renderers share the fixed `192.168.106.1/32` Mac to
   `192.168.106.2/24` guest ingress contract. The rendered
   `local-nat-lab-test-plan` is print-only: PF enforcement, a remote VPN exit,
@@ -296,6 +298,20 @@ This repository builds an agent-runtime-neutral trading research and execution h
   operator as WireGuard public keys; the encoding cannot prove provenance.
   Generate each private key on its owning machine and never place it in the
   repository, profile JSON, cloud-init, chat, environment or argv.
+- A Proton-downloaded WireGuard profile is a secret-bearing transport artifact.
+  Only the fixed attended Ubuntu-guest importer may inspect it from the fixed
+  root-only staging parent and atomically install its client key. Bind both the
+  complete profile fingerprint and the renderer's sanitized public-field
+  fingerprint; never move the profile through a host/guest shared directory or
+  return the private/derived-local key. Import does not activate networking,
+  authorize a venue write or satisfy VPN qualification.
+- The remote overlay must exactly match its hashed base-router topology and its
+  Mac fragment must use the provider tunnel DNS; a hash-only base reference or
+  reuse of the local-lab resolver is not sufficient composition evidence.
+- Remote-health expectation schema v2 binds the local-lab expectation hash but
+  independently binds the remote Mac fragment and provider DNS. Do not restore
+  equality with the base fragment/DNS; Proton's private resolver requires the
+  intentional split.
 - A failed route may still produce a durable unknown submission attempt after
   authority is consumed. Preserve reservation and reconcile; never add a
   direct-network fallback or blind retry.

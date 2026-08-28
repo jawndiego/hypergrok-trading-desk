@@ -14,6 +14,7 @@ recursive-include docs *.md
 recursive-include deploy *.example
 recursive-include deploy/macos/testnet *.c *.md *.py *.sh
 recursive-include deploy/ubuntu-router/lima *.gpg *.json *.jsonl *.py *.sh
+recursive-include deploy/ubuntu-router/remote-egress *.py
 recursive-include plugins/trading-desk/runtime *.py
 recursive-include plugins/trading-desk/skills *.md *.yaml
 recursive-include scripts *.py

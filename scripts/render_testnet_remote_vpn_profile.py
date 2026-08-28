@@ -169,7 +169,7 @@ def build_base_expectation(
     executor_config: Path,
     base_router_manifest: Path,
     vm_manifest: Path,
-    wg_public: Path,
+    base_wg_public: Path,
     profile_path: Path,
 ) -> TestnetRouteHealthExpectation:
     config = load_executor_config(executor_config, environ={})
@@ -177,13 +177,18 @@ def build_base_expectation(
     values = profile["base"]
     base_manifest, base_raw = _manifest(base_router_manifest, "base router manifest")
     vm_bundle, vm_raw = _manifest(vm_manifest, "VM manifest")
-    wg_raw = _read(wg_public, "public WireGuard config", 128 * 1024)
-    if b"PrivateKey" in wg_raw:
+    base_wg_raw = _read(
+        base_wg_public, "base public WireGuard config", 128 * 1024
+    )
+    if re.search(rb"(?im)^\s*PrivateKey\s*=", base_wg_raw):
         raise ValueError("public WireGuard media contains a private key field")
     if (
         base_manifest.get("bundle_kind") != "trading-desk.local-ubuntu-router"
         or base_manifest.get("environment") not in {None, "testnet"}
         or vm_bundle.get("environment") not in {None, "testnet"}
+        or not isinstance(base_manifest.get("files"), dict)
+        or base_manifest["files"].get("mac-wireguard.conf.fragment")
+        != _sha(base_wg_raw)
     ):
         raise ValueError("base router/VM manifest scope differs")
     return TestnetRouteHealthExpectation(
@@ -194,7 +199,7 @@ def build_base_expectation(
         router_public_key_hash=values["router_public_key_hash"],
         mac_public_key_hash=values["mac_public_key_hash"],
         guest_configuration_hash=values["guest_configuration_hash"],
-        mac_wireguard_configuration_hash=_sha(wg_raw),
+        mac_wireguard_configuration_hash=_sha(base_wg_raw),
         nftables_policy_hash=values["nftables_policy_hash"],
         wan_interface=values["wan_interface"],
         ingress_interface=values["ingress_interface"],
@@ -214,7 +219,8 @@ def compose(
     remote_egress_manifest: Path,
     pf_manifest: Path,
     pf_anchor: Path,
-    wg_public: Path,
+    base_wg_public: Path,
+    remote_wg_public: Path,
     sample_helper: Path,
     probe_helper: Path,
     profile_path: Path,
@@ -232,10 +238,18 @@ def compose(
     )
     pf_bundle, _pf_manifest_raw = _manifest(pf_manifest, "PF manifest")
     anchor_raw = _read(pf_anchor, "PF anchor", 128 * 1024)
-    wg_raw = _read(wg_public, "public WireGuard config", 128 * 1024)
+    base_wg_raw = _read(
+        base_wg_public, "base public WireGuard config", 128 * 1024
+    )
+    remote_wg_raw = _read(
+        remote_wg_public, "remote public WireGuard config", 128 * 1024
+    )
     sample_raw = _read(sample_helper, "sample helper", 4 * 1024 * 1024)
     probe_raw = _read(probe_helper, "probe helper", 4 * 1024 * 1024)
-    if b"PrivateKey" in wg_raw or b"PrivateKey" in anchor_raw:
+    if any(
+        re.search(rb"(?im)^\s*PrivateKey\s*=", raw)
+        for raw in (base_wg_raw, remote_wg_raw, anchor_raw)
+    ):
         raise ValueError("public media contains a private key field")
     if (
         pf_bundle.get("bundle_kind") != "trading-desk.macos-testnet-executor-pf"
@@ -254,11 +268,18 @@ def compose(
         or not isinstance(remote_manifest.get("files"), dict)
         or remote_manifest["files"].get("trading-desk-remote-egress-check")
         != helper_values["guest_check_sha256"]
+        or remote_manifest["files"].get(
+            "mac-wireguard.remote-egress.conf.fragment"
+        )
+        != _sha(remote_wg_raw)
     ):
         raise ValueError("remote egress manifest scope differs")
     if (
         base_manifest.get("bundle_kind") != "trading-desk.local-ubuntu-router"
         or base_manifest.get("environment") not in {None, "testnet"}
+        or not isinstance(base_manifest.get("files"), dict)
+        or base_manifest["files"].get("mac-wireguard.conf.fragment")
+        != _sha(base_wg_raw)
     ):
         raise ValueError("base router manifest is not TESTNET")
     if vm_bundle.get("environment") not in {None, "testnet"}:
@@ -288,7 +309,7 @@ def compose(
         router_public_key_hash=base_values["router_public_key_hash"],
         mac_public_key_hash=base_values["mac_public_key_hash"],
         guest_configuration_hash=base_values["guest_configuration_hash"],
-        mac_wireguard_configuration_hash=_sha(wg_raw),
+        mac_wireguard_configuration_hash=_sha(base_wg_raw),
         nftables_policy_hash=base_values["nftables_policy_hash"],
         wan_interface=base_values["wan_interface"],
         ingress_interface=base_values["ingress_interface"],
@@ -305,7 +326,7 @@ def compose(
         vm_bundle_manifest_sha256=_sha(vm_raw),
         remote_egress_bundle_manifest_sha256=_sha(remote_raw),
         remote_qualification_hash=remote_values["remote_qualification_hash"],
-        mac_wireguard_configuration_hash=_sha(wg_raw),
+        mac_wireguard_configuration_hash=_sha(remote_wg_raw),
         mac_pf_policy_hash=_sha(anchor_raw),
         mac_pf_active_rules_hash=remote_values["mac_pf_active_rules_hash"],
         mac_pf_root_rules_hash=remote_values["mac_pf_root_rules_hash"],
@@ -348,7 +369,7 @@ def compose(
         raise ValueError("PF manifest differs from remote expectation")
     return {
         "helper-config.json": _canonical_file(observation_config_document(helper)),
-        "wg-exec-public.conf": wg_raw,
+        "wg-exec-public.conf": remote_wg_raw,
         "pf-anchor.conf": anchor_raw,
         "base-expectation.json": _canonical_file(base.as_dict()),
         "remote-expectation.json": _canonical_file(remote.as_dict()),
@@ -412,7 +433,8 @@ def parser() -> argparse.ArgumentParser:
         "remote-egress-manifest",
         "pf-manifest",
         "pf-anchor",
-        "wg-public",
+        "base-wg-public",
+        "remote-wg-public",
         "sample-helper",
         "probe-helper",
         "profile",
@@ -431,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
             "executor_config",
             "base_router_manifest",
             "vm_manifest",
-            "wg_public",
+            "base_wg_public",
             "profile",
         )
         if any(getattr(arguments, name) is None for name in common_names):
@@ -441,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
                 getattr(arguments, name) is not None
                 for name in (
                     "remote_egress_manifest",
+                    "remote_wg_public",
                     "pf_manifest",
                     "pf_anchor",
                     "sample_helper",
@@ -455,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
                 executor_config=arguments.executor_config,
                 base_router_manifest=arguments.base_router_manifest,
                 vm_manifest=arguments.vm_manifest,
-                wg_public=arguments.wg_public,
+                base_wg_public=arguments.base_wg_public,
                 profile_path=arguments.profile,
             )
             print(
@@ -471,6 +494,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         full_names = (
             "remote_egress_manifest",
+            "remote_wg_public",
             "pf_manifest",
             "pf_anchor",
             "sample_helper",
@@ -485,7 +509,8 @@ def main(argv: list[str] | None = None) -> int:
             remote_egress_manifest=arguments.remote_egress_manifest,
             pf_manifest=arguments.pf_manifest,
             pf_anchor=arguments.pf_anchor,
-            wg_public=arguments.wg_public,
+            base_wg_public=arguments.base_wg_public,
+            remote_wg_public=arguments.remote_wg_public,
             sample_helper=arguments.sample_helper,
             probe_helper=arguments.probe_helper,
             profile_path=arguments.profile,

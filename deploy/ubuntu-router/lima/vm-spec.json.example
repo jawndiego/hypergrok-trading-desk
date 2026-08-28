@@ -20,7 +20,7 @@
   "os": "ubuntu",
   "os_release": "24.04",
   "schema_version": 1,
-  "socket_vmnet_group": "admin",
+  "socket_vmnet_group": "trading-router-operator",
   "vm_type": "vz",
   "wan_mode": "lima_default_usernet",
   "ingress_network": {

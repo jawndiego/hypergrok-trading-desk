@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import tarfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -80,6 +81,474 @@ def load_script_namespace(path: Path, name: str) -> dict[str, object]:
 
 
 class UbuntuRouterVMArtifactTests(unittest.TestCase):
+    def test_commission_dispatch_exposes_only_reviewed_host_phases(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_dispatch_test"
+        )
+        common = [
+            "--runtime-receipt",
+            "/fixed/runtime-receipt.json",
+            "--expected-runtime-receipt-sha256",
+            "1" * 64,
+            "--expected-controller-manifest-sha256",
+            "2" * 64,
+        ]
+        cases = {
+            "_qualify_runtime": [
+                "qualify-runtime",
+                "--expected-controller-manifest-sha256",
+                "2" * 64,
+            ],
+            "_seal_media": [
+                "apply-seal-media",
+                *common,
+                "--evidence-dir",
+                "/fixed/evidence",
+            ],
+            "_host_tools": [
+                "apply-host-tools",
+                *common,
+                "--expected-media-receipt-sha256",
+                "3" * 64,
+            ],
+            "_lima_home": [
+                "apply-lima-home",
+                *common,
+                "--expected-host-tools-receipt-sha256",
+                "4" * 64,
+            ],
+            "_validate_fill": [
+                "apply-validate-fill",
+                *common,
+                "--expected-lima-home-receipt-sha256",
+                "5" * 64,
+            ],
+        }
+        for index, (function_name, arguments) in enumerate(cases.items(), start=10):
+            selected = mock.Mock(return_value=index)
+            with mock.patch.dict(namespace, {function_name: selected}):
+                self.assertEqual(index, namespace["main"](arguments))
+            selected.assert_called_once()
+
+    def test_runtime_receipt_binds_fixed_tree_and_load_scan(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_runtime_receipt_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        runtime = apply_lock["python_runtime"]
+        runtime["qualification_receipt_path"] = str(COMMISSION_APPLY_PATH.resolve())
+        tree_hash = "a" * 64
+        scan_hash = "b" * 64
+        receipt = {
+            "schema_version": 2,
+            "kind": "trading-desk.sealed-python-runtime",
+            "runtime_path": runtime["path"],
+            "runtime_prefix": runtime["prefix"],
+            "runtime_version": runtime["version"],
+            "runtime_tree_sha256": tree_hash,
+            "python_sha256": runtime["python_sha256"],
+            "load_scan_path": runtime["load_scan_path"],
+            "load_scan_sha256": scan_hash,
+            "llvm_otool_sha256": runtime["llvm_otool_sha256"],
+            "credentials_touched": False,
+            "network_changes_performed": False,
+            "venue_writes_authorized": False,
+            "mainnet_authorized": False,
+        }
+        content = namespace["_canonical_json"](receipt)
+        args = SimpleNamespace(
+            runtime_receipt=Path(runtime["qualification_receipt_path"]),
+            expected_runtime_receipt_sha256=hashlib.sha256(content).hexdigest(),
+        )
+        patches = {
+            "_assert_runtime_process": lambda _lock: Path(runtime["prefix"]),
+            "_runtime_load_scan_evidence": lambda _lock: {
+                "path": runtime["load_scan_path"],
+                "sha256": scan_hash,
+            },
+            "_assert_real_path": lambda *_args, **_kwargs: None,
+            "_read_fd_bound_file": lambda *_args, **_kwargs: content,
+            "_runtime_tree_sha256": lambda _root: tree_hash,
+        }
+        with mock.patch.dict(namespace, patches):
+            self.assertEqual(
+                args.expected_runtime_receipt_sha256,
+                namespace["_assert_runtime_receipt"](args, apply_lock),
+            )
+
+        receipt["network_changes_performed"] = True
+        tampered = namespace["_canonical_json"](receipt)
+        args.expected_runtime_receipt_sha256 = hashlib.sha256(tampered).hexdigest()
+        patches["_read_fd_bound_file"] = lambda *_args, **_kwargs: tampered
+        with (
+            mock.patch.dict(namespace, patches),
+            self.assertRaisesRegex(namespace["CommissionError"], "schema/content"),
+        ):
+            namespace["_assert_runtime_receipt"](args, apply_lock)
+
+    def test_router_identity_receipt_is_exact_and_live_bound(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_router_identity_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        host = apply_lock["host"]
+        user_uuid = "11111111-1111-1111-1111-111111111111"
+        group_uuid = "22222222-2222-2222-2222-222222222222"
+        receipt = {
+            "schema_version": "3",
+            "role": "router",
+            "account": host["router_operator_account"],
+            "uid": str(host["router_operator_uid"]),
+            "gid": str(host["router_operator_gid"]),
+            "user_generated_uid": user_uuid,
+            "group_generated_uid": group_uuid,
+            "home": apply_lock["paths"]["lima_home"],
+            "shell": "/usr/bin/false",
+            "authentication": "password-star-and-false-shell",
+            "authentication_authority": "absent",
+            "hidden": "1",
+            "supplementary_groups": "12,61,100,701",
+            "supplementary_group_model": "matches-existing-trading-role-baseline",
+            "supplementary_group_principals": host[
+                "router_operator_group_principals"
+            ],
+            "primary_group_members": "none",
+            "primary_group_nested_groups": "none",
+            "credential_loaded": "false",
+            "network_changed": "false",
+            "service_started": "false",
+            "venue_write_attempted": "false",
+            "mainnet_authorized": "false",
+        }
+        content = "".join(f"{key}={value}\n" for key, value in receipt.items()).encode()
+
+        def dscl(_node: str, attribute: str) -> str:
+            return {
+                "GeneratedUID": user_uuid if "Users" in _node else group_uuid,
+                "Password": "*",
+                "IsHidden": "1",
+            }[attribute]
+
+        patches = {
+            "_assert_real_path": lambda *_args, **_kwargs: None,
+            "_read_fd_bound_file": lambda *_args, **_kwargs: content,
+            "_dscl_value": dscl,
+            "_dscl_hidden_value": lambda _node: "1",
+            "_verify_reviewed_group_principals": lambda: None,
+            "_generated_uid_inventories": lambda: (
+                {user_uuid: host["router_operator_account"]},
+                {group_uuid: host["router_operator_account"]},
+            ),
+            "_verify_router_primary_group": lambda *_args: None,
+        }
+        user = SimpleNamespace(
+            pw_uid=454,
+            pw_gid=454,
+            pw_dir=apply_lock["paths"]["lima_home"],
+            pw_shell="/usr/bin/false",
+        )
+        group = SimpleNamespace(gr_gid=454)
+        authority = SimpleNamespace(returncode=1, stdout="", stderr="")
+        with (
+            mock.patch.dict(namespace, patches),
+            mock.patch.object(namespace["pwd"], "getpwnam", return_value=user),
+            mock.patch.object(namespace["grp"], "getgrnam", return_value=group),
+            mock.patch.object(
+                namespace["os"],
+                "getgrouplist",
+                return_value=[454, 12, 61, 100, 701],
+            ),
+            mock.patch.object(namespace["subprocess"], "run", return_value=authority),
+        ):
+            evidence = namespace["_router_operator_identity"](apply_lock)
+        self.assertEqual(hashlib.sha256(content).hexdigest(), evidence["sha256"])
+
+        receipt["unexpected"] = "widening"
+        bad = "".join(f"{key}={value}\n" for key, value in receipt.items()).encode()
+        patches["_read_fd_bound_file"] = lambda *_args, **_kwargs: bad
+        with (
+            mock.patch.dict(namespace, patches),
+            mock.patch.object(namespace["pwd"], "getpwnam", return_value=user),
+            mock.patch.object(namespace["grp"], "getgrnam", return_value=group),
+            mock.patch.object(
+                namespace["os"],
+                "getgrouplist",
+                return_value=[454, 12, 61, 100, 701],
+            ),
+            self.assertRaisesRegex(namespace["CommissionError"], "receipt differs"),
+        ):
+            namespace["_router_operator_identity"](apply_lock)
+
+    def test_darwin_hidden_and_group_record_parsers_are_exact(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_darwin_identity_parser_test"
+        )
+        parse_hidden = namespace["_parse_dscl_hidden_output"]
+        self.assertEqual("1", parse_hidden("IsHidden: 1\n", 0))
+        self.assertEqual(
+            "1", parse_hidden("dsAttrTypeNative:IsHidden: 1\n", 0)
+        )
+        for output, status in (
+            ("IsHidden: 0\n", 0),
+            ("Native:IsHidden: 1\n", 0),
+            ("IsHidden: 1\nextra\n", 0),
+            ("IsHidden: 1\n", 1),
+        ):
+            with self.subTest(output=output, status=status):
+                with self.assertRaises(namespace["CommissionError"]):
+                    parse_hidden(output, status)
+
+        parse_inventory = namespace["_parse_group_id_inventory"]
+        inventory = parse_inventory(
+            "nobody -2\neveryone 12\nlocalaccounts 61\n_lpoperator 100\n"
+            "com.apple.sharepoint.group.1 701\n"
+        )
+        self.assertEqual("com.apple.sharepoint.group.1", inventory[701])
+        for malformed in (
+            "everyone 12\nother 12\n",
+            "everyone 012\n",
+            "everyone 12 extra\n",
+        ):
+            with self.assertRaises(namespace["CommissionError"]):
+                parse_inventory(malformed)
+
+        parse_generated = namespace["_parse_generated_uid_inventory"]
+        generated_uid = "33333333-3333-3333-3333-333333333333"
+        self.assertEqual(
+            {generated_uid: "trading-router-operator"},
+            parse_generated(f"trading-router-operator {generated_uid}\n"),
+        )
+        with self.assertRaises(namespace["CommissionError"]):
+            parse_generated(f"first {generated_uid}\nsecond {generated_uid}\n")
+        require_unique = namespace["_require_globally_unique_generated_uid"]
+        require_unique(
+            generated_uid,
+            "trading-router-operator",
+            user_inventory={},
+            group_inventory={generated_uid: "trading-router-operator"},
+            node="group",
+        )
+        with self.assertRaises(namespace["CommissionError"]):
+            require_unique(
+                generated_uid,
+                "trading-router-operator",
+                user_inventory={generated_uid: "duplicate-user"},
+                group_inventory={generated_uid: "trading-router-operator"},
+                node="group",
+            )
+
+        parse_group = namespace["_parse_reviewed_group_record"]
+        valid = (
+            "AppleMetaNodeLocation: /Local/Default\n"
+            "GeneratedUID: ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000064\n"
+            "NestedGroups: ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D "
+            "ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000062\n"
+            "PrimaryGroupID: 100\n"
+        )
+        parse_group(
+            valid,
+            expected_gid=100,
+            expected_uuid="ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000064",
+            expected_nested=(
+                "ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D",
+                "ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000062",
+            ),
+        )
+        for drifted in (
+            valid + "GroupMembership: jawndiego\n",
+            valid.replace("PrimaryGroupID: 100", "PrimaryGroupID: 101"),
+            valid.replace(
+                " ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000062", ""
+            ),
+        ):
+            with self.assertRaises(namespace["CommissionError"]):
+                parse_group(
+                    drifted,
+                    expected_gid=100,
+                    expected_uuid="ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000064",
+                    expected_nested=(
+                        "ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D",
+                        "ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000062",
+                    ),
+                )
+        primary_uuid = "44444444-4444-4444-4444-444444444444"
+        primary = (
+            f"GeneratedUID: {primary_uuid}\n"
+            "PrimaryGroupID: 454\n"
+            "RecordName: trading-router-operator\n"
+        )
+        parse_group(
+            primary,
+            expected_gid=454,
+            expected_uuid=primary_uuid,
+            expected_nested=(),
+        )
+        for drifted in (
+            primary + "GroupMembership: jawndiego\n",
+            primary + f"GroupMembers: {generated_uid}\n",
+            primary + f"NestedGroups: {generated_uid}\n",
+        ):
+            with self.assertRaises(namespace["CommissionError"]):
+                parse_group(
+                    drifted,
+                    expected_gid=454,
+                    expected_uuid=primary_uuid,
+                    expected_nested=(),
+                )
+
+    def test_empty_router_owned_lima_home_is_safely_adopted(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_lima_home_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        apply_lock["host"]["router_operator_uid"] = os.getuid()
+        apply_lock["host"]["router_operator_gid"] = os.getgid()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            root.chmod(0o700)
+            source = root.parent / f".{root.name}-networks.yaml"
+            self.addCleanup(source.unlink, missing_ok=True)
+            source.write_bytes(b"networks: exact\n")
+            source.chmod(0o400)
+            digest = hashlib.sha256(source.read_bytes()).hexdigest()
+            marker = b'{"phase":"lima-home"}\n'
+
+            def assert_path(path: Path, *, kind: str, mode: int | None = None, **_kwargs):
+                metadata = path.lstat()
+                if kind == "directory":
+                    self.assertTrue(stat.S_ISDIR(metadata.st_mode))
+                else:
+                    self.assertTrue(stat.S_ISREG(metadata.st_mode))
+                if mode is not None:
+                    self.assertEqual(mode, stat.S_IMODE(metadata.st_mode))
+                return metadata
+
+            def write(path: Path, content: bytes, *, mode: int, **_kwargs) -> None:
+                if path.exists():
+                    self.assertEqual(content, path.read_bytes())
+                    self.assertEqual(mode, stat.S_IMODE(path.stat().st_mode))
+                    return
+                path.write_bytes(content)
+                path.chmod(mode)
+
+            patches = {
+                "_assert_real_path": assert_path,
+                "_write_exact_file": write,
+                "_read_fd_bound_file": lambda path, **_kwargs: path.read_bytes(),
+            }
+            with mock.patch.dict(namespace, patches):
+                namespace["_populate_lima_home"](
+                    root, apply_lock, source, digest, marker
+                )
+                namespace["_populate_lima_home"](
+                    root, apply_lock, source, digest, marker
+                )
+            self.assertEqual({"_config", "home"}, {p.name for p in root.iterdir()})
+            self.assertEqual(
+                b"networks: exact\n", (root / "_config" / "networks.yaml").read_bytes()
+            )
+            (root / "unexpected").write_text("reject", encoding="utf-8")
+            with (
+                mock.patch.dict(namespace, patches),
+                self.assertRaisesRegex(namespace["CommissionError"], "safely adoptable"),
+            ):
+                namespace["_populate_lima_home"](
+                    root, apply_lock, source, digest, marker
+                )
+
+    def test_receipt_bound_host_tool_quarantine_remains_retry_eligible(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_quarantine_retry_test"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            tools = root / "tools"
+            quarantine = root / "quarantine"
+            tools.mkdir(mode=0o755)
+            quarantine.mkdir(mode=0o700)
+            marker = namespace["_canonical_json"](
+                {
+                    "schema_version": 1,
+                    "kind": "trading-desk.router-commission.installing",
+                    "phase": "host-tools",
+                    "bundle_manifest_sha256": "a" * 64,
+                    "media_receipt_sha256": "b" * 64,
+                    "runtime_receipt_sha256": "c" * 64,
+                }
+            )
+            marker_digest = hashlib.sha256(marker).hexdigest()
+            temporary_retained = tools / ".retained"
+            temporary_retained.mkdir(mode=0o700)
+            marker_path = temporary_retained / ".INSTALLING.json"
+            marker_path.write_bytes(marker)
+            marker_path.chmod(0o400)
+            inode = temporary_retained.stat().st_ino
+            retained = tools / f".quarantine-host-tools-{inode}-{marker_digest}"
+            temporary_retained.rename(retained)
+            retained.chmod(0o500)
+            source = tools / f".lima-2.2.0.installing-{'a' * 64}"
+            transaction = {
+                "schema_version": 1,
+                "kind": "trading-desk.router-commission.quarantine-transaction",
+                "phase": "host-tools",
+                "installing_marker_sha256": marker_digest,
+                "moves": [
+                    {"source": str(source), "destination": str(retained)}
+                ],
+            }
+            transaction_path = quarantine / (
+                f"quarantine-transaction-host-tools-{marker_digest}.json"
+            )
+            write_json(transaction_path, transaction)
+            transaction_path.chmod(0o400)
+            receipt = {
+                "schema_version": 1,
+                "kind": "trading-desk.router-commission.quarantine",
+                "phase": "host-tools",
+                "installing_marker_sha256": marker_digest,
+                "transaction_receipt_sha256": hashlib.sha256(
+                    transaction_path.read_bytes()
+                ).hexdigest(),
+                "quarantined_paths": [str(retained)],
+                "automatic_delete_performed": False,
+                "network_changes_performed": False,
+                "vm_created": False,
+                "credentials_touched": False,
+                "venue_writes_authorized": False,
+                "mainnet_authorized": False,
+            }
+            receipt_path = quarantine / f"quarantine-host-tools-{marker_digest}.json"
+            write_json(receipt_path, receipt)
+            receipt_path.chmod(0o400)
+
+            def assert_path(path: Path, *, kind: str, mode: int | None = None, **_kwargs):
+                metadata = path.lstat()
+                self.assertFalse(stat.S_ISLNK(metadata.st_mode))
+                self.assertEqual(
+                    kind == "directory", stat.S_ISDIR(metadata.st_mode)
+                )
+                if mode is not None:
+                    self.assertEqual(mode, stat.S_IMODE(metadata.st_mode))
+                return metadata
+
+            with mock.patch.dict(namespace, {"_assert_real_path": assert_path}):
+                accepted = namespace["_verified_retained_host_tool_quarantines"](
+                    {"quarantine_parent": quarantine},
+                    marker=marker,
+                    marker_digest=marker_digest,
+                    allowed_sources=frozenset({source}),
+                    tools_parent=tools,
+                )
+            self.assertEqual((retained,), accepted)
+            self.assertTrue(retained.is_dir())
+            self.assertFalse(source.exists())
+
     def test_commission_persistence_rejects_zero_length_writes(self) -> None:
         namespace = load_script_namespace(
             COMMISSION_APPLY_PATH, "commission_apply_zero_write_test"
@@ -216,7 +685,7 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
         with self.assertRaisesRegex(error, "architecture/profile-qualified"):
             parse("example <stage1>")
 
-    def test_repository_artifacts_are_public_and_vm_guest_apply_disabled(self) -> None:
+    def test_repository_artifacts_enable_only_credential_free_host_prep(self) -> None:
         expected = {
             "vm-spec.json.example",
             "lima.yaml.example",
@@ -341,10 +810,17 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
         self.assertIn("package_state_not_adoptable", guest_text)
         self.assertIn('"$python" -I -B "$script"', launcher_text)
         self.assertIn("assert_root_chain", launcher_text)
+        self.assertIn("ROOT_APPLY_ENABLED=1", launcher_text)
+        self.assertIn("sealed Python symlink escapes its root", launcher_text)
+        self.assertIn("sealed Python direct load closure differs", launcher_text)
+        self.assertIn("apply-lima-home|apply-validate-fill", launcher_text)
         self.assertNotIn("sudo", launcher_text)
         self.assertTrue(apply_text.startswith("#!/usr/bin/false\n"))
         self.assertIn("runtime_tree_sha256", apply_text)
         self.assertIn("sys.flags.isolated", apply_text)
+        self.assertIn("_router_operator_identity", apply_text)
+        self.assertIn("_populate_lima_home", apply_text)
+        self.assertIn("runtime_qualification_receipt", apply_text)
 
     def test_sdist_manifest_covers_every_non_example_commission_artifact(self) -> None:
         manifest_lines = set(
@@ -444,14 +920,19 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
             COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
         )
         self.assertEqual(
-            "operator_evidence_only_all_root_vm_guest_apply_disabled",
+            "credential_free_host_preparation_enabled_vm_guest_network_disabled",
             apply_lock["review_status"],
         )
-        for disabled in (
+        for enabled in (
             "media_seal_apply_enabled",
             "host_tools_apply_enabled",
             "lima_home_apply_enabled",
             "validate_fill_apply_enabled",
+            "runtime_qualification_receipt_enabled",
+            "quarantine_apply_enabled",
+        ):
+            self.assertIs(True, apply_lock["phases"][enabled], enabled)
+        for disabled in (
             "vm_create_apply_enabled",
             "vm_start_apply_enabled",
             "guest_freeze_apply_enabled",
@@ -618,11 +1099,17 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                     "dependency_closure_package_count": 116,
                     "immutable_public_inputs_locked": True,
                     "immutable_public_inputs_verified": False,
-                    "commission_apply_lock_sha256": "b5db1e2fffa3e5a528e3bce8de39e1457fec5c8ee9e578893ccc33679bf5373e",
+                    "commission_apply_lock_sha256": "8ac08b3e8eb3b936a68b7e801b3810751964ba47f35032634c0172c1d06a7b67",
                     "enabled_host_prepare_phases": [
+                        "host_tools_apply_enabled",
+                        "lima_home_apply_enabled",
+                        "media_seal_apply_enabled",
                         "operator_verification_receipt_enabled",
+                        "quarantine_apply_enabled",
+                        "runtime_qualification_receipt_enabled",
+                        "validate_fill_apply_enabled",
                     ],
-                    "host_prepare_apply_authorized": False,
+                    "host_prepare_apply_authorized": True,
                     "guest_mutation_apply_enabled": False,
                     "router_activation_apply_enabled": False,
                     "vm_create_apply_enabled": False,
@@ -643,7 +1130,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                     "host_direct_bypass_prevented": False,
                     "host_prepare_apply_artifact_present": True,
                     "host_prepare_apply_executed": False,
-                    "lima_home_apply_enabled": False,
+                    "lima_home_apply_enabled": True,
                     "mainnet_authorized": False,
                     "network_state_changed": False,
                     "packages_installed": False,
@@ -687,6 +1174,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
             self.assertNotIn('lima: "td-router-wan"', lima)
 
             networks = (first / "networks.yaml").read_text(encoding="utf-8")
+            self.assertIn('group: "trading-router-operator"', networks)
             self.assertIn('"td-router-ingress":\n    mode: "host"', networks)
             self.assertEqual(1, networks.count('mode: "host"'))
             self.assertNotIn('mode: "shared"', networks)
@@ -736,7 +1224,8 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                 plan.stdout,
             )
             self.assertIn("router_keys_generated=false", plan.stdout)
-            self.assertIn("host_tool_install_apply_enabled=false", plan.stdout)
+            self.assertIn("host_tool_install_apply_enabled=true", plan.stdout)
+            self.assertIn("separate_runtime_qualification_enabled=true", plan.stdout)
             self.assertIn("host_tool_attestation_required=true", plan.stdout)
             self.assertIn("lima_attestation_repository=lima-vm/lima", plan.stdout)
             self.assertIn(
@@ -772,9 +1261,10 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertIn("media_seal_apply_enabled=false", apply_plan.stdout)
-            self.assertIn("host_tools_apply_enabled=false", apply_plan.stdout)
-            self.assertIn("lima_home_apply_enabled=false", apply_plan.stdout)
+            self.assertIn("media_seal_apply_enabled=true", apply_plan.stdout)
+            self.assertIn("host_tools_apply_enabled=true", apply_plan.stdout)
+            self.assertIn("lima_home_apply_enabled=true", apply_plan.stdout)
+            self.assertIn("validate_fill_apply_enabled=true", apply_plan.stdout)
             self.assertIn("vm_create_apply_enabled=false", apply_plan.stdout)
             self.assertIn("credentials_touched=false", apply_plan.stdout)
             default_apply_plan = subprocess.run(
@@ -816,15 +1306,10 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                 self.assertEqual(64, refused_guest.returncode, command)
                 self.assertIn("apply_disabled", refused_guest.stderr)
             for disabled_phase in (
-                "apply-seal-media",
-                "apply-host-tools",
-                "apply-lima-home",
-                "apply-validate-fill",
                 "apply-create-vm",
                 "apply-start-vm",
                 "apply-freeze-guest",
                 "apply-guest-package",
-                "quarantine-incomplete",
             ):
                 refused_phase = subprocess.run(
                     [sys.executable, str(commission_apply), disabled_phase],

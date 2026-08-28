@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Render and verify a secret-free, plan-only Lima/VZ router VM bundle.
+"""Render and verify a secret-free Lima/VZ router VM bundle.
 
 The renderer performs no downloads, package installation, VM lifecycle,
 privilege, key, network, credential, or venue operation. Checked-in version,
 signed-snapshot, dependency-closure and provenance pins are immutable; the
-commission authorization object keeps every apply operation disabled.
+commission authorization object enables only the separate credential-free
+host-preparation phases; VM/guest/network/key operations remain disabled.
 """
 
 from __future__ import annotations
@@ -171,7 +172,7 @@ SECURITY_CLAIMS = {
     "host_direct_bypass_prevented": False,
     "host_prepare_apply_artifact_present": True,
     "host_prepare_apply_executed": False,
-    "lima_home_apply_enabled": False,
+    "lima_home_apply_enabled": True,
     "mainnet_authorized": False,
     "network_state_changed": False,
     "packages_installed": False,
@@ -635,25 +636,44 @@ def validate_commission_apply_lock(lock: dict[str, Any]) -> dict[str, Any]:
         ),
         "commission apply lock",
     )
-    if type(lock["schema_version"]) is not int or lock["schema_version"] != 1:
-        raise ValueError("commission apply lock schema_version must be exactly 1")
+    if type(lock["schema_version"]) is not int or lock["schema_version"] != 2:
+        raise ValueError("commission apply lock schema_version must be exactly 2")
     if lock["review_status"] != (
-        "operator_evidence_only_all_root_vm_guest_apply_disabled"
+        "credential_free_host_preparation_enabled_vm_guest_network_disabled"
     ):
         raise ValueError("commission apply lock review status differs")
     expected_host = {
         "architecture": "arm64",
         "build_version": "25G83",
-        "operator_gid": 20,
-        "operator_uid": 501,
         "os": "Darwin",
         "product_version": "26.6.2",
+        "public_verifier_gid": 20,
+        "public_verifier_uid": 501,
+        "router_identity_receipt_path": (
+            "/private/etc/trading-desk/"
+            "testnet-foreground-router-identity.receipt"
+        ),
+        "router_operator_account": "trading-router-operator",
+        "router_operator_gid": 454,
+        "router_operator_group_principals": (
+            "12:everyone:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:none,"
+            "61:localaccounts:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D:none,"
+            "100:_lpoperator:ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000064:"
+            "ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D+"
+            "ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000062,"
+            "701:com.apple.sharepoint.group.1:"
+            "EE977B55-20FF-44D2-81CD-3A51B6BBC5DC:"
+            "ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C"
+        ),
+        "router_operator_supplementary_groups": [12, 61, 100, 701],
+        "router_operator_uid": 454,
     }
     if lock["host"] != expected_host:
         raise ValueError("commission apply host contract differs")
     expected_paths = {
         "lima_home": "/private/var/db/trading-desk-lima",
         "lima_install": "/opt/trading-desk-router-tools/lima-2.2.0",
+        "lima_plan": "/opt/trading-desk-router-tools/plans/lima.yaml",
         "media_parent": "/private/var/db/trading-desk-router-commission-v1/media",
         "operator_home": "/private/var/db/trading-desk-lima/home",
         "quarantine_parent": "/private/var/db/trading-desk-router-commission-v1/quarantine",
@@ -668,27 +688,33 @@ def validate_commission_apply_lock(lock: dict[str, Any]) -> dict[str, Any]:
         "guest_freeze_apply_enabled": False,
         "guest_package_install_apply_enabled": False,
         "guest_package_simulation_apply_enabled": False,
-        "host_tools_apply_enabled": False,
-        "lima_home_apply_enabled": False,
-        "media_seal_apply_enabled": False,
+        "host_tools_apply_enabled": True,
+        "lima_home_apply_enabled": True,
+        "media_seal_apply_enabled": True,
         "operator_verification_receipt_enabled": True,
+        "quarantine_apply_enabled": True,
         "router_activation_apply_enabled": False,
-        "validate_fill_apply_enabled": False,
+        "runtime_qualification_receipt_enabled": True,
+        "validate_fill_apply_enabled": True,
         "vm_create_apply_enabled": False,
         "vm_start_apply_enabled": False,
     }
     if lock["phases"] != expected_phases:
         raise ValueError("commission apply phase gates differ")
-    if not isinstance(lock["stop_line"], dict) or any(lock["stop_line"].values()):
+    expected_stop_line = {
+        "credentials_authorized": False,
+        "executor_init_authorized": False,
+        "mainnet_authorized": False,
+        "network_changes_authorized": False,
+        "router_key_generation_authorized": False,
+        "venue_writes_authorized": False,
+    }
+    if lock["stop_line"] != expected_stop_line:
         raise ValueError("commission apply stop line unexpectedly enables authority")
     if set(lock["blockers"]) != {
         "guest_freeze",
         "guest_package_install",
-        "host_tools",
-        "lima_home",
-        "media_seal",
         "router_activation",
-        "validate_fill",
         "vm_create",
         "vm_start",
     } or not all(
@@ -698,8 +724,26 @@ def validate_commission_apply_lock(lock: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("commission apply blocker set differs")
     if lock["python_runtime"] != {
         "external_install_receipt_required": True,
+        "load_scan_path": (
+            "/opt/trading-desk/runtime-install-receipts/"
+            "python-3.11.16-otool-payload.log"
+        ),
+        "llvm_otool_path": (
+            "/Library/Developer/CommandLineTools/usr/bin/llvm-otool"
+        ),
+        "llvm_otool_sha256": (
+            "61ff2c63cf68eeeadf9c4700dadb8271740ff4960f98500f30db82b31521c0de"
+        ),
         "path": "/opt/trading-desk/runtime/python-3.11.16/bin/python3.11",
         "prefix": "/opt/trading-desk/runtime/python-3.11.16",
+        "python_sha256": (
+            "b1e82855accbd41dc26f83a8722b3cdc745fb23484cfc645823bc8446144aa0f"
+        ),
+        "python_size_bytes": 4589864,
+        "qualification_receipt_path": (
+            "/opt/trading-desk/runtime-install-receipts/"
+            "python-3.11.16-sealed-runtime.json"
+        ),
         "version": "3.11.16",
     }:
         raise ValueError("commission apply Python runtime contract differs")
@@ -893,8 +937,10 @@ def validate_vm_spec(spec: dict[str, Any]) -> dict[str, Any]:
         value = spec[field]
         if type(value) is not int or not minimum <= value <= maximum:
             raise ValueError(f"{field} must be an integer from {minimum} to {maximum}")
-    if spec["socket_vmnet_group"] != "admin":
-        raise ValueError("socket_vmnet_group must be exactly admin")
+    if spec["socket_vmnet_group"] != "trading-router-operator":
+        raise ValueError(
+            "socket_vmnet_group must be exactly trading-router-operator"
+        )
     lima_home = _validate_lima_home(spec["lima_home"])
 
     if spec["wan_mode"] != "lima_default_usernet":
@@ -1223,7 +1269,7 @@ def render_bundle(
                     for name, enabled in commission_apply_lock["phases"].items()
                     if enabled
                 ),
-                "host_prepare_apply_authorized": False,
+                "host_prepare_apply_authorized": True,
                 "vm_create_apply_enabled": False,
                 "vm_start_apply_enabled": False,
                 "guest_mutation_apply_enabled": False,
@@ -1488,7 +1534,7 @@ def verify_bundle(
             for name, enabled in commission_apply_lock["phases"].items()
             if enabled
         ),
-        "host_prepare_apply_authorized": False,
+        "host_prepare_apply_authorized": True,
         "vm_create_apply_enabled": False,
         "vm_start_apply_enabled": False,
         "guest_mutation_apply_enabled": False,
@@ -1543,7 +1589,7 @@ def verify_bundle(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Render or verify a plan-only Lima/VZ router VM bundle."
+        description="Render or verify a nonmutating Lima/VZ router VM bundle."
     )
     parser.add_argument("--spec", type=Path)
     parser.add_argument("--image-lock", type=Path, default=DEFAULT_IMAGE_LOCK)
