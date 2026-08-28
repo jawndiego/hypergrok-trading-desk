@@ -166,13 +166,16 @@ class CommissionedReleaseMigrationTests(unittest.TestCase):
             '"gid": int(before.st_gid)',
             '"mode": stat.S_IMODE(before.st_mode)',
             '"links": int(before.st_nlink)',
-            '"acl": list(darwin_named_acl_lines(path))',
+            '"acl": sorted(darwin_named_acl_lines(path))',
             "hashlib.sha256()",
             'record["sha256"]',
             "snapshot hard link rejected",
             "snapshot symlink rejected",
             "snapshot special path rejected",
             "snapshot write made no progress",
+            "transient_sqlite_shm",
+            'record.pop("device")',
+            'record.pop("inode")',
         ):
             self.assertIn(required, snapshot)
         for required in (
@@ -186,8 +189,13 @@ class CommissionedReleaseMigrationTests(unittest.TestCase):
             self.assertIn(required, snapshot)
         apply = shell_function("apply_migration")
         self.assertIn('/usr/bin/cmp -s "$before_install" "$after_install"', apply)
+        self.assertIn(
+            'report_snapshot_difference "$before_install" "$after_install"',
+            apply,
+        )
         qualify = shell_function("qualify_new_current")
         self.assertIn('/usr/bin/cmp -s "$before" "$after"', qualify)
+        self.assertIn('report_snapshot_difference "$before" "$after"', qualify)
 
     def test_new_release_is_qualified_exactly_and_failure_rolls_back(self) -> None:
         qualify = shell_function("qualify_new_current")

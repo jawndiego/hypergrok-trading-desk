@@ -22,8 +22,11 @@ The script is inert without an explicit action. Its bound `--apply` path:
 7. retains the old symlink under its fixed rollback name.
 
 `status` and `dry-run` may create and remove private SQLite verification
-directories. Their final namespace must match the pre-command snapshot, and no
-authoritative database byte, inode, owner, mode or ACL may change.
+directories and update SQLite SHM lock state. Their final namespace and every
+SHM owner/mode/link/size/ACL must remain exact; SHM bytes and inode are
+transient. No authoritative database or WAL byte, inode, owner, mode or ACL may
+change. Any mismatch prints only its path and changed field names before the
+old release is restored.
 
 ## Recovery states
 

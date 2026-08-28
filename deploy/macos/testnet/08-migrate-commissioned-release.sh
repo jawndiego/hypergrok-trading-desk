@@ -405,6 +405,14 @@ from trading_harness.darwin_acl import darwin_named_acl_lines
 output = Path(sys.argv[1])
 roots = tuple(Path(value) for value in sys.argv[2:])
 records: dict[str, dict[str, object]] = {}
+transient_shm = {
+    "/private/var/db/trading-desk-testnet-foreground/execution/execution.sqlite3-shm",
+    "/private/var/db/trading-desk-testnet-foreground/nonce/nonce.sqlite3-shm",
+    "/private/var/db/trading-desk-testnet-foreground/daily-loss/daily-loss.sqlite3-shm",
+    "/private/var/db/trading-desk-testnet-foreground/learning/learning.sqlite3-shm",
+    "/private/var/db/trading-desk-testnet-foreground/learning/staging.sqlite3-shm",
+    "/private/var/db/trading-desk/control-private/chat-approval/chat-approval.sqlite3-shm",
+    }
 
 def identity(value: os.stat_result) -> tuple[int, ...]:
     return (
@@ -428,7 +436,7 @@ def visit(path: Path) -> None:
         "gid": int(before.st_gid),
         "mode": stat.S_IMODE(before.st_mode),
         "links": int(before.st_nlink),
-        "acl": list(darwin_named_acl_lines(path)),
+        "acl": sorted(darwin_named_acl_lines(path)),
     }
     if stat.S_ISREG(before.st_mode):
         if before.st_nlink != 1:
@@ -446,7 +454,12 @@ def visit(path: Path) -> None:
                     break
                 digest.update(chunk)
             record["size"] = int(opened.st_size)
-            record["sha256"] = digest.hexdigest()
+            if key in transient_shm:
+                record["transient_sqlite_shm"] = True
+                record.pop("device")
+                record.pop("inode")
+            else:
+                record["sha256"] = digest.hexdigest()
         finally:
             os.close(descriptor)
     elif stat.S_ISDIR(before.st_mode):
@@ -496,6 +509,27 @@ finally:
     /private/var/db/trading-desk-testnet-route-health \
     /private/var/db/trading-desk-testnet-remote-vpn-health \
     /private/var/db/trading-desk-lima || die 'persistent commissioned snapshot failed'
+}
+
+report_snapshot_difference() {
+  local before after
+  before=$1
+  after=$2
+  /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C "$ADMIN_PYTHON" -B -I -c '
+import json, sys
+with open(sys.argv[1], "r", encoding="ascii") as stream:
+    before = {row["path"]: row for row in json.load(stream)["records"]}
+with open(sys.argv[2], "r", encoding="ascii") as stream:
+    after = {row["path"]: row for row in json.load(stream)["records"]}
+for path in sorted(set(before) | set(after)):
+    if path not in before:
+        print(f"SNAPSHOT_DIFF path={path} fields=added", file=sys.stderr)
+    elif path not in after:
+        print(f"SNAPSHOT_DIFF path={path} fields=removed", file=sys.stderr)
+    elif before[path] != after[path]:
+        fields = sorted(key for key in set(before[path]) | set(after[path]) if before[path].get(key) != after[path].get(key))
+        print(f"SNAPSHOT_DIFF path={path} fields={','.join(fields)}", file=sys.stderr)
+' "$before" "$after" || /bin/echo 'SNAPSHOT_DIFF report_failed=true' >&2
 }
 
 cleanup() {
@@ -726,7 +760,10 @@ qualify_new_current() {
     assert_commissioned
     assert_quiescent
     snapshot_commissioned "$after"
-    /usr/bin/cmp -s "$before" "$after" || die 'persistent commissioned state changed during release qualification'
+    if ! /usr/bin/cmp -s "$before" "$after"; then
+      report_snapshot_difference "$before" "$after"
+      die 'persistent commissioned state changed during release qualification'
+    fi
   )
   qualification_status=$?
   set -e
@@ -807,10 +844,11 @@ apply_migration() {
   assert_parked_old
   assert_commissioned
   snapshot_commissioned "$after_install"
-  /usr/bin/cmp -s "$before_install" "$after_install" || {
+  if ! /usr/bin/cmp -s "$before_install" "$after_install"; then
+    report_snapshot_difference "$before_install" "$after_install"
     rollback_pending
     die 'persistent commissioned state changed while the replacement release was built'
-  }
+  fi
   qualify_new_current
   /bin/echo "COMMISSIONED_MIGRATION_COMPLETE current=$NEW_RELEASE retained_old=$RETAINED_OLD_LINK"
   /bin/echo 'No credential, service, network, venue, or authoritative database mutation was performed.'
