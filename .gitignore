@@ -11,6 +11,8 @@ __pycache__/
 *.pem
 *.p12
 *.wallet
+# Local VPN profiles contain private keys.
+/*.conf
 *.db
 *.db-*
 *.sqlite
