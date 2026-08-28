@@ -32,6 +32,11 @@ authoritative database byte, inode, owner, mode or ACL may change.
 - `--rollback-new` is valid only while the new current is still unqualified and
   the exact old link is parked. It uses Darwin `RENAME_SWAP`, restores the old
   current atomically, and retains the new link under a failure name.
+- `--retry-failed` is valid only for that exact retained failure link. It moves
+  no application bytes, atomically re-presents the same READY release, and
+  repeats the complete credential-free qualification after the blocker is
+  repaired. For the retained legacy-sidecar failure it additionally requires
+  the exact root-owned sidecar-ACL repair receipt.
 - `--quarantine-incomplete` delegates the exact non-deleting quarantine to the
   sibling installer while current is absent. Run `--restore-old` afterward.
 - Unexpected link/release combinations stop for root review. No force or delete

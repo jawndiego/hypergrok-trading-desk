@@ -89,6 +89,7 @@ class CommissionedReleaseMigrationTests(unittest.TestCase):
             "CONFIG_SHA256=458261ecc9d0a63334024167598d833f51ea95298c39c7615bbb207b4a68f6a5",
             "PREINIT_RECEIPT_SHA256=62e2769a551b7d73f184585d81e3c78bfe61754a795a0e729fe2d1a357c48411",
             "POSTINIT_RECEIPT_SHA256=35ea1608009791d7a6e48b55a310d8f74d8c18a750b82c939b6f0344204f996a",
+            "SIDECAR_ACL_RECEIPT_SHA256=04438f0c65933bd16e1db3bb5c5b52aa3417a35dca4cd979095b76f2ce247c64",
             "CONFIG_HASH=1344975159f115718f5b5ac0f9d96c296d862542c75620bc8b52e4753eacd109",
         ):
             self.assertIn(required, text)
@@ -246,6 +247,7 @@ class CommissionedReleaseMigrationTests(unittest.TestCase):
             "parked-current-absent",
             "new-current-pending",
             "rollback-swapped-pending",
+            "failed-new-ready",
             "complete",
             "assert_old_current",
             "assert_parked_old",
@@ -267,6 +269,7 @@ class CommissionedReleaseMigrationTests(unittest.TestCase):
             "--apply)",
             "--restore-old)",
             "--rollback-new)",
+            "--retry-failed)",
             "--quarantine-incomplete)",
         ):
             self.assertIn(action, tail)
@@ -276,6 +279,17 @@ class CommissionedReleaseMigrationTests(unittest.TestCase):
         self.assertIn('assert_parked_new', rollback)
         self.assertIn('current_target', rollback)
         self.assertIn('parked_target', rollback)
+        retry = shell_function("retry_failed")
+        self.assertIn('assert_exact_file "$SIDECAR_ACL_RECEIPT"', retry)
+        self.assertIn('assert_no_acl "$SIDECAR_ACL_RECEIPT"', retry)
+        self.assertLess(
+            retry.index('atomic_rename_exclusive "$FAILED_NEW_LINK" "$PARKED_LINK"'),
+            retry.index('atomic_swap_symlinks "$CURRENT_LINK" "$PARKED_LINK"'),
+        )
+        self.assertLess(
+            retry.index('atomic_swap_symlinks "$CURRENT_LINK" "$PARKED_LINK"'),
+            retry.index("qualify_new_current"),
+        )
 
     def test_qualification_subshell_reenables_errexit(self) -> None:
         result = subprocess.run(

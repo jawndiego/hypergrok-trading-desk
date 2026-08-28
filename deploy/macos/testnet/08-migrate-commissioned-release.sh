@@ -16,6 +16,7 @@ PROFILE_SHA256=f859fc7a3f216bbc848cf152d72d482efb2208ab1bf4192ac5d8daafee807104
 CONFIG_SHA256=458261ecc9d0a63334024167598d833f51ea95298c39c7615bbb207b4a68f6a5
 PREINIT_RECEIPT_SHA256=62e2769a551b7d73f184585d81e3c78bfe61754a795a0e729fe2d1a357c48411
 POSTINIT_RECEIPT_SHA256=35ea1608009791d7a6e48b55a310d8f74d8c18a750b82c939b6f0344204f996a
+SIDECAR_ACL_RECEIPT_SHA256=04438f0c65933bd16e1db3bb5c5b52aa3417a35dca4cd979095b76f2ce247c64
 CONFIG_HASH=1344975159f115718f5b5ac0f9d96c296d862542c75620bc8b52e4753eacd109
 
 TRADING_ROOT=/opt/trading-desk
@@ -31,6 +32,7 @@ PROFILE=/private/etc/trading-desk/testnet-foreground-profile.json
 CONFIG=/private/etc/trading-desk/testnet-executor.toml
 PREINIT_RECEIPT=/private/etc/trading-desk/testnet-foreground-preinit.receipt
 POSTINIT_RECEIPT=/private/etc/trading-desk/testnet-foreground-postinit.receipt
+SIDECAR_ACL_RECEIPT=/private/etc/trading-desk/testnet-foreground-sidecar-acl-repair-v1.receipt
 FOREGROUND_ROOT=/private/var/db/trading-desk-testnet-foreground
 CHAT_ROOT=/private/var/db/trading-desk/control-private/chat-approval
 INSTALLER=
@@ -54,6 +56,7 @@ plan() {
   /bin/echo 'Apply: --apply ABSOLUTE_ROOT_OWNED_SEALED_MEDIA'
   /bin/echo 'Restore while current is absent: --restore-old'
   /bin/echo 'Rollback a new unqualified current: --rollback-new'
+  /bin/echo 'Requalify the exact retained failed new release: --retry-failed'
   /bin/echo 'Quarantine an incomplete new release while current is absent: --quarantine-incomplete'
   /bin/echo 'The old release and pointer are retained; persistent TESTNET state is snapshot-compared before and after qualification.'
 }
@@ -147,7 +150,8 @@ require_bound_release() {
   done
   for value in "$NEW_RECEIPT_SHA256" "$OLD_RECEIPT_SHA256" \
     "$EXPECTED_INSTALLER_SHA256" "$PROFILE_SHA256" "$CONFIG_SHA256" \
-    "$PREINIT_RECEIPT_SHA256" "$POSTINIT_RECEIPT_SHA256" "$CONFIG_HASH"; do
+    "$PREINIT_RECEIPT_SHA256" "$POSTINIT_RECEIPT_SHA256" \
+    "$SIDECAR_ACL_RECEIPT_SHA256" "$CONFIG_HASH"; do
     /bin/echo "$value" | /usr/bin/grep -Eq '^[0-9a-f]{64}$' || die 'bound SHA-256 value is invalid'
   done
   [ "$NEW_COMMIT" != "$OLD_COMMIT" ] || die 'replacement commit must differ'
@@ -200,6 +204,7 @@ assert_old_current() { assert_release_link "$CURRENT_LINK" "$OLD_COMMIT" "$OLD_R
 assert_parked_old() { assert_release_link "$PARKED_LINK" "$OLD_COMMIT" "$OLD_RECEIPT_SHA256"; }
 assert_parked_new() { assert_release_link "$PARKED_LINK" "$NEW_COMMIT" "$NEW_RECEIPT_SHA256"; }
 assert_new_current() { assert_release_link "$CURRENT_LINK" "$NEW_COMMIT" "$NEW_RECEIPT_SHA256"; }
+assert_failed_new() { assert_release_link "$FAILED_NEW_LINK" "$NEW_COMMIT" "$NEW_RECEIPT_SHA256"; }
 
 assert_exact_file() {
   local path uid gid mode sha
@@ -574,7 +579,8 @@ finally:
 
 migration_state() {
   if [ -L "$CURRENT_LINK" ] && [ ! -e "$PARKED_LINK" ] && [ ! -L "$PARKED_LINK" ] && \
-     [ ! -e "$RETAINED_OLD_LINK" ] && [ ! -L "$RETAINED_OLD_LINK" ]; then
+     [ ! -e "$RETAINED_OLD_LINK" ] && [ ! -L "$RETAINED_OLD_LINK" ] && \
+     [ ! -e "$FAILED_NEW_LINK" ] && [ ! -L "$FAILED_NEW_LINK" ]; then
     assert_old_current
     /bin/echo old-current
   elif [ ! -e "$CURRENT_LINK" ] && [ ! -L "$CURRENT_LINK" ] && [ -L "$PARKED_LINK" ]; then
@@ -599,6 +605,12 @@ migration_state() {
     assert_new_current
     assert_release_link "$RETAINED_OLD_LINK" "$OLD_COMMIT" "$OLD_RECEIPT_SHA256"
     /bin/echo complete
+  elif [ -L "$CURRENT_LINK" ] && [ -L "$FAILED_NEW_LINK" ] && \
+       [ ! -e "$PARKED_LINK" ] && [ ! -L "$PARKED_LINK" ] && \
+       [ ! -e "$RETAINED_OLD_LINK" ] && [ ! -L "$RETAINED_OLD_LINK" ]; then
+    assert_old_current
+    assert_failed_new
+    /bin/echo failed-new-ready
   else
     die 'commissioned release migration state is unrecognized'
   fi
@@ -767,6 +779,9 @@ apply_migration() {
     rollback-swapped-pending)
       die 'rollback was interrupted after the atomic swap; run --rollback-new to retain the failed new link'
       ;;
+    failed-new-ready)
+      die 'the exact failed new release is retained; repair the blocker, then run --retry-failed'
+      ;;
     complete)
       /bin/echo "COMMISSIONED_MIGRATION_COMPLETE current=$NEW_RELEASE retained_old=$RETAINED_OLD_LINK"
       return 0
@@ -821,6 +836,33 @@ rollback_new() {
   rollback_pending
 }
 
+retry_failed() {
+  local state
+  require_bound_release
+  assert_sealed_programs
+  assert_secure_directory /private 755
+  assert_secure_directory /private/var 755
+  assert_secure_directory /private/var/db 755
+  assert_commissioned
+  assert_exact_file "$SIDECAR_ACL_RECEIPT" 0 0 400 "$SIDECAR_ACL_RECEIPT_SHA256"
+  assert_no_acl "$SIDECAR_ACL_RECEIPT"
+  assert_quiescent
+  state=$(migration_state)
+  [ "$state" = failed-new-ready ] || die 'retry requires the exact old-current/failed-new state'
+  prepare_snapshots
+  trap cleanup EXIT HUP INT TERM
+  assert_absent "$PARKED_LINK"
+  atomic_rename_exclusive "$FAILED_NEW_LINK" "$PARKED_LINK"
+  assert_old_current
+  assert_parked_new
+  atomic_swap_symlinks "$CURRENT_LINK" "$PARKED_LINK"
+  assert_new_current
+  assert_parked_old
+  qualify_new_current
+  /bin/echo "COMMISSIONED_MIGRATION_COMPLETE current=$NEW_RELEASE retained_old=$RETAINED_OLD_LINK"
+  /bin/echo 'The retained release passed credential-free qualification; no venue operation was performed.'
+}
+
 quarantine_incomplete() {
   require_bound_release
   assert_sealed_programs
@@ -849,11 +891,15 @@ case "${1-plan}" in
     [ "$#" -eq 1 ] || die '--rollback-new takes no additional arguments'
     rollback_new
     ;;
+  --retry-failed)
+    [ "$#" -eq 1 ] || die '--retry-failed takes no additional arguments'
+    retry_failed
+    ;;
   --quarantine-incomplete)
     [ "$#" -eq 1 ] || die '--quarantine-incomplete takes no additional arguments'
     quarantine_incomplete
     ;;
   *)
-    die 'unknown action; use plan, --apply MEDIA, --restore-old, --rollback-new, or --quarantine-incomplete'
+    die 'unknown action; use plan, --apply MEDIA, --restore-old, --rollback-new, --retry-failed, or --quarantine-incomplete'
     ;;
 esac

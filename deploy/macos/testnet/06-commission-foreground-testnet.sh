@@ -10,6 +10,7 @@ PROFILE=/etc/trading-desk/testnet-foreground-profile.json
 CONFIG=/etc/trading-desk/testnet-executor.toml
 PREINIT_RECEIPT=/etc/trading-desk/testnet-foreground-preinit.receipt
 POSTINIT_RECEIPT=/etc/trading-desk/testnet-foreground-postinit.receipt
+SIDECAR_ACL_RECEIPT=/etc/trading-desk/testnet-foreground-sidecar-acl-repair-v1.receipt
 COLLECTOR_IDENTITY_RECEIPT=/etc/trading-desk/testnet-foreground-collector-identity.receipt
 ROUTER_IDENTITY_RECEIPT=/etc/trading-desk/testnet-foreground-router-identity.receipt
 COLLECTOR_BIRTH_MARKER=/etc/trading-desk/.testnet-foreground-collector-birth-v2
@@ -51,6 +52,7 @@ LOCK_HELD=0
 POSTINIT_CHANGED=0
 POSTINIT_COMMITTED=0
 POSTINIT_EXPECTED_RECEIPT=
+SIDECAR_PROMOTED=
 EXECUTION_ACL_BACKUP=
 LEARNING_ACL_BACKUP=
 BASELINE_SUPPLEMENTARY_GROUPS=
@@ -77,6 +79,7 @@ plan() {
   /bin/echo '  --apply-router-identity  create/adopt only exact disabled UID/GID 454 and its private Lima home'
   /bin/echo '  --apply-preinit   render public config and create empty final-path layout/ACLs'
   /bin/echo '  --apply-postinit  verify initialized databases and convert only future sidecar ACL inheritance'
+  /bin/echo '  --repair-initial-sidecar-acls-v1  add delete only to exact retained empty initialization sidecars'
   /bin/echo "Public profile must already be root:wheel 0400 and ACL-free at $PROFILE"
   /bin/echo "State root: $FOREGROUND_ROOT (ordinary APFS; no quota/reserve claim)"
   /bin/echo 'No phase runs executor init, initializes chat SQLite, provisions Keychain, changes routing/PF/WireGuard, starts launchd, or calls Hyperliquid.'
@@ -84,7 +87,7 @@ plan() {
 }
 
 cleanup() {
-  local safe_to_restore restored path
+  local safe_to_restore restored path entry role
   if [ "$POSTINIT_CHANGED" = 1 ] && [ "$POSTINIT_COMMITTED" = 0 ]; then
     safe_to_restore=1
     if [ -e "$POSTINIT_RECEIPT" ] || [ -L "$POSTINIT_RECEIPT" ]; then
@@ -105,6 +108,11 @@ cleanup() {
     if [ "$safe_to_restore" = 1 ]; then
       [ -n "$EXECUTION_ACL_BACKUP" ] && /bin/chmod -E "$EXECUTION" < "$EXECUTION_ACL_BACKUP" || restored=0
       [ -n "$LEARNING_ACL_BACKUP" ] && /bin/chmod -E "$LEARNING" < "$LEARNING_ACL_BACKUP" || restored=0
+      for entry in $SIDECAR_PROMOTED; do
+        role=${entry%%|*}
+        path=${entry#*|}
+        /bin/chmod -a "user:$role allow delete" "$path" || restored=0
+      done
     fi
     if [ "$restored" = 0 ]; then
       /bin/echo 'CRITICAL: foreground post-init ACL rollback failed; stop for root review' >&2
@@ -1179,9 +1187,12 @@ write_acl_templates() {
   ACL_EXECUTION_PRE=$TEMP_ROOT/acl-execution-pre
   ACL_EXECUTION_POST=$TEMP_ROOT/acl-execution-post
   ACL_EXECUTION_MAIN=$TEMP_ROOT/acl-execution-main
+  ACL_EXECUTION_SIDECAR_POST=$TEMP_ROOT/acl-execution-sidecar-post
   ACL_LEARNING_PRE=$TEMP_ROOT/acl-learning-pre
   ACL_LEARNING_POST=$TEMP_ROOT/acl-learning-post
   ACL_LEARNING_MAIN=$TEMP_ROOT/acl-learning-main
+  ACL_LEARNING_SIDECAR_CONTROL_ONLY=$TEMP_ROOT/acl-learning-sidecar-control-only
+  ACL_LEARNING_SIDECAR_POST=$TEMP_ROOT/acl-learning-sidecar-post
   ACL_SOCKET_PARENT=$TEMP_ROOT/acl-socket-parent
   ACL_HANDOFF=$TEMP_ROOT/acl-handoff
   ACL_READY=$TEMP_ROOT/acl-ready
@@ -1229,6 +1240,10 @@ write_acl_templates() {
     /bin/echo 'user:trading-executor inherited allow read,write,readattr'
   } > "$ACL_EXECUTION_MAIN"
   {
+    /bin/echo 'user:trading-control inherited allow read,write,delete,readattr'
+    /bin/echo 'user:trading-executor inherited allow read,write,readattr'
+  } > "$ACL_EXECUTION_SIDECAR_POST"
+  {
     /bin/echo 'user:trading-control allow list,search,add_file,add_subdirectory,readattr'
     /bin/echo 'user:trading-research allow list,search,add_file,add_subdirectory,readattr'
     /bin/echo 'user:trading-control allow read,write,readattr,file_inherit,only_inherit'
@@ -1251,6 +1266,16 @@ write_acl_templates() {
     /bin/echo 'user:trading-research inherited allow read,write,readattr'
     /bin/echo 'user:trading-executor inherited allow read,write,readattr'
   } > "$ACL_LEARNING_MAIN"
+  {
+    /bin/echo 'user:trading-control inherited allow read,write,delete,readattr'
+    /bin/echo 'user:trading-research inherited allow read,write,readattr'
+    /bin/echo 'user:trading-executor inherited allow read,write,readattr'
+  } > "$ACL_LEARNING_SIDECAR_CONTROL_ONLY"
+  {
+    /bin/echo 'user:trading-control inherited allow read,write,delete,readattr'
+    /bin/echo 'user:trading-research inherited allow read,write,delete,readattr'
+    /bin/echo 'user:trading-executor inherited allow read,write,readattr'
+  } > "$ACL_LEARNING_SIDECAR_POST"
   /bin/echo 'user:jawndiego allow search' > "$ACL_SOCKET_PARENT"
   /bin/echo 'user:trading-executor allow search' > "$ACL_HANDOFF"
   /bin/echo 'user:trading-executor allow list,search' > "$ACL_READY"
@@ -1262,6 +1287,188 @@ write_acl_templates() {
   /bin/echo 'user:trading-control allow search' > "$ACL_EVIDENCE"
   /bin/echo 'user:trading-research allow list,search' > "$ACL_QUOTE"
   /bin/echo 'user:trading-control allow search' > "$ACL_REGISTRATION"
+}
+
+acl_export_matches() {
+  local path expected actual expected_sorted actual_sorted
+  path=$1
+  expected=$2
+  actual=$TEMP_ROOT/sidecar-acl-actual
+  expected_sorted=$TEMP_ROOT/sidecar-acl-expected-sorted
+  actual_sorted=$TEMP_ROOT/sidecar-acl-actual-sorted
+  acl_export "$path" > "$actual" || die "sidecar ACL read failed: $path"
+  /usr/bin/sort "$expected" > "$expected_sorted" || die 'sidecar expected ACL sort failed'
+  /usr/bin/sort "$actual" > "$actual_sorted" || die 'sidecar actual ACL sort failed'
+  /usr/bin/cmp -s "$expected_sorted" "$actual_sorted"
+}
+
+assert_sidecar_closed() {
+  local path output error status
+  path=$1
+  output=$TEMP_ROOT/lsof-sidecar-output
+  error=$TEMP_ROOT/lsof-sidecar-error
+  : > "$output"
+  : > "$error"
+  status=0
+  /usr/sbin/lsof -n -P -- "$path" > "$output" 2> "$error" || status=$?
+  if [ "$status" = 0 ] && [ -s "$output" ]; then
+    die "initialization sidecar is open: $path"
+  fi
+  if [ "$status" != 1 ] || [ -s "$output" ] || [ -s "$error" ]; then
+    /bin/cat "$error" >&2
+    die "sidecar open-file inventory failed: $path"
+  fi
+}
+
+assert_foreground_quiescent() {
+  local output error status label grep_status processes root
+  output=$TEMP_ROOT/quiescence-output
+  error=$TEMP_ROOT/quiescence-error
+  : > "$output"
+  : > "$error"
+  status=0
+  /bin/launchctl print system > "$output" 2> "$error" || status=$?
+  if [ "$status" != 0 ] || [ -s "$error" ]; then
+    /bin/cat "$error" >&2
+    die 'launchd system-domain inventory failed'
+  fi
+  for label in \
+    com.jawndiego.trading-desk-research \
+    com.jawndiego.trading-desk-learning-mcp \
+    com.jawndiego.trading-desk-testnet-executor \
+    com.jawndiego.trading-desk-testnet-chat-broker \
+    com.jawndiego.trading-desk-testnet-chat-collector \
+    com.jawndiego.trading-desk-remote-vpn-health-collector; do
+    grep_status=0
+    /usr/bin/grep -Fq "$label" "$output" || grep_status=$?
+    [ "$grep_status" = 1 ] || {
+      [ "$grep_status" = 0 ] && die "foreground launchd job is loaded: $label"
+      die 'launchd inventory search failed'
+    }
+  done
+  processes=$(/bin/ps -wwaxo uid=,command=) || die 'process inventory failed'
+  if /usr/bin/printf '%s\n' "$processes" | /usr/bin/awk '$1 >= 450 && $1 <= 454 {found=1} END {exit(found ? 0 : 1)}'; then
+    die 'an isolated trading role process is running'
+  fi
+  for root in "$FOREGROUND_ROOT" "$CHAT_STATE"; do
+    : > "$output"
+    : > "$error"
+    status=0
+    /usr/sbin/lsof -n -P +D "$root" > "$output" 2> "$error" || status=$?
+    if [ "$status" = 0 ] && [ -s "$output" ]; then
+      die "a process has commissioned state open: $root"
+    fi
+    if [ "$status" != 1 ] || [ -s "$output" ] || [ -s "$error" ]; then
+      /bin/cat "$error" >&2
+      die "commissioned-state open-file inventory failed: $root"
+    fi
+  done
+}
+
+snapshot_sidecar_content() {
+  local output path size
+  output=$1
+  : > "$output"
+  for path in \
+    "$EXECUTION/execution.sqlite3-wal" "$EXECUTION/execution.sqlite3-shm" \
+    "$NONCE/nonce.sqlite3-wal" "$NONCE/nonce.sqlite3-shm" \
+    "$DAILY_LOSS/daily-loss.sqlite3-wal" "$DAILY_LOSS/daily-loss.sqlite3-shm" \
+    "$LEARNING/learning.sqlite3-wal" "$LEARNING/learning.sqlite3-shm" \
+    "$LEARNING/staging.sqlite3-wal" "$LEARNING/staging.sqlite3-shm"; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      assert_regular "$path" 451 451 600
+      size=$(/usr/bin/stat -f %z "$path")
+      case "$path:$size" in
+        *-wal:0|*-shm:32768) ;;
+        *) die "initialization sidecar size differs: $path" ;;
+      esac
+      assert_sidecar_closed "$path"
+      /usr/bin/stat -f '%N|device=%d|inode=%i|owner=%u|group=%g|mode=%Lp|size=%z|links=%l' "$path" >> "$output"
+      /usr/bin/openssl dgst -sha256 "$path" >> "$output"
+    fi
+  done
+}
+
+promote_initial_sidecar_acls() {
+  local before after database class path suffix size count expected_pre expected_post role present
+  before=$TEMP_ROOT/sidecars-before
+  after=$TEMP_ROOT/sidecars-after
+  count=0
+  present=
+  assert_foreground_quiescent
+  snapshot_sidecar_content "$before"
+  while IFS='|' read -r database class; do
+    [ -n "$database" ] || continue
+    [ ! -e "$database-journal" ] && [ ! -L "$database-journal" ] || die "initialization journal sidecar is unexpected: $database-journal"
+    for suffix in -wal -shm; do
+      path=$database$suffix
+      if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+        continue
+      fi
+      assert_regular "$path" 451 451 600
+      [ "$(/usr/bin/stat -f %d "$path")" = "$(/usr/bin/stat -f %d "${database%/*}")" ] || die "sidecar device differs: $path"
+      size=$(/usr/bin/stat -f %z "$path")
+      case "$suffix:$size" in
+        -wal:0|-shm:32768) ;;
+        *) die "initialization sidecar size differs: $path" ;;
+      esac
+      assert_sidecar_closed "$path"
+      present="$present $path"
+      case "$class" in
+        private)
+          assert_no_acl "$path"
+          ;;
+        execution)
+          expected_pre=$ACL_EXECUTION_MAIN
+          expected_post=$ACL_EXECUTION_SIDECAR_POST
+          if acl_export_matches "$path" "$expected_post"; then
+            assert_acl_export_exact "$path" "$expected_post"
+          elif acl_export_matches "$path" "$expected_pre"; then
+            /bin/chmod +ai 'user:trading-control allow delete' "$path"
+            SIDECAR_PROMOTED="$SIDECAR_PROMOTED trading-control|$path"
+            assert_acl_export_exact "$path" "$expected_post"
+          else
+            die "execution sidecar ACL is neither exact pre-init nor post-init: $path"
+          fi
+          ;;
+        learning)
+          expected_pre=$ACL_LEARNING_MAIN
+          expected_post=$ACL_LEARNING_SIDECAR_POST
+          if acl_export_matches "$path" "$expected_post"; then
+            assert_acl_export_exact "$path" "$expected_post"
+          elif acl_export_matches "$path" "$ACL_LEARNING_SIDECAR_CONTROL_ONLY"; then
+            /bin/chmod +ai 'user:trading-research allow delete' "$path"
+            SIDECAR_PROMOTED="$SIDECAR_PROMOTED trading-research|$path"
+            assert_acl_export_exact "$path" "$expected_post"
+          elif acl_export_matches "$path" "$expected_pre"; then
+            for role in trading-control trading-research; do
+              /bin/chmod +ai "user:$role allow delete" "$path"
+              SIDECAR_PROMOTED="$SIDECAR_PROMOTED $role|$path"
+            done
+            assert_acl_export_exact "$path" "$expected_post"
+          else
+            die "learning sidecar ACL is neither exact pre-init nor post-init: $path"
+          fi
+          ;;
+        *) die 'unknown initialization sidecar class' ;;
+      esac
+      count=$((count + 1))
+    done
+  done <<EOF
+$EXECUTION/execution.sqlite3|execution
+$NONCE/nonce.sqlite3|private
+$DAILY_LOSS/daily-loss.sqlite3|private
+$LEARNING/learning.sqlite3|learning
+$LEARNING/staging.sqlite3|learning
+EOF
+  assert_foreground_quiescent
+  snapshot_sidecar_content "$after"
+  /usr/bin/cmp -s "$before" "$after" || die 'initialization sidecar bytes, inode, owner, mode, size, or link count changed'
+  if [ -n "$present" ]; then
+    # Fixed paths contain no shell metacharacters or whitespace.
+    fullsync_paths $present "$EXECUTION" "$NONCE" "$DAILY_LOSS" "$LEARNING"
+  fi
+  /bin/echo "INITIAL_SIDECAR_ACLS_COMPLETE verified=$count"
 }
 
 render_config() {
@@ -1292,6 +1499,37 @@ render_config() {
   PROFILE_SHA256=$(/usr/bin/openssl dgst -sha256 "$PROFILE" | /usr/bin/awk '{print $2}')
 }
 
+receipt_payload() {
+  local phase
+  phase=$1
+  /bin/echo 'schema_version=1'
+  /bin/echo "phase=$phase"
+  /bin/echo "config_hash=$CONFIG_HASH"
+  /bin/echo "profile_sha256=$PROFILE_SHA256"
+  /bin/echo "config_sha256=$CONFIG_SHA256"
+  /bin/echo "chat_store_init_helper_sha256=$CHAT_STORE_INIT_HELPER_SHA256"
+  /bin/echo "state_root=$FOREGROUND_ROOT"
+  /bin/echo 'apfs_quota_required=false'
+  /bin/echo 'launchd_installed=false'
+  /bin/echo 'credential_loaded=false'
+  /bin/echo 'network_changed=false'
+  /bin/echo 'venue_write_attempted=false'
+  /bin/echo 'mainnet_authorized=false'
+}
+
+assert_receipt_absent_or_exact() {
+  local target phase expected
+  target=$1
+  phase=$2
+  expected=$TEMP_ROOT/$phase.preflight-receipt
+  receipt_payload "$phase" > "$expected"
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    assert_regular "$target" 0 0 400
+    assert_no_acl "$target"
+    /usr/bin/cmp -s "$target" "$expected" || die "existing receipt differs before mutation: $target"
+  fi
+}
+
 write_receipt() {
   local target phase mode pending
   target=$1
@@ -1299,21 +1537,7 @@ write_receipt() {
   mode=${3-publish}
   case "$mode" in publish|verify-only) ;; *) die 'receipt mode is invalid' ;; esac
   pending=$TEMP_ROOT/$phase.receipt
-  {
-    /bin/echo 'schema_version=1'
-    /bin/echo "phase=$phase"
-    /bin/echo "config_hash=$CONFIG_HASH"
-    /bin/echo "profile_sha256=$PROFILE_SHA256"
-    /bin/echo "config_sha256=$CONFIG_SHA256"
-    /bin/echo "chat_store_init_helper_sha256=$CHAT_STORE_INIT_HELPER_SHA256"
-    /bin/echo "state_root=$FOREGROUND_ROOT"
-    /bin/echo 'apfs_quota_required=false'
-    /bin/echo 'launchd_installed=false'
-    /bin/echo 'credential_loaded=false'
-    /bin/echo 'network_changed=false'
-    /bin/echo 'venue_write_attempted=false'
-    /bin/echo 'mainnet_authorized=false'
-  } > "$pending"
+  receipt_payload "$phase" > "$pending"
   /usr/sbin/chown root:wheel "$pending"
   /bin/chmod 0400 "$pending"
   fullsync_paths "$pending"
@@ -1469,7 +1693,7 @@ run_as() {
   /usr/bin/sudo -n -u "$identity" -- "$@"
 }
 
-verify_initialized_layout() {
+verify_initialized_layout_files() {
   local path suffix
   for path in "$EXECUTION/execution.sqlite3" "$NONCE/nonce.sqlite3" \
     "$DAILY_LOSS/daily-loss.sqlite3" "$LEARNING/learning.sqlite3" \
@@ -1492,18 +1716,14 @@ verify_initialized_layout() {
       assert_no_acl "$path"
     fi
   done
+}
+
+verify_initialized_layout() {
+  verify_initialized_layout_files
   run_as trading-control /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
     "$EXECUTOR_PYTHON" -B -I -c \
     'from pathlib import Path; from trading_harness.testnet_chat_approval_store import TestnetChatApprovalStore; TestnetChatApprovalStore(Path("/private/var/db/trading-desk/control-private/chat-approval/chat-approval.sqlite3"), must_exist=True)'
-  assert_regular "$CHAT_DATABASE" 452 452 600
-  assert_no_acl "$CHAT_DATABASE"
-  for suffix in -wal -shm -journal; do
-    path=$CHAT_DATABASE$suffix
-    if [ -e "$path" ] || [ -L "$path" ]; then
-      assert_regular "$path" 452 452 600
-      assert_no_acl "$path"
-    fi
-  done
+  verify_initialized_layout_files
 }
 
 apply_postinit() {
@@ -1554,6 +1774,8 @@ apply_postinit() {
     die 'learning parent gained delete_child'
   fi
 
+  promote_initial_sidecar_acls
+
   exec_probe=$EXECUTION/.foreground-postinit-sidecar
   learn_control_probe=$LEARNING/.foreground-postinit-control-sidecar
   learn_research_probe=$LEARNING/.foreground-postinit-research-sidecar
@@ -1574,6 +1796,40 @@ apply_postinit() {
   POSTINIT_COMMITTED=1
   /bin/echo "POSTINIT_COMPLETE config_hash=$CONFIG_HASH"
   /bin/echo 'Foreground paths are commissioned; no service, credential, network, or venue action was performed.'
+}
+
+repair_initial_sidecar_acls_v1() {
+  local mains_before mains_after
+  assert_root_apply
+  assert_fixed_identities
+  acquire_lock
+  write_acl_templates
+  assert_system_db_ancestors
+  assert_directory /etc/trading-desk 0 0 700
+  assert_acl_exact /etc/trading-desk "$ACL_CONFIG_PARENT"
+  render_config
+  write_receipt "$PREINIT_RECEIPT" preinit verify-only
+  write_receipt "$POSTINIT_RECEIPT" postinit verify-only
+  assert_receipt_absent_or_exact "$SIDECAR_ACL_RECEIPT" sidecar-acl-repair-v1
+  assert_directory "$EXECUTION" 451 451 700
+  assert_directory "$NONCE" 451 451 700
+  assert_directory "$DAILY_LOSS" 451 451 700
+  assert_directory "$LEARNING" 451 451 700
+  assert_acl_exact "$EXECUTION" "$ACL_EXECUTION_POST"
+  assert_acl_exact "$LEARNING" "$ACL_LEARNING_POST"
+  assert_no_acl "$NONCE"
+  assert_no_acl "$DAILY_LOSS"
+  verify_initialized_layout_files
+  mains_before=$TEMP_ROOT/sidecar-repair-mains-before
+  mains_after=$TEMP_ROOT/sidecar-repair-mains-after
+  snapshot_mains "$mains_before"
+  promote_initial_sidecar_acls
+  verify_initialized_layout_files
+  snapshot_mains "$mains_after"
+  /usr/bin/cmp -s "$mains_before" "$mains_after" || die 'authoritative database changed during sidecar ACL repair'
+  write_receipt "$SIDECAR_ACL_RECEIPT" sidecar-acl-repair-v1
+  /bin/echo "SIDECAR_ACL_REPAIR_COMPLETE config_hash=$CONFIG_HASH"
+  /bin/echo 'Only exact retained empty initialization sidecar ACLs changed; database bytes and venue state were untouched.'
 }
 
 case "${1-plan}" in
@@ -1604,6 +1860,10 @@ case "${1-plan}" in
   --apply-postinit)
     [ "$#" -eq 1 ] || die '--apply-postinit takes no additional arguments'
     apply_postinit
+    ;;
+  --repair-initial-sidecar-acls-v1)
+    [ "$#" -eq 1 ] || die '--repair-initial-sidecar-acls-v1 takes no additional arguments'
+    repair_initial_sidecar_acls_v1
     ;;
   *)
     die 'unknown phase; run with no arguments for the plan'

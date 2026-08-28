@@ -127,12 +127,23 @@ key, HMAC, endpoint, or free filesystem path.
    ```
 7. Run the post-init phase. It verifies every authoritative main database and
    the private chat database, snapshots their
-   bytes/inodes/modes/owners/links/ACLs, changes only future sidecar inheritance
-   on the execution and learning parents, probes cross-role sidecar removal,
-   and proves the mains did not change:
+   bytes/inodes/modes/owners/links/ACLs, changes future sidecar inheritance on
+   the execution and learning parents, adds `delete` only to exact closed,
+   empty-WAL initialization sidecars, probes cross-role sidecar removal, and
+   proves the mains and sidecar bytes did not change:
 
    ```sh
    sudo /absolute/sealed/path/06-commission-foreground-testnet.sh --apply-postinit
+   ```
+
+   A host commissioned by the earlier post-init phase may retain its exact
+   zero-byte WAL and 32 KiB SHM files with pre-init inheritance. After reviewing
+   those fixed paths, use the separately sealed resumable repair. It changes
+   only the permitted inherited `delete` bits and writes a receipt; it never
+   deletes a sidecar or opens SQLite:
+
+   ```sh
+   sudo /absolute/sealed/path/06-commission-foreground-testnet.sh --repair-initial-sidecar-acls-v1
    ```
 
 8. Only after the post-init receipt exists, run collectors, broker, bridge, and

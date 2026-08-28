@@ -224,6 +224,7 @@ class ForegroundCommissionerTests(unittest.TestCase):
         self.assertIn("--apply-router-identity", plan.stdout)
         self.assertIn("--repair-collector-receipt-v3", plan.stdout)
         self.assertIn("--repair-router-birth-marker-v2", plan.stdout)
+        self.assertIn("--repair-initial-sidecar-acls-v1", plan.stdout)
         self.assertIn("No phase runs executor init", plan.stdout)
 
     def test_acl_order_check_is_internal_fail_closed_and_executable(self) -> None:
@@ -589,7 +590,8 @@ class ForegroundCommissionerTests(unittest.TestCase):
         source = COMMISSIONER.read_text(encoding="utf-8")
         for forbidden in (
             "diskutil apfs",
-            "launchctl",
+            "launchctl bootstrap",
+            "launchctl load",
             "security add-generic-password",
             "curl ",
             "wget ",
@@ -612,6 +614,66 @@ class ForegroundCommissionerTests(unittest.TestCase):
             "user:trading-control inherited allow read,write,readattr",
             source,
         )
+        sidecar_repair = source[
+            source.index("repair_initial_sidecar_acls_v1()") : source.index(
+                '\ncase "${1-plan}" in'
+            )
+        ]
+        for required in (
+            "write_receipt \"$PREINIT_RECEIPT\" preinit verify-only",
+            "write_receipt \"$POSTINIT_RECEIPT\" postinit verify-only",
+            "promote_initial_sidecar_acls",
+            "SIDECAR_ACL_RECEIPT",
+            "SIDECAR_ACL_REPAIR_COMPLETE",
+            "verify_initialized_layout_files",
+        ):
+            self.assertIn(required, sidecar_repair)
+        self.assertNotIn("verify_initialized_layout\n", sidecar_repair)
+        self.assertLess(
+            sidecar_repair.index("assert_receipt_absent_or_exact"),
+            sidecar_repair.index("promote_initial_sidecar_acls"),
+        )
+        promoter = source[
+            source.index("promote_initial_sidecar_acls()") : source.index(
+                "render_config()"
+            )
+        ]
+        for required in (
+            "-wal:0|-shm:32768",
+            "assert_sidecar_closed",
+            "assert_foreground_quiescent",
+            "user:trading-control allow delete",
+            "user:$role allow delete",
+            "ACL_LEARNING_SIDECAR_CONTROL_ONLY",
+            'cmp -s "$before" "$after"',
+            "initialization sidecar bytes, inode, owner, mode, size, or link count changed",
+        ):
+            self.assertIn(required, promoter)
+        self.assertNotIn("/bin/rm", promoter)
+        quiescence = source[
+            source.index("assert_foreground_quiescent()") : source.index(
+                "snapshot_sidecar_content()"
+            )
+        ]
+        for required in (
+            "launchctl print system",
+            "-wwaxo uid=,command=",
+            "$1 >= 450 && $1 <= 454",
+            "/usr/sbin/lsof -n -P +D",
+            '"$FOREGROUND_ROOT"',
+            '"$CHAT_STATE"',
+        ):
+            self.assertIn(required, quiescence)
+        cleanup = source[source.index("cleanup()") : source.index("trap cleanup EXIT")]
+        self.assertIn('/bin/chmod -a "user:$role allow delete" "$path"', cleanup)
+        postinit = source[source.index("apply_postinit()") : source.index("repair_initial_sidecar_acls_v1()")]
+        self.assertLess(
+            postinit.index("POSTINIT_CHANGED=1"),
+            postinit.index("promote_initial_sidecar_acls"),
+        )
+        self.assertIn('snapshot_mains "$mains_before"', sidecar_repair)
+        self.assertIn('snapshot_mains "$mains_after"', sidecar_repair)
+        self.assertIn('cmp -s "$mains_before" "$mains_after"', sidecar_repair)
         cleanup = source[source.index("cleanup()") : source.index("trap cleanup EXIT")]
         self.assertIn('$TEMP_ROOT/acl-normalization-probe', cleanup)
         self.assertLess(
