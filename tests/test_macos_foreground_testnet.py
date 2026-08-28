@@ -218,6 +218,7 @@ class ForegroundCommissionerTests(unittest.TestCase):
         self.assertIn("no identity", plan.stdout)
         self.assertIn("--apply-router-identity", plan.stdout)
         self.assertIn("--repair-collector-receipt-v3", plan.stdout)
+        self.assertIn("--repair-router-birth-marker-v2", plan.stdout)
         self.assertIn("No phase runs executor init", plan.stdout)
 
     def test_fixed_layout_matches_runtime_validators(self) -> None:
@@ -467,6 +468,7 @@ class ForegroundCommissionerTests(unittest.TestCase):
             "identity_receipt_payload",
             "assert_identity_receipt_exact",
             "write_identity_receipt",
+            "birth_marker_payload",
             "write_or_verify_birth_marker",
             "prepare_new_identity_birth",
             "assert_identity",
@@ -494,6 +496,32 @@ class ForegroundCommissionerTests(unittest.TestCase):
             self.assertIn(required, repair)
         self.assertLess(repair.index("buggy_receipt"), repair.index('/bin/mv "$COLLECTOR_IDENTITY_RECEIPT"'))
         self.assertNotIn("/bin/rm", repair)
+
+        router_repair = source[
+            source.index("repair_router_birth_marker_v2()") : source.index(
+                "apply_router_identity()"
+            )
+        ]
+        for required in (
+            "ROUTER_BIRTH_BUG_QUARANTINE",
+            'birth_marker_payload router trading-router-operator 0 0 "$LIMA_HOME"',
+            "exact retained uid0/gid0 bug",
+            'write_or_verify_birth_marker "$ROUTER_BIRTH_MARKER" router trading-router-operator 454 454 "$LIMA_HOME"',
+            "ROUTER_BIRTH_MARKER_REPAIR_COMPLETE",
+            "assert_directory_name_absent /Users trading-router-operator",
+            "assert_directory_id_unused /Users UniqueID 454",
+            "router identity receipt exists while live router identity is absent",
+        ):
+            self.assertIn(required, router_repair)
+        self.assertLess(
+            router_repair.index("buggy_marker"),
+            router_repair.index('/bin/mv "$ROUTER_BIRTH_MARKER"'),
+        )
+        self.assertLess(
+            router_repair.index("router identity receipt exists"),
+            router_repair.index('/bin/mv "$ROUTER_BIRTH_MARKER"'),
+        )
+        self.assertNotIn("/bin/rm", router_repair)
 
     def test_no_apfs_launchd_secret_network_init_or_venue_apply_surface(self) -> None:
         source = COMMISSIONER.read_text(encoding="utf-8")

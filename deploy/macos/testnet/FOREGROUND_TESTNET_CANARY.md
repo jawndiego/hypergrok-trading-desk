@@ -84,6 +84,14 @@ key, HMAC, endpoint, or free filesystem path.
    sudo /absolute/sealed/path/06-commission-foreground-testnet.sh --repair-collector-receipt-v3
    ```
 
+   The same pre-fix run could retain an exact router birth marker with
+   `uid=0`/`gid=0` before creating any UID/GID-454 record. Repair only that
+   byte-exact marker before resuming router identity creation:
+
+   ```sh
+   sudo /absolute/sealed/path/06-commission-foreground-testnet.sh --repair-router-birth-marker-v2
+   ```
+
 3. Run the separate router-operator identity phase. It creates or exactly
    adopts only disabled UID/GID 454 and its private Lima home; it does not
    create a VM or change networking:

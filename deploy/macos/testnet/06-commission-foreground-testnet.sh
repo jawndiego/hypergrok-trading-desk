@@ -15,6 +15,7 @@ ROUTER_IDENTITY_RECEIPT=/etc/trading-desk/testnet-foreground-router-identity.rec
 COLLECTOR_BIRTH_MARKER=/etc/trading-desk/.testnet-foreground-collector-birth-v2
 ROUTER_BIRTH_MARKER=/etc/trading-desk/.testnet-foreground-router-birth-v2
 COLLECTOR_RECEIPT_BUG_QUARANTINE=/etc/trading-desk/testnet-foreground-collector-identity.receipt.uid0-bug-79cf0db
+ROUTER_BIRTH_BUG_QUARANTINE=/etc/trading-desk/.testnet-foreground-router-birth-v2.uid0-bug-79cf0db
 
 DB_ANCESTOR=/private/var/db
 FOREGROUND_ROOT=/private/var/db/trading-desk-testnet-foreground
@@ -72,6 +73,7 @@ plan() {
   /bin/echo 'Foreground TESTNET canary phases:'
   /bin/echo '  --apply-identity  create/adopt only exact disabled UID/GID 453'
   /bin/echo '  --repair-collector-receipt-v3  repair only the exact retained uid0/gid0 receipt bug'
+  /bin/echo '  --repair-router-birth-marker-v2  repair only the exact retained uid0/gid0 router marker bug'
   /bin/echo '  --apply-router-identity  create/adopt only exact disabled UID/GID 454 and its private Lima home'
   /bin/echo '  --apply-preinit   render public config and create empty final-path layout/ACLs'
   /bin/echo '  --apply-postinit  verify initialized databases and convert only future sidecar ACL inheritance'
@@ -337,17 +339,13 @@ write_identity_receipt() {
   fullsync_paths "$target" /etc/trading-desk
 }
 
-write_or_verify_birth_marker() {
-  local target role account uid gid home pending
-  target=$1
-  role=$2
-  account=$3
-  uid=$4
-  gid=$5
-  home=$6
-  assert_directory /etc/trading-desk 0 0 700
-  pending=$TEMP_ROOT/$role-birth-marker
-  {
+birth_marker_payload() {
+    local role account uid gid home
+    role=$1
+    account=$2
+    uid=$3
+    gid=$4
+    home=$5
     /bin/echo 'schema_version=2'
     /bin/echo 'kind=identity-birth-marker'
     /bin/echo "role=$role"
@@ -362,7 +360,19 @@ write_or_verify_birth_marker() {
     /bin/echo 'network_changed=false'
     /bin/echo 'service_started=false'
     /bin/echo 'venue_write_attempted=false'
-  } > "$pending"
+}
+
+write_or_verify_birth_marker() {
+  local target role account uid gid home pending
+  target=$1
+  role=$2
+  account=$3
+  uid=$4
+  gid=$5
+  home=$6
+  assert_directory /etc/trading-desk 0 0 700
+  pending=$TEMP_ROOT/$role-birth-marker
+  birth_marker_payload "$role" "$account" "$uid" "$gid" "$home" > "$pending"
   /usr/sbin/chown root:wheel "$pending"
   /bin/chmod 0400 "$pending"
   fullsync_paths "$pending"
@@ -1048,6 +1058,51 @@ repair_collector_receipt_v3() {
   /bin/echo "COLLECTOR_RECEIPT_REPAIR_COMPLETE repaired=$COLLECTOR_IDENTITY_RECEIPT retained=$COLLECTOR_RECEIPT_BUG_QUARANTINE"
 }
 
+repair_router_birth_marker_v2() {
+  local actual_marker correct_marker buggy_marker quarantined_marker
+  assert_root_apply
+  assert_platform_group_baseline
+  assert_system_db_ancestors
+  acquire_lock
+  assert_directory /etc/trading-desk 0 0 700
+  assert_directory_name_absent /Users trading-router-operator
+  assert_directory_name_absent /Groups trading-router-operator
+  assert_directory_id_unused /Users UniqueID 454
+  assert_directory_id_unused /Groups PrimaryGroupID 454
+  [ ! -e "$ROUTER_IDENTITY_RECEIPT" ] && [ ! -L "$ROUTER_IDENTITY_RECEIPT" ] || \
+    die 'router identity receipt exists while live router identity is absent'
+  [ ! -e "$LIMA_HOME" ] && [ ! -L "$LIMA_HOME" ] || die 'router home exists before marker repair'
+  correct_marker=$(birth_marker_payload router trading-router-operator 454 454 "$LIMA_HOME")
+  buggy_marker=$(birth_marker_payload router trading-router-operator 0 0 "$LIMA_HOME")
+
+  if [ -e "$ROUTER_BIRTH_MARKER" ] || [ -L "$ROUTER_BIRTH_MARKER" ]; then
+    assert_regular "$ROUTER_BIRTH_MARKER" 0 0 400
+    assert_no_acl "$ROUTER_BIRTH_MARKER"
+    actual_marker=$(/bin/cat "$ROUTER_BIRTH_MARKER") || die 'router birth marker cannot be read'
+    if [ "$actual_marker" = "$correct_marker" ]; then
+      /bin/echo 'ROUTER_BIRTH_MARKER_REPAIR_COMPLETE marker already exact'
+      return 0
+    fi
+    [ "$actual_marker" = "$buggy_marker" ] || die 'router birth marker is not the exact retained uid0/gid0 bug'
+    [ ! -e "$ROUTER_BIRTH_BUG_QUARANTINE" ] && [ ! -L "$ROUTER_BIRTH_BUG_QUARANTINE" ] || \
+      die 'router marker bug quarantine already exists while source marker remains'
+    /bin/mv "$ROUTER_BIRTH_MARKER" "$ROUTER_BIRTH_BUG_QUARANTINE"
+    fullsync_paths "$ROUTER_BIRTH_BUG_QUARANTINE" /etc/trading-desk
+  else
+    [ -e "$ROUTER_BIRTH_BUG_QUARANTINE" ] && [ ! -L "$ROUTER_BIRTH_BUG_QUARANTINE" ] || \
+      die 'router birth marker and exact bug quarantine are both absent'
+  fi
+
+  assert_regular "$ROUTER_BIRTH_BUG_QUARANTINE" 0 0 400
+  assert_no_acl "$ROUTER_BIRTH_BUG_QUARANTINE"
+  quarantined_marker=$(/bin/cat "$ROUTER_BIRTH_BUG_QUARANTINE") || die 'router marker bug quarantine cannot be read'
+  [ "$quarantined_marker" = "$buggy_marker" ] || die 'router marker bug quarantine differs'
+  write_or_verify_birth_marker "$ROUTER_BIRTH_MARKER" router trading-router-operator 454 454 "$LIMA_HOME"
+  actual_marker=$(/bin/cat "$ROUTER_BIRTH_MARKER") || die 'repaired router birth marker cannot be read'
+  [ "$actual_marker" = "$correct_marker" ] || die 'repaired router birth marker differs'
+  /bin/echo "ROUTER_BIRTH_MARKER_REPAIR_COMPLETE repaired=$ROUTER_BIRTH_MARKER retained=$ROUTER_BIRTH_BUG_QUARANTINE"
+}
+
 apply_router_identity() {
   assert_root_apply
   assert_identity trading-research 450 450
@@ -1513,6 +1568,10 @@ case "${1-plan}" in
   --repair-collector-receipt-v3)
     [ "$#" -eq 1 ] || die '--repair-collector-receipt-v3 takes no additional arguments'
     repair_collector_receipt_v3
+    ;;
+  --repair-router-birth-marker-v2)
+    [ "$#" -eq 1 ] || die '--repair-router-birth-marker-v2 takes no additional arguments'
+    repair_router_birth_marker_v2
     ;;
   --apply-preinit)
     [ "$#" -eq 1 ] || die '--apply-preinit takes no additional arguments'
