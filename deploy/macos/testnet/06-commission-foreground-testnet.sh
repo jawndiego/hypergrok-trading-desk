@@ -368,12 +368,8 @@ prepare_new_identity_birth() {
   marker_preexisted=1
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     marker_preexisted=0
-    if /usr/bin/dscl . -read "/Users/$account" >/dev/null 2>&1; then
-      die "unmarked unresolved user record exists: $account"
-    fi
-    if /usr/bin/dscl . -read "/Groups/$account" >/dev/null 2>&1; then
-      die "unmarked unresolved group record exists: $account"
-    fi
+    assert_directory_name_absent /Users "$account"
+    assert_directory_name_absent /Groups "$account"
     assert_directory_id_unused /Users UniqueID "$uid"
     assert_directory_id_unused /Groups PrimaryGroupID "$gid"
   fi
@@ -675,13 +671,36 @@ assert_primary_group_has_no_members() {
   [ -z "$nested_group_lines" ] || die "$member_group group has nested groups"
 }
 
+directory_name_inventory() {
+  name_node=$1
+  raw_names=$(/usr/bin/dscl . -list "$name_node" 2>/dev/null) || \
+    die "$name_node name inventory failed"
+  canonical_names=$(/usr/bin/printf '%s\n' "$raw_names" | /usr/bin/awk '
+NF != 1 || seen[$1]++ { failed=1; exit 1 }
+{ print $1 }
+END { if (failed || NR < 1) exit 1 }
+') || die "$name_node name inventory is malformed or non-unique"
+  /usr/bin/printf '%s\n' "$canonical_names"
+}
+
+assert_directory_name_absent() {
+  name_node=$1
+  expected_absent_name=$2
+  name_inventory=$(directory_name_inventory "$name_node") || \
+    die "$name_node name inventory validation failed"
+  if /usr/bin/printf '%s\n' "$name_inventory" | \
+      /usr/bin/awk -v account="$expected_absent_name" '$1 == account {found=1} END {exit(found ? 0 : 1)}'; then
+    die "unmarked unresolved record exists: $name_node/$expected_absent_name"
+  fi
+}
+
 assert_resumable_identity_prefix() {
   prefix_account=$1
   prefix_uid=$2
   prefix_gid=$3
   prefix_home=$4
 
-  group_names=$(/usr/bin/dscl . -list /Groups 2>/dev/null) || \
+  group_names=$(directory_name_inventory /Groups) || \
     die 'group-name inventory failed during identity resume'
   group_name_count=$(/usr/bin/printf '%s\n' "$group_names" | \
     /usr/bin/awk -v account="$prefix_account" '$1 == account && NF == 1 {count += 1} END {print count + 0}')
@@ -698,7 +717,7 @@ assert_resumable_identity_prefix() {
     assert_generated_uid_unique /Groups "$prefix_account" >/dev/null
   fi
 
-  user_names=$(/usr/bin/dscl . -list /Users 2>/dev/null) || \
+  user_names=$(directory_name_inventory /Users) || \
     die 'user-name inventory failed during identity resume'
   user_name_count=$(/usr/bin/printf '%s\n' "$user_names" | \
     /usr/bin/awk -v account="$prefix_account" '$1 == account && NF == 1 {count += 1} END {print count + 0}')
