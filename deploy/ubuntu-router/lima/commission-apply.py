@@ -2633,6 +2633,33 @@ def _drop_preexec(uid: int, gid: int) -> Any:
     return drop
 
 
+def _compatible_validation_plan(
+    controller_dir: Path,
+    *,
+    commissioned_networks_sha256: str,
+) -> tuple[bytes, str]:
+    controller_manifest = _read_json(
+        controller_dir / "bundle-manifest.json", "validation controller manifest"
+    )
+    validation_plan = controller_dir / "lima.yaml"
+    validation_plan_sha256 = controller_manifest["files"]["lima.yaml"]
+    validation_networks_sha256 = controller_manifest["files"]["networks.yaml"]
+    if validation_networks_sha256 != commissioned_networks_sha256:
+        raise CommissionError(
+            "validation controller is incompatible with commissioned Lima network state"
+        )
+    validation_plan_bytes = _read_fd_bound_file(
+        validation_plan,
+        owner_uid=0,
+        owner_gid=0,
+        mode=0o600,
+        maximum_size=1024 * 1024,
+    )
+    if _sha256_bytes(validation_plan_bytes) != validation_plan_sha256:
+        raise CommissionError("validation controller Lima plan differs")
+    return validation_plan_bytes, validation_plan_sha256
+
+
 def _validate_fill(args: argparse.Namespace) -> int:
     apply_lock, commission_lock, vm_spec = _locks()
     if not apply_lock["phases"]["validate_fill_apply_enabled"]:
@@ -2650,16 +2677,16 @@ def _validate_fill(args: argparse.Namespace) -> int:
     host_receipt = _root_phase_receipt(
         state, "host-tools", lima_receipt["host_tools_receipt_sha256"]
     )
-    plan = Path(apply_lock["paths"]["lima_plan"])
+    installed_plan = Path(apply_lock["paths"]["lima_plan"])
     if (
-        host_receipt.get("lima_plan_path") != str(plan)
+        host_receipt.get("lima_plan_path") != str(installed_plan)
         or host_receipt.get("lima_plan_sha256") is None
     ):
         raise CommissionError("host-tools receipt lacks the immutable Lima plan")
     _assert_real_path(
-        plan, kind="file", owner_uid=0, owner_gid=0, mode=0o444
+        installed_plan, kind="file", owner_uid=0, owner_gid=0, mode=0o444
     )
-    if _sha256_file(plan) != host_receipt["lima_plan_sha256"]:
+    if _sha256_file(installed_plan) != host_receipt["lima_plan_sha256"]:
         raise CommissionError("immutable Lima plan differs from host-tools receipt")
     media_receipt = _root_phase_receipt(
         state, "media", host_receipt["media_receipt_sha256"]
@@ -2670,6 +2697,10 @@ def _validate_fill(args: argparse.Namespace) -> int:
         commission_lock,
         expected_installing_sha256=media_receipt["installing_marker_sha256"],
         expected_ready_sha256=media_receipt["ready_marker_sha256"],
+    )
+    validation_plan_bytes, validation_plan_sha256 = _compatible_validation_plan(
+        SCRIPT_DIR,
+        commissioned_networks_sha256=lima_receipt["networks_yaml_sha256"],
     )
     lima_home = Path(apply_lock["paths"]["lima_home"])
     _verify_lima_home(lima_home, apply_lock, lima_receipt["networks_yaml_sha256"])
@@ -2688,8 +2719,8 @@ def _validate_fill(args: argparse.Namespace) -> int:
         "PATH": f"{apply_lock['paths']['lima_install']}/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     }
     result = subprocess.run(
-        [str(limactl), "validate", "--fill", str(plan)],
-        stdin=subprocess.DEVNULL,
+        [str(limactl), "validate", "--fill", "/dev/fd/0"],
+        input=validation_plan_bytes,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=environment,
@@ -2718,6 +2749,10 @@ def _validate_fill(args: argparse.Namespace) -> int:
         "runtime_receipt_sha256": runtime_receipt_sha,
         "router_identity_receipt": identity_receipt,
         "bundle_manifest_sha256": lima_receipt["bundle_manifest_sha256"],
+        "validation_controller_manifest_sha256": (
+            args.expected_controller_manifest_sha256
+        ),
+        "validation_plan_sha256": validation_plan_sha256,
         "effective_config_sha256": observed_digest,
         "effective_config_evidence": str(observation),
         "vm_created": False,

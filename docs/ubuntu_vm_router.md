@@ -204,8 +204,10 @@ writable Lima state. The enabled host-only sequence is:
    socket_vmnet group is the exact `trading-router-operator` primary group, not
    `admin` or `everyone`; no sudoers rule or daemon is installed by this phase.
 6. `apply-validate-fill` drops to UID/GID 454 with an empty bounded environment,
-   reads only the immutable root-owned plan, and retains the exact effective
-   configuration digest.
+   reads only the immutable root-owned plan through an inherited pipe, and
+   retains the exact effective configuration digest. The plan fixes
+   `user.comment: "Trading Desk Router Operator"`; Lima therefore cannot fill
+   this field from the invoking host account's mutable GECOS value.
 
 The launcher proves its canonical root-owned/no-ACL controller chain and checks
 the sealed runtime's owner, write bits, ACLs, symlink containment, interpreter
@@ -218,6 +220,14 @@ silently replaced. A host-tool retry permits only retained quarantine names
 bound by the exact transaction and completed quarantine receipt; it never
 adopts or removes them. The VM manifest still has global/VM apply false while its
 narrow host-preparation authority is true.
+
+A validate-only replacement controller may reuse existing exact phase 01–03
+receipts without reinstalling media, tools or Lima state. It must reverify that
+the new controller's `networks.yaml` hash equals the commissioned Lima-home
+receipt, keep the previously installed plan immutable, and feed its own
+manifest-bound plan to `limactl` through `/dev/fd/0`. The validate receipt binds
+both the earlier commissioning manifest and the replacement validation
+controller/plan hashes.
 
 The stop line remains before VM creation. The locked YAML still uses an HTTPS
 image URL instead of a reviewed local-image import, socket_vmnet sudoers and

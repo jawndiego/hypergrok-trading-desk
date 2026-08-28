@@ -10,7 +10,7 @@
       "sha256": null,
       "state": "absent"
     },
-    "effective_config_sha256": "44a93c5ffe995d717296e0c90574bc3252c33020f6811824f29dc1de6016f0f9",
+    "effective_config_sha256": "d26df3a6588c2abce4f59a2385046d85dbdbdb19ec8698004e6fcffd00ef2286",
     "override_yaml": {
       "sha256": null,
       "state": "absent"

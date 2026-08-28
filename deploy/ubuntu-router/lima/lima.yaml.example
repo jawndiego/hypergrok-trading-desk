@@ -51,6 +51,7 @@ networks:
     metric: 200
 user:
   name: "routeradmin"
+  comment: "Trading Desk Router Operator"
   uid: 1000
   home: "/var/lib/trading-desk-router"
   shell: "/bin/bash"

@@ -188,6 +188,47 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
         ):
             namespace["_assert_runtime_receipt"](args, apply_lock)
 
+    def test_validation_controller_can_reuse_compatible_prior_receipts(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_cross_controller_test"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            controller = Path(directory).resolve()
+            plan = b'user:\n  comment: "Trading Desk Router Operator"\n'
+            plan_path = controller / "lima.yaml"
+            plan_path.write_bytes(plan)
+            plan_path.chmod(0o600)
+            plan_sha256 = hashlib.sha256(plan).hexdigest()
+            networks_sha256 = "a" * 64
+            write_json(
+                controller / "bundle-manifest.json",
+                {
+                    "files": {
+                        "lima.yaml": plan_sha256,
+                        "networks.yaml": networks_sha256,
+                    }
+                },
+            )
+            with mock.patch.dict(
+                namespace,
+                {"_read_fd_bound_file": lambda path, **_kwargs: path.read_bytes()},
+            ):
+                observed, observed_sha256 = namespace[
+                    "_compatible_validation_plan"
+                ](
+                    controller,
+                    commissioned_networks_sha256=networks_sha256,
+                )
+                self.assertEqual(plan, observed)
+                self.assertEqual(plan_sha256, observed_sha256)
+                with self.assertRaisesRegex(
+                    namespace["CommissionError"], "incompatible"
+                ):
+                    namespace["_compatible_validation_plan"](
+                        controller,
+                        commissioned_networks_sha256="b" * 64,
+                    )
+
     def test_router_identity_receipt_is_exact_and_live_bound(self) -> None:
         namespace = load_script_namespace(
             COMMISSION_APPLY_PATH, "commission_apply_router_identity_test"
@@ -1118,7 +1159,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                 manifest["commission_contract"],
             )
             self.assertEqual(
-                "44a93c5ffe995d717296e0c90574bc3252c33020f6811824f29dc1de6016f0f9",
+                "d26df3a6588c2abce4f59a2385046d85dbdbdb19ec8698004e6fcffd00ef2286",
                 manifest["host_contract"]["effective_config_sha256"],
             )
             self.assertEqual(
@@ -1156,6 +1197,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                 'minimumLimaVersion: "2.2.0"',
                 'vmType: "vz"',
                 'arch: "aarch64"',
+                'comment: "Trading Desk Router Operator"',
                 "plain: true",
                 "mounts: []",
                 "provision: []",
@@ -1327,7 +1369,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
             )
             self.assertIn("lima_home_required_mode=0700", host_plan.stdout)
             self.assertIn(
-                "effective_config_sha256=44a93c5ffe995d717296e0c90574bc3252c33020f6811824f29dc1de6016f0f9",
+                "effective_config_sha256=d26df3a6588c2abce4f59a2385046d85dbdbdb19ec8698004e6fcffd00ef2286",
                 host_plan.stdout,
             )
             preflight_text = preflight.read_text(encoding="utf-8")
