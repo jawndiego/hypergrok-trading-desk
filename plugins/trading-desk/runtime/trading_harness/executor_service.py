@@ -38,6 +38,7 @@ from .execution_store import ExecutionStore
 from .execution_work_scanner import ExecutionWorkScanner
 from .executor_config import ExecutorConfig
 from .executor_state_binding import (
+    configured_state_roles,
     state_file_size_limit as _state_file_size_limit,
     verified_state_database_trust,
     verify_state_database_binding as _verify_state_database_binding,
@@ -267,7 +268,7 @@ def _validate_state_database_layout(
         raise ValidationError("executor state directory has an invalid owner")
     try:
         entries = tuple(database.parent.iterdir())
-    except OSError as error:
+    except (OSError, RuntimeError) as error:
         raise ValidationError("executor state directory cannot be inspected") from error
     if any(
         entry.name.startswith(_VERIFICATION_DIRECTORY_PREFIXES)
@@ -313,6 +314,51 @@ def _validate_state_database_layout(
         raise ValidationError("executor state initialization requires empty paths")
 
 
+def _validate_physical_state_separation(
+    config: ExecutorConfig,
+    selected_files: tuple[Path, ...],
+    socket_parent: Path,
+    *,
+    existing: bool,
+) -> None:
+    roles = configured_state_roles(config)
+    parent_paths = {"control_socket": socket_parent}
+    for database in selected_files:
+        role = roles[database]
+        parent_paths["learning" if role in {"learning", "staging"} else role] = (
+            database.parent
+        )
+    parent_identities: dict[tuple[int, int], str] = {}
+    for role, path in parent_paths.items():
+        try:
+            metadata = path.lstat()
+        except OSError as error:
+            raise ValidationError("executor state directory is unavailable") from error
+        identity = int(metadata.st_dev), int(metadata.st_ino)
+        prior = parent_identities.get(identity)
+        if prior is not None:
+            raise ValidationError(
+                f"executor state directories alias: {prior} and {role}"
+            )
+        parent_identities[identity] = role
+
+    if not existing:
+        return
+    database_identities: dict[tuple[int, int], Path] = {}
+    for database in selected_files:
+        try:
+            metadata = database.lstat()
+        except OSError as error:
+            raise ValidationError("executor state artifact is unavailable") from error
+        identity = int(metadata.st_dev), int(metadata.st_ino)
+        prior = database_identities.get(identity)
+        if prior is not None:
+            raise ValidationError(
+                f"executor state databases alias: {prior} and {database}"
+            )
+        database_identities[identity] = database
+
+
 def _validate_state_layout(
     config: ExecutorConfig,
     *,
@@ -346,6 +392,13 @@ def _validate_state_layout(
         raise ValidationError("control socket path is unavailable") from error
     else:
         raise ValidationError("control socket runtime is not implemented")
+
+    _validate_physical_state_separation(
+        config,
+        selected_files,
+        socket_parent,
+        existing=existing,
+    )
 
     if not existing:
         directories = {path.parent for path in selected_files} | {socket_parent}

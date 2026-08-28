@@ -435,6 +435,29 @@ class TrustedProposalIssuerTests(TrustedIssuerCase):
                 grant=self.fixture.grant,
             )
 
+    def test_issuer_does_not_resolve_executor_private_parents(self) -> None:
+        protected = {
+            self.fixture.config.paths.execution_database.parent,
+            self.fixture.config.paths.nonce_database.parent,
+            self.fixture.config.paths.daily_loss_database.parent,
+            self.fixture.config.paths.control_socket.parent,
+        }
+        original_resolve = Path.resolve
+
+        def resolve(path: Path, *args: object, **kwargs: object) -> Path:
+            if path in protected:
+                raise PermissionError("control may not traverse executor-private state")
+            return original_resolve(path, *args, **kwargs)
+
+        with patch.object(
+            Path,
+            "resolve",
+            autospec=True,
+            side_effect=resolve,
+        ):
+            issuer = self.make_issuer(self.evidence_reader)
+        self.assertIsInstance(issuer, TrustedTestnetChatProposalIssuer)
+
     def test_evidence_reader_must_use_configured_staging_database(self) -> None:
         other_path = self.fixture.root / "untrusted-staging.sqlite3"
         other_inbox = TradeStagingInbox(

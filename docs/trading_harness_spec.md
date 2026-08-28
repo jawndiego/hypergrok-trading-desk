@@ -166,6 +166,17 @@ state, performs network I/O, calls a venue, accepts a secret/path/slot argument,
 or returns a credential value to the operator. The fixed native readers remain
 the only Keychain access path.
 
+Executor path schema validation is lexical and performs no filesystem probe.
+This is required because the same root-owned config is parsed by mutually
+isolated executor, control and research UIDs, and control/research must not gain
+traversal merely to parse it. Before executor `init` or any state open, UID 451
+performs the physical trust check: distinct state-parent device/inode
+identities, distinct existing main-file identities, real final directories,
+single-link regular mains, exact ownership/modes/ACLs and descriptor-pinned
+bindings. Research and control compare inaccessible executor paths only by
+their normalized trusted config spelling while independently verifying the
+state they are authorized to open.
+
 ### 2.5 Config-bound filesystem identities
 
 Executor config schema v3 contains three distinct, positive, non-root numeric

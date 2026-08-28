@@ -397,6 +397,47 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "regular non-symlink"):
             _validate_state_layout(self.config, existing=True)
 
+    def test_intermediate_symlink_parent_is_rejected_before_initialization(self) -> None:
+        alias = self.root / "linked-root"
+        alias.symlink_to(self.root, target_is_directory=True)
+        changed = parse_executor_config(
+            config_text(self.root, self.policy.policy_hash).replace(
+                str(self.root / "nonce" / "nonce.sqlite3"),
+                str(alias / "execution" / "nonce.sqlite3"),
+            ),
+            environ={},
+        )
+        with self.assertRaisesRegex(ValidationError, "directories alias"):
+            _validate_state_layout(changed, existing=False)
+        self.assertFalse(changed.paths.execution_database.exists())
+        self.assertFalse(changed.paths.nonce_database.exists())
+
+    def test_distinct_state_parents_cannot_share_one_physical_identity(self) -> None:
+        execution_parent = self.config.paths.execution_database.parent
+        nonce_parent = self.config.paths.nonce_database.parent
+        execution_metadata = execution_parent.lstat()
+        with (
+            self._metadata_patch(
+                {
+                    nonce_parent: {
+                        "st_dev": execution_metadata.st_dev,
+                        "st_ino": execution_metadata.st_ino,
+                        "st_uid": self.config.executor_uid,
+                    }
+                }
+            ),
+            self.assertRaisesRegex(ValidationError, "directories alias"),
+        ):
+            _validate_state_layout(self.config, existing=False)
+
+    def test_cross_managed_database_hardlink_is_rejected(self) -> None:
+        self._materialize_layout()
+        nonce = self.config.paths.nonce_database
+        nonce.unlink()
+        os.link(self.config.paths.execution_database, nonce)
+        with self.assertRaisesRegex(ValidationError, "regular non-symlink"):
+            _validate_state_layout(self.config, existing=True)
+
     def test_state_directories_and_files_require_exact_modes(self) -> None:
         self._materialize_layout()
         execution = self.config.paths.execution_database

@@ -532,7 +532,10 @@ class TrustedTestnetChatProposalIssuer:
             evidence_staging_path.parent,
         )
         for protected in protected_paths:
-            candidate = protected.resolve(strict=False)
+            # Executor-private paths are normalized and physically attested by
+            # UID 451. UID 452 compares their trusted config spellings without
+            # attempting forbidden traversal.
+            candidate = Path(os.path.normpath(os.fspath(protected)))
             if (
                 presentation_parent == candidate
                 or presentation_parent.is_relative_to(candidate)

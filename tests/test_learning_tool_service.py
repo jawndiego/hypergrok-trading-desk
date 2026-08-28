@@ -20,6 +20,7 @@ from trading_harness.executor_service import _write_state_database_binding
 from trading_harness.hyperliquid_account import fetch_account_snapshot
 from trading_harness.learning_ledger import LearningLedger
 from trading_harness.learning_tool_service import (
+    _research_path,
     _shared_state_path,
     build_testnet_learning_tool_service,
 )
@@ -267,6 +268,34 @@ class ConfiguredLearningToolServiceTests(unittest.TestCase):
                     clock=lambda: AT,
                     policy=self.policy,
                 )
+
+    def test_research_path_does_not_probe_executor_private_paths(self) -> None:
+        managed = {
+            self.config.paths.execution_database,
+            self.config.paths.nonce_database,
+            self.config.paths.daily_loss_database,
+            self.config.paths.control_socket,
+        }
+        original_exists = Path.exists
+
+        def exists(path: Path) -> bool:
+            if path in managed:
+                raise AssertionError("research probed an executor-private path")
+            return original_exists(path)
+
+        with (
+            self._research_ownership(),
+            patch.object(Path, "exists", autospec=True, side_effect=exists),
+            patch.object(
+                Path,
+                "samefile",
+                side_effect=AssertionError("research compared a private inode"),
+            ),
+        ):
+            self.assertEqual(
+                self.research_path,
+                _research_path(self.research_path, self.config),
+            )
 
     def test_shared_main_databases_must_preexist_and_remain_executor_owned(self) -> None:
         self.config.paths.staging_database.unlink()

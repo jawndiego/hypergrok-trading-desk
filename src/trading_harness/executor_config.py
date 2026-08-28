@@ -227,28 +227,16 @@ def _is_ancestor(parent: PurePath, child: PurePath) -> bool:
 
 
 def _reject_overlapping_paths(paths: Mapping[str, Path]) -> None:
-    # Resolve existing symlink components for comparison only.  The original,
-    # normalized absolute spelling remains part of the canonical config hash.
-    # This prevents two differently-spelled names from aliasing the same
-    # managed object while keeping the loaded configuration transparent.
-    selected = tuple(
-        sorted((name, path, path.resolve(strict=False)) for name, path in paths.items())
-    )
-    for index, (left_name, left_original, left) in enumerate(selected):
-        for right_name, right_original, right in selected[index + 1 :]:
+    # Schema parsing is deliberately filesystem-independent so mutually
+    # isolated roles derive the same config from the same root-owned bytes.
+    # The executor's init/open boundary owns physical symlink/inode separation.
+    selected = tuple(sorted(paths.items()))
+    for index, (left_name, left) in enumerate(selected):
+        for right_name, right in selected[index + 1 :]:
             if left == right or _is_ancestor(left, right) or _is_ancestor(right, left):
                 raise ExecutorConfigError(
                     f"managed paths overlap: {left_name} and {right_name}"
                 )
-            if left_original.exists() and right_original.exists():
-                try:
-                    aliases = left_original.samefile(right_original)
-                except OSError as error:
-                    raise ExecutorConfigError("managed path aliases cannot be verified") from error
-                if aliases:
-                    raise ExecutorConfigError(
-                        f"managed paths overlap: {left_name} and {right_name}"
-                    )
 
 
 def _reject_environment_overrides(environ: Mapping[str, str]) -> None:
@@ -328,10 +316,7 @@ class ExecutorPaths:
         }
         _reject_overlapping_paths(normalized)
         learning_parent = normalized["learning_database"].parent
-        if (
-            learning_parent.resolve(strict=False)
-            != normalized["staging_database"].parent.resolve(strict=False)
-        ):
+        if learning_parent != normalized["staging_database"].parent:
             raise ExecutorConfigError(
                 "learning and staging databases must share one learning-state parent"
             )

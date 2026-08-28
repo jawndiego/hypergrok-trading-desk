@@ -49,7 +49,7 @@ def _research_path(value: str | Path, config: ExecutorConfig) -> Path:
     selected = Path(value)
     if not selected.is_absolute():
         raise ValidationError("research database path must be absolute")
-    if selected.exists() and selected.is_symlink():
+    if selected.is_symlink():
         raise ValidationError("research database may not be a symlink")
     if not selected.parent.is_dir() or selected.parent.is_symlink():
         raise ValidationError("research database parent must be a real directory")
@@ -64,7 +64,6 @@ def _research_path(value: str | Path, config: ExecutorConfig) -> Path:
             raise ValidationError("research database must have mode 0600")
         if hasattr(os, "geteuid") and metadata.st_uid != os.geteuid():
             raise ValidationError("research database must be process-owned")
-    resolved = selected.resolve(strict=False)
     managed = (
         config.paths.execution_database,
         config.paths.nonce_database,
@@ -74,12 +73,10 @@ def _research_path(value: str | Path, config: ExecutorConfig) -> Path:
         config.paths.control_socket,
     )
     for path in managed:
-        other = path.resolve(strict=False)
-        try:
-            aliases = selected.exists() and path.exists() and selected.samefile(path)
-        except OSError as error:
-            raise ValidationError("research database aliases cannot be verified") from error
-        if resolved == other or aliases:
+        # Config paths are normalized and physically attested at the executor
+        # state boundary. UID 450 must not probe executor-private parents merely
+        # to compose its separate process-owned research store.
+        if selected == path:
             raise ValidationError("research database must be separate from executor paths")
     return selected
 

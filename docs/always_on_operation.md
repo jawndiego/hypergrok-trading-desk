@@ -279,7 +279,11 @@ the executor performs the mandatory same-cycle refresh before any entry send.
 
 Keep the reviewed config admin/root-owned, mode `0400`, and grant exact read
 ACLs to the executor and attended-control identities. The loader accepts an
-admin-owned file but rejects group/world mode bits. Create four
+admin-owned file but rejects group/world mode bits. Its path-overlap schema
+check is deliberately lexical and I/O-free so UID 452 never probes the
+executor-only nonce, loss or socket parents. UID 451 separately rejects
+physical parent or main-file device/inode aliases before initialization and on
+state reopen; this proof is not delegated to control or research. Create four
 distinct writable parents beneath the executor-private root: `execution/`,
 `nonce/`,
 `daily-loss/` and `socket/`. Own them as the executor UID with mode `0700`.

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import tempfile
 import unittest
+from unittest import mock
 
 from trading_harness.executor_config import (
     ExecutorConfigError,
@@ -270,6 +272,50 @@ class StrictExecutorConfigTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ExecutorConfigError, "managed paths overlap"):
             parse_executor_config(learning_overlaps_execution, environ={})
+
+    def test_managed_path_schema_validation_performs_no_filesystem_io(self) -> None:
+        socket = Path("/var/run/trading-desk/socket/executor.sock")
+        with (
+            mock.patch.object(Path, "resolve", side_effect=AssertionError("resolve")),
+            mock.patch.object(Path, "stat", side_effect=AssertionError("stat")),
+            mock.patch.object(Path, "lstat", side_effect=AssertionError("lstat")),
+            mock.patch.object(Path, "exists", side_effect=AssertionError("exists")),
+            mock.patch.object(Path, "samefile", side_effect=AssertionError("samefile")),
+        ):
+            parsed = parse_executor_config(config_text(), environ={})
+            lexical_overlap = config_text().replace(
+                'control_socket = "/var/run/trading-desk/socket/executor.sock"',
+                'control_socket = "/var/lib/trading-desk/execution/execution.sqlite3/socket"',
+            )
+            with self.assertRaisesRegex(ExecutorConfigError, "managed paths overlap"):
+                parse_executor_config(lexical_overlap, environ={})
+        self.assertEqual(socket, parsed.paths.control_socket)
+
+    def test_physical_aliases_are_deferred_to_the_executor_trust_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            execution_parent = root / "execution"
+            socket_parent = root / "socket"
+            execution_parent.mkdir()
+            socket_parent.mkdir()
+            execution = execution_parent / "execution.sqlite3"
+            execution.write_bytes(b"state")
+            for kind in ("hardlink", "symlink"):
+                socket = socket_parent / f"{kind}.sock"
+                if kind == "hardlink":
+                    os.link(execution, socket)
+                else:
+                    socket.symlink_to(execution)
+                text = config_text().replace(
+                    'execution_database = "/var/lib/trading-desk/execution/execution.sqlite3"',
+                    f'execution_database = "{execution}"',
+                ).replace(
+                    'control_socket = "/var/run/trading-desk/socket/executor.sock"',
+                    f'control_socket = "{socket}"',
+                )
+                parsed = parse_executor_config(text, environ={})
+                self.assertEqual(socket, parsed.paths.control_socket)
+                socket.unlink()
 
     def test_addresses_must_be_lowercase_and_api_wallet_must_be_distinct(self) -> None:
         uppercase = config_text().replace("0x111111", "0xAAAAAA", 1)

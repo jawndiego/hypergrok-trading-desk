@@ -400,6 +400,36 @@ class ExecutorCliTests(unittest.TestCase):
         self.assertNotIn("approval-hmac", stdout)
         self.assertNotIn("grant-hmac", stdout)
 
+    def test_control_credential_check_performs_no_managed_path_probe(self) -> None:
+        approval = FakeAvailabilityProvider("approval")
+        grant = FakeAvailabilityProvider("grant")
+
+        def select(_config, purpose: str):
+            return {"approval_hmac": approval, "grant_hmac": grant}[purpose]
+
+        with (
+            self._ownership(euid=452, default_uid=452),
+            patch.object(Path, "resolve", side_effect=AssertionError("resolve")),
+            patch.object(Path, "exists", side_effect=AssertionError("exists")),
+            patch.object(Path, "samefile", side_effect=AssertionError("samefile")),
+            patch(
+                "trading_harness.executor_cli._wallet_provider",
+                side_effect=AssertionError("control check must not read signer"),
+            ),
+            patch(
+                "trading_harness.executor_cli._secret_provider",
+                side_effect=select,
+            ),
+        ):
+            result, stdout, stderr = run_cli(
+                ["check-control-credentials", "--config", str(self.config)]
+            )
+
+        self.assertEqual(0, result, stderr)
+        self.assertTrue(json.loads(stdout)["ready"])
+        self.assertEqual(1, approval.checked)
+        self.assertEqual(1, grant.checked)
+
     def test_validate_init_status_and_dry_run_need_no_credentials_or_network(self) -> None:
         validated = run_cli(["validate", "--config", str(self.config)])
         self.assertEqual(0, validated[0], validated[2])
