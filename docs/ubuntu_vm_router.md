@@ -209,9 +209,16 @@ writable Lima state. The enabled host-only sequence is:
    `user.comment: "Trading Desk Router Operator"`; Lima therefore cannot fill
    this field from the invoking host account's mutable GECOS value.
 7. `apply-vm-management-key` uses the pinned Apple `ssh-keygen` as UID 454 to
-   create only Lima's dedicated ED25519 management key. The private key remains
-   mode `0600` inside `_config`, is fully synced before promotion, never prints,
-   and is explicitly distinct from venue, Keychain and WireGuard credentials.
+   create only Lima's dedicated ED25519 management key. Both the private key and
+   its public-key file remain mode `0600` inside `_config`, matching the sealed
+   root launcher's mode-`0077` umask. They are fully synced before promotion;
+   the private key never prints and is explicitly distinct from venue,
+   Keychain and WireGuard credentials. The schema-v3 lock permits one narrowly
+   scoped recovery from the exact retained pre-fix marker/controller and
+   validate-fill receipt by one pinned replacement-commissioner script: only
+   the already generated mode-`0600` pending or partially promoted pair can be
+   completed, and arbitrary predecessor or replacement controllers remain
+   rejected.
 8. `apply-local-image` copies the exact signed-image payload from sealed media
    to a root-owned mode-`0444` local path after headroom checks, retires (without
    deleting) the obsolete empty `LIMA_HOME/home`, and validates the separate

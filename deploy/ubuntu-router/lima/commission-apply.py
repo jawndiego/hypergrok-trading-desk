@@ -504,16 +504,55 @@ def _locks() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         "vm_create_minimum_free_before_bytes": 25 * 1024**3,
     }:
         raise CommissionError("commission storage headroom contract differs")
-    if apply_lock.get("vm_management_ssh") != {
+    vm_management_ssh = apply_lock.get("vm_management_ssh")
+    if not isinstance(vm_management_ssh, dict) or set(vm_management_ssh) != {
+        "comment",
+        "private_key_path",
+        "public_key_mode",
+        "public_key_path",
+        "retained_public_mode_0600_resume_v1",
+        "ssh_keygen_mode",
+        "ssh_keygen_path",
+        "ssh_keygen_sha256",
+        "ssh_keygen_size_bytes",
+        "type",
+    }:
+        raise CommissionError("VM-management SSH key contract differs")
+    resume_contract = vm_management_ssh.get("retained_public_mode_0600_resume_v1")
+    expected_vm_management = {
         "comment": "lima",
         "private_key_path": "/private/var/db/trading-desk-lima/_config/user",
+        "public_key_mode": "0600",
         "public_key_path": "/private/var/db/trading-desk-lima/_config/user.pub",
         "ssh_keygen_mode": "0755",
         "ssh_keygen_path": "/usr/bin/ssh-keygen",
         "ssh_keygen_sha256": "0d8b8fb52762fa19431b40e8b75cd00b045f10bf206fd67f0598e09bfaad77d0",
         "ssh_keygen_size_bytes": 847120,
         "type": "ed25519",
-    }:
+    }
+    if any(vm_management_ssh.get(key) != value for key, value in expected_vm_management.items()):
+        raise CommissionError("VM-management SSH key contract differs")
+    if (
+        not isinstance(resume_contract, dict)
+        or set(resume_contract)
+        != {
+            "controller_manifest_sha256",
+            "installing_marker_sha256",
+            "replacement_commission_apply_sha256",
+            "validate_fill_receipt_sha256",
+        }
+        or resume_contract.get("controller_manifest_sha256")
+        != "4d7495d4353ecf1bacee5a2fbcb82bfcb08b0ee2d70aa752c26882e8ca28cede"
+        or resume_contract.get("installing_marker_sha256")
+        != "64ffbd5d71ae88f898a9ff071432f7ba5ad37076bba242ada019b18bd519c467"
+        or resume_contract.get("validate_fill_receipt_sha256")
+        != "a71f87dcc141dff4af9fd2d0afdcc1fa4f7be57deeb42886cd3e2d4c09b4af8f"
+        or not isinstance(resume_contract.get("replacement_commission_apply_sha256"), str)
+        or SHA256_RE.fullmatch(resume_contract["replacement_commission_apply_sha256"])
+        is None
+        or _sha256_file(Path(__file__).resolve())
+        != resume_contract["replacement_commission_apply_sha256"]
+    ):
         raise CommissionError("VM-management SSH key contract differs")
     if commission_lock.get("authorization", {}).get("apply_enabled") is not False:
         raise CommissionError("public-input lock unexpectedly enables apply")
@@ -2811,17 +2850,18 @@ def _verify_vm_management_key_pair(
 ) -> dict[str, object]:
     uid = apply_lock["host"]["router_operator_uid"]
     gid = apply_lock["host"]["router_operator_gid"]
+    public_mode = int(apply_lock["vm_management_ssh"]["public_key_mode"], 8)
     _assert_real_path(
         private_path, kind="file", owner_uid=uid, owner_gid=gid, mode=0o600
     )
     _assert_real_path(
-        public_path, kind="file", owner_uid=uid, owner_gid=gid, mode=0o644
+        public_path, kind="file", owner_uid=uid, owner_gid=gid, mode=public_mode
     )
     public = _read_fd_bound_file(
         public_path,
         owner_uid=uid,
         owner_gid=gid,
-        mode=0o644,
+        mode=public_mode,
         maximum_size=1024,
     )
     try:
@@ -2874,7 +2914,19 @@ def _derive_vm_management_public_key(
         or result.stdout.count(b"\n") != 1
     ):
         raise CommissionError("VM-management SSH public derivation failed")
-    return result.stdout
+    try:
+        fields = result.stdout.decode("ascii").rstrip("\n").split(" ")
+    except UnicodeDecodeError as error:
+        raise CommissionError("VM-management SSH public derivation failed") from error
+    if (
+        len(fields) not in (2, 3)
+        or fields[0] != "ssh-ed25519"
+        or not fields[1]
+        or (len(fields) == 3 and fields[2] != apply_lock["vm_management_ssh"]["comment"])
+        or result.stdout != (" ".join(fields) + "\n").encode("ascii")
+    ):
+        raise CommissionError("VM-management SSH public derivation failed")
+    return f"{fields[0]} {fields[1]}\n".encode("ascii")
 
 
 def _fullsync_vm_management_key_pair(
@@ -2882,7 +2934,8 @@ def _fullsync_vm_management_key_pair(
 ) -> None:
     uid = apply_lock["host"]["router_operator_uid"]
     gid = apply_lock["host"]["router_operator_gid"]
-    for path, mode in ((private_path, 0o600), (public_path, 0o644)):
+    public_mode = int(apply_lock["vm_management_ssh"]["public_key_mode"], 8)
+    for path, mode in ((private_path, 0o600), (public_path, public_mode)):
         _assert_real_path(
             path, kind="file", owner_uid=uid, owner_gid=gid, mode=mode
         )
@@ -2894,6 +2947,223 @@ def _fullsync_vm_management_key_pair(
         finally:
             os.close(descriptor)
     _sync_directory(private_path.parent)
+
+
+def _validate_vm_management_key_receipt(
+    receipt: dict[str, Any], apply_lock: dict[str, Any]
+) -> None:
+    expected_keys = {
+        "active_controller_manifest_sha256",
+        "active_controller_script_sha256",
+        "installing_marker_sha256",
+        "kind",
+        "mainnet_authorized",
+        "marker_controller_manifest_sha256",
+        "network_changes_performed",
+        "phase",
+        "private_device",
+        "private_inode",
+        "private_key_returned",
+        "public_key_mode",
+        "public_sha256",
+        "retained_public_mode_0600_resume_used",
+        "router_identity_receipt",
+        "runtime_receipt_sha256",
+        "schema_version",
+        "validate_fill_receipt_sha256",
+        "venue_credentials_touched",
+        "venue_writes_authorized",
+        "vm_created",
+        "vm_management_credential_created",
+    }
+    if (
+        set(receipt) != expected_keys
+        or receipt.get("schema_version") != 2
+        or receipt.get("kind")
+        != "trading-desk.router-commission.vm-management-ssh-key"
+        or receipt.get("phase") != "vm-management-key"
+        or type(receipt.get("private_device")) is not int
+        or type(receipt.get("private_inode")) is not int
+        or receipt.get("public_key_mode") != "0600"
+        or receipt.get("private_key_returned") is not False
+        or receipt.get("vm_management_credential_created") is not True
+        or receipt.get("venue_credentials_touched") is not False
+        or receipt.get("network_changes_performed") is not False
+        or receipt.get("vm_created") is not False
+        or receipt.get("venue_writes_authorized") is not False
+        or receipt.get("mainnet_authorized") is not False
+    ):
+        raise CommissionError("VM-management SSH key receipt contract differs")
+    for key in (
+        "active_controller_manifest_sha256",
+        "active_controller_script_sha256",
+        "installing_marker_sha256",
+        "marker_controller_manifest_sha256",
+        "public_sha256",
+        "runtime_receipt_sha256",
+        "validate_fill_receipt_sha256",
+    ):
+        if not isinstance(receipt.get(key), str) or SHA256_RE.fullmatch(receipt[key]) is None:
+            raise CommissionError("VM-management SSH key receipt digest differs")
+    marker_payload = {
+        "schema_version": 1,
+        "kind": "trading-desk.router-commission.installing",
+        "phase": "vm-management-key",
+        "validate_fill_receipt_sha256": receipt["validate_fill_receipt_sha256"],
+        "controller_manifest_sha256": receipt["marker_controller_manifest_sha256"],
+    }
+    if receipt["installing_marker_sha256"] != _sha256_bytes(
+        _canonical_json(marker_payload)
+    ):
+        raise CommissionError("VM-management SSH key marker receipt differs")
+    resume = apply_lock["vm_management_ssh"][
+        "retained_public_mode_0600_resume_v1"
+    ]
+    if (
+        receipt["active_controller_script_sha256"]
+        != resume["replacement_commission_apply_sha256"]
+        or _sha256_file(Path(__file__).resolve())
+        != resume["replacement_commission_apply_sha256"]
+    ):
+        raise CommissionError("VM-management SSH replacement controller differs")
+    used = receipt.get("retained_public_mode_0600_resume_used")
+    if used is True:
+        if (
+            receipt["installing_marker_sha256"]
+            != resume["installing_marker_sha256"]
+            or receipt["marker_controller_manifest_sha256"]
+            != resume["controller_manifest_sha256"]
+            or receipt["validate_fill_receipt_sha256"]
+            != resume["validate_fill_receipt_sha256"]
+            or receipt["active_controller_manifest_sha256"]
+            == resume["controller_manifest_sha256"]
+        ):
+            raise CommissionError("VM-management SSH retained resume receipt differs")
+    elif used is False:
+        if (
+            receipt["marker_controller_manifest_sha256"]
+            != receipt["active_controller_manifest_sha256"]
+        ):
+            raise CommissionError("VM-management SSH current marker receipt differs")
+    else:
+        raise CommissionError("VM-management SSH retained resume flag differs")
+
+
+def _select_vm_management_key_marker(
+    args: argparse.Namespace,
+    apply_lock: dict[str, Any],
+    state: dict[str, Path],
+    marker_path: Path,
+    current_marker: bytes,
+    private_path: Path,
+    public_path: Path,
+    pending_private: Path,
+    pending_public: Path,
+) -> tuple[bytes, dict[str, Any], bool]:
+    current_value = _decode_json(current_marker, "current VM-management key marker")
+    if not marker_path.exists() and not marker_path.is_symlink():
+        _write_exact_file(marker_path, current_marker, mode=0o400, uid=0, gid=0)
+        return current_marker, current_value, False
+    observed = _read_fd_bound_file(
+        marker_path,
+        owner_uid=0,
+        owner_gid=0,
+        mode=0o400,
+        maximum_size=4096,
+    )
+    if observed == current_marker:
+        _sync_exact_existing_file(marker_path, current_marker, uid=0, gid=0, mode=0o400)
+        return current_marker, current_value, False
+    resume = apply_lock["vm_management_ssh"][
+        "retained_public_mode_0600_resume_v1"
+    ]
+    if (
+        _sha256_file(Path(__file__).resolve())
+        != resume["replacement_commission_apply_sha256"]
+    ):
+        raise CommissionError("VM-management SSH replacement controller differs")
+    observed_value = _decode_json(observed, "retained VM-management key marker")
+    if (
+        _sha256_bytes(observed) != resume["installing_marker_sha256"]
+        or set(observed_value)
+        != {
+            "schema_version",
+            "kind",
+            "phase",
+            "validate_fill_receipt_sha256",
+            "controller_manifest_sha256",
+        }
+        or observed_value.get("schema_version") != 1
+        or observed_value.get("kind")
+        != "trading-desk.router-commission.installing"
+        or observed_value.get("phase") != "vm-management-key"
+        or observed_value.get("controller_manifest_sha256")
+        != resume["controller_manifest_sha256"]
+        or observed_value.get("validate_fill_receipt_sha256")
+        != resume["validate_fill_receipt_sha256"]
+        or args.expected_validate_fill_receipt_sha256
+        != resume["validate_fill_receipt_sha256"]
+        or args.expected_controller_manifest_sha256
+        == resume["controller_manifest_sha256"]
+    ):
+        raise CommissionError("VM-management SSH retained marker is not compatible")
+    uid = apply_lock["host"]["router_operator_uid"]
+    gid = apply_lock["host"]["router_operator_gid"]
+    public_mode = int(apply_lock["vm_management_ssh"]["public_key_mode"], 8)
+    present = {
+        "private": private_path.exists() or private_path.is_symlink(),
+        "public": public_path.exists() or public_path.is_symlink(),
+        "pending_private": pending_private.exists() or pending_private.is_symlink(),
+        "pending_public": pending_public.exists() or pending_public.is_symlink(),
+    }
+    allowed_states = (
+        {
+            "private": False,
+            "public": False,
+            "pending_private": True,
+            "pending_public": True,
+        },
+        {
+            "private": True,
+            "public": False,
+            "pending_private": False,
+            "pending_public": True,
+        },
+        {
+            "private": True,
+            "public": True,
+            "pending_private": False,
+            "pending_public": False,
+        },
+    )
+    if present not in allowed_states:
+        raise CommissionError("VM-management SSH retained key state is not compatible")
+    for path, exists, mode in (
+        (private_path, present["private"], 0o600),
+        (public_path, present["public"], public_mode),
+        (pending_private, present["pending_private"], 0o600),
+        (pending_public, present["pending_public"], public_mode),
+    ):
+        if exists:
+            _assert_real_path(
+                path, kind="file", owner_uid=uid, owner_gid=gid, mode=mode
+            )
+    completed = state["receipt_parent"] / PHASE_RECEIPTS["vm-management-key"]
+    if completed.exists() or completed.is_symlink():
+        if present != allowed_states[-1]:
+            raise CommissionError("VM-management SSH receipt precedes key completion")
+        _assert_real_path(
+            completed, kind="file", owner_uid=0, owner_gid=0, mode=0o400
+        )
+        completed_value = _read_json(completed, "VM-management SSH key receipt")
+        _validate_vm_management_key_receipt(completed_value, apply_lock)
+        if (
+            completed_value["active_controller_manifest_sha256"]
+            != args.expected_controller_manifest_sha256
+            or completed_value["retained_public_mode_0600_resume_used"] is not True
+        ):
+            raise CommissionError("VM-management SSH completed resume controller differs")
+    return observed, observed_value, True
 
 
 def _vm_management_key(args: argparse.Namespace) -> int:
@@ -2916,7 +3186,7 @@ def _vm_management_key(args: argparse.Namespace) -> int:
     )
     if lima_receipt.get("router_identity_receipt") != identity_receipt:
         raise CommissionError("LIMA_HOME receipt router identity differs")
-    key_marker = _canonical_json(
+    current_key_marker = _canonical_json(
         {
             "schema_version": 1,
             "kind": "trading-desk.router-commission.installing",
@@ -2926,7 +3196,6 @@ def _vm_management_key(args: argparse.Namespace) -> int:
         }
     )
     key_marker_path = state["state"] / ".vm-management-key.INSTALLING.json"
-    _write_exact_file(key_marker_path, key_marker, mode=0o400, uid=0, gid=0)
     lima_home = Path(apply_lock["paths"]["lima_home"])
     _verify_lima_home_for_management_key(
         lima_home, apply_lock, lima_receipt["networks_yaml_sha256"]
@@ -2939,6 +3208,19 @@ def _vm_management_key(args: argparse.Namespace) -> int:
         raise CommissionError("VM-management SSH key paths differ")
     pending_private = config / ".user.pending-v1"
     pending_public = config / ".user.pending-v1.pub"
+    key_marker, key_marker_value, retained_resume_used = (
+        _select_vm_management_key_marker(
+            args,
+            apply_lock,
+            state,
+            key_marker_path,
+            current_key_marker,
+            private_path,
+            public_path,
+            pending_private,
+            pending_public,
+        )
+    )
     final_private = private_path.exists() or private_path.is_symlink()
     final_public = public_path.exists() or public_path.is_symlink()
     pending_private_present = pending_private.exists() or pending_private.is_symlink()
@@ -2958,7 +3240,7 @@ def _vm_management_key(args: argparse.Namespace) -> int:
             _write_exact_file(
                 pending_public,
                 public_content,
-                mode=0o644,
+                mode=int(contract["public_key_mode"], 8),
                 uid=apply_lock["host"]["router_operator_uid"],
                 gid=apply_lock["host"]["router_operator_gid"],
             )
@@ -3009,7 +3291,7 @@ def _vm_management_key(args: argparse.Namespace) -> int:
     if {item.name for item in config.iterdir()} != {"networks.yaml", "user", "user.pub"}:
         raise CommissionError("LIMA_HOME config differs after VM-management key generation")
     receipt = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "trading-desk.router-commission.vm-management-ssh-key",
         "phase": "vm-management-key",
         "validate_fill_receipt_sha256": args.expected_validate_fill_receipt_sha256,
@@ -3019,6 +3301,15 @@ def _vm_management_key(args: argparse.Namespace) -> int:
         "private_inode": evidence["private_inode"],
         "public_sha256": evidence["public_sha256"],
         "installing_marker_sha256": _sha256_bytes(key_marker),
+        "active_controller_manifest_sha256": args.expected_controller_manifest_sha256,
+        "active_controller_script_sha256": apply_lock["vm_management_ssh"][
+            "retained_public_mode_0600_resume_v1"
+        ]["replacement_commission_apply_sha256"],
+        "marker_controller_manifest_sha256": key_marker_value[
+            "controller_manifest_sha256"
+        ],
+        "retained_public_mode_0600_resume_used": retained_resume_used,
+        "public_key_mode": contract["public_key_mode"],
         "private_key_returned": False,
         "vm_management_credential_created": True,
         "venue_credentials_touched": False,
@@ -3027,6 +3318,7 @@ def _vm_management_key(args: argparse.Namespace) -> int:
         "venue_writes_authorized": False,
         "mainnet_authorized": False,
     }
+    _validate_vm_management_key_receipt(receipt, apply_lock)
     path, digest = _atomic_receipt(
         state["receipt_parent"],
         PHASE_RECEIPTS["vm-management-key"],
@@ -3185,7 +3477,7 @@ def _validate_fill(args: argparse.Namespace) -> int:
 
 
 def _read_vm_management_key_receipt(
-    state: dict[str, Path], expected_sha256: str
+    state: dict[str, Path], expected_sha256: str, apply_lock: dict[str, Any]
 ) -> dict[str, Any]:
     receipt = _read_expected_receipt(
         state["receipt_parent"] / PHASE_RECEIPTS["vm-management-key"],
@@ -3194,16 +3486,7 @@ def _read_vm_management_key_receipt(
         owner_uid=0,
         owner_gid=0,
     )
-    if (
-        receipt.get("private_key_returned") is not False
-        or receipt.get("vm_management_credential_created") is not True
-        or receipt.get("venue_credentials_touched") is not False
-        or receipt.get("network_changes_performed") is not False
-        or receipt.get("vm_created") is not False
-        or receipt.get("venue_writes_authorized") is not False
-        or receipt.get("mainnet_authorized") is not False
-    ):
-        raise CommissionError("VM-management SSH key receipt stop line differs")
+    _validate_vm_management_key_receipt(receipt, apply_lock)
     return receipt
 
 
@@ -3330,7 +3613,7 @@ def _local_image(args: argparse.Namespace) -> int:
         state, "lima-home", validate_receipt["lima_home_receipt_sha256"]
     )
     key_receipt = _read_vm_management_key_receipt(
-        state, args.expected_vm_management_key_receipt_sha256
+        state, args.expected_vm_management_key_receipt_sha256, apply_lock
     )
     if (
         key_receipt.get("validate_fill_receipt_sha256")
@@ -3737,7 +4020,7 @@ def _verify_created_vm(
         Path(apply_lock["vm_management_ssh"]["public_key_path"]),
         owner_uid=uid,
         owner_gid=gid,
-        mode=0o644,
+        mode=int(apply_lock["vm_management_ssh"]["public_key_mode"], 8),
         maximum_size=1024,
     ).decode("ascii").strip()
     public_marker = b"@@VM_MANAGEMENT_PUBLIC_KEY@@"
@@ -3985,7 +4268,7 @@ def _create_vm(args: argparse.Namespace) -> int:
         state, args.expected_local_image_receipt_sha256
     )
     key_receipt = _read_vm_management_key_receipt(
-        state, local_receipt["vm_management_key_receipt_sha256"]
+        state, local_receipt["vm_management_key_receipt_sha256"], apply_lock
     )
     if local_receipt.get("router_identity_receipt") != identity_receipt:
         raise CommissionError("local-image router identity differs")
@@ -4326,7 +4609,10 @@ def _quarantine_management_key_pending(args: argparse.Namespace) -> int:
     config = Path(apply_lock["paths"]["lima_home"]) / "_config"
     candidates = (
         (config / ".user.pending-v1", 0o600),
-        (config / ".user.pending-v1.pub", 0o644),
+        (
+            config / ".user.pending-v1.pub",
+            int(apply_lock["vm_management_ssh"]["public_key_mode"], 8),
+        ),
     )
     uid = apply_lock["host"]["router_operator_uid"]
     gid = apply_lock["host"]["router_operator_gid"]

@@ -59,8 +59,10 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   read-only replay verifier. Its schema-v3 root launcher enables only
   venue-credential-free runtime qualification, media/host-tool preparation,
   exact UID-454 Lima-home adoption, `validate --fill`, a dedicated VM-management
-  SSH key, local-image installation and stopped-VM creation; VM start, guest
-  installation and every network/router-key phase remain disabled.
+  SSH key whose private and public files are both mode `0600`, local-image
+  installation and stopped-VM creation; the schema-v3 lock admits only the
+  exact retained pre-fix management-key marker/controller recovery. VM start,
+  guest installation and every network/router-key phase remain disabled.
 - A TESTNET-only proposal-v2 model binds the staging document, ticket,
   protected plan, grant, displayed economics, account identity, policy,
   account/market snapshots, broker session and expiry. A separate control

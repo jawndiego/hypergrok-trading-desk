@@ -344,7 +344,7 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
             private.write_bytes(b"private")
             private.chmod(0o600)
             public.write_bytes(b"public")
-            public.chmod(0o644)
+            public.chmod(0o600)
             calls: list[int] = []
             with (
                 mock.patch.dict(
@@ -378,6 +378,304 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
                     apply_lock, private, public
                 )
             self.assertEqual(before, (private.read_bytes(), public.read_bytes()))
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS ssh-keygen umask contract")
+    def test_management_public_key_mode_matches_actual_root_umask(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_key_umask_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        apply_lock["host"]["router_operator_uid"] = os.getuid()
+        apply_lock["host"]["router_operator_gid"] = os.getgid()
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory).resolve() / ".user.pending-v1"
+
+            def root_umask() -> None:
+                os.umask(0o077)
+
+            generated = subprocess.run(
+                [
+                    "/usr/bin/ssh-keygen",
+                    "-q",
+                    "-t",
+                    "ed25519",
+                    "-N",
+                    "",
+                    "-C",
+                    "lima",
+                    "-f",
+                    str(private),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                preexec_fn=root_umask,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(
+                (0, b"", b""),
+                (generated.returncode, generated.stdout, generated.stderr),
+            )
+            public = Path(f"{private}.pub")
+            self.assertEqual(0o600, stat.S_IMODE(private.stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(public.stat().st_mode))
+            with mock.patch.dict(
+                namespace,
+                {
+                    "_verify_ssh_keygen": lambda _lock: Path(
+                        "/usr/bin/ssh-keygen"
+                    ),
+                    "_drop_preexec": lambda *_args: None,
+                    "_no_named_acl": lambda _path: None,
+                },
+            ):
+                derived = namespace["_derive_vm_management_public_key"](
+                    apply_lock, private
+                )
+                evidence = namespace["_verify_vm_management_key_pair"](
+                    apply_lock, private, public
+                )
+            self.assertEqual(2, len(derived.decode("ascii").strip().split(" ")))
+            self.assertEqual(
+                hashlib.sha256(public.read_bytes()).hexdigest(),
+                evidence["public_sha256"],
+            )
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS retained-key promotion")
+    def test_exact_pre_fix_management_marker_promotes_retained_pair(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_retained_key_resume_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        commission_lock = json.loads(
+            (LIMA_ROOT / "commission-lock.json").read_text(encoding="utf-8")
+        )
+        vm_spec = example_spec()
+        resume = apply_lock["vm_management_ssh"][
+            "retained_public_mode_0600_resume_v1"
+        ]
+        active_controller = "f" * 64
+        self.assertNotEqual(resume["controller_manifest_sha256"], active_controller)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            lima_home = root / "lima"
+            config = lima_home / "_config"
+            legacy_home = lima_home / "home"
+            state_root = root / "state"
+            receipt_parent = root / "receipts"
+            quarantine = root / "quarantine"
+            for path in (
+                config,
+                legacy_home,
+                state_root,
+                receipt_parent,
+                quarantine,
+            ):
+                path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            lima_home.chmod(0o700)
+            uid = os.getuid()
+            gid = os.getgid()
+            apply_lock["host"]["router_operator_uid"] = uid
+            apply_lock["host"]["router_operator_gid"] = gid
+            apply_lock["paths"]["lima_home"] = str(lima_home)
+            private = config / "user"
+            public = config / "user.pub"
+            pending_private = config / ".user.pending-v1"
+            pending_public = config / ".user.pending-v1.pub"
+            apply_lock["vm_management_ssh"]["private_key_path"] = str(private)
+            apply_lock["vm_management_ssh"]["public_key_path"] = str(public)
+            networks = config / "networks.yaml"
+            networks.write_bytes(b"networks\n")
+            networks.chmod(0o600)
+
+            def root_umask() -> None:
+                os.umask(0o077)
+
+            generated = subprocess.run(
+                [
+                    "/usr/bin/ssh-keygen",
+                    "-q",
+                    "-t",
+                    "ed25519",
+                    "-N",
+                    "",
+                    "-C",
+                    "lima",
+                    "-f",
+                    str(pending_private),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+                preexec_fn=root_umask,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(0, generated.returncode)
+            self.assertEqual(0o600, stat.S_IMODE(pending_public.stat().st_mode))
+            retained_marker = namespace["_canonical_json"](
+                {
+                    "schema_version": 1,
+                    "kind": "trading-desk.router-commission.installing",
+                    "phase": "vm-management-key",
+                    "validate_fill_receipt_sha256": resume[
+                        "validate_fill_receipt_sha256"
+                    ],
+                    "controller_manifest_sha256": resume[
+                        "controller_manifest_sha256"
+                    ],
+                }
+            )
+            self.assertEqual(
+                resume["installing_marker_sha256"],
+                hashlib.sha256(retained_marker).hexdigest(),
+            )
+            marker_path = state_root / ".vm-management-key.INSTALLING.json"
+            marker_path.write_bytes(retained_marker)
+            marker_path.chmod(0o400)
+            identity_receipt = {"sha256": "i" * 64}
+            captured: dict[str, object] = {}
+
+            def phase_receipt(_state, phase: str, _digest: str):
+                if phase == "validate-fill":
+                    return {
+                        "effective_config_sha256": vm_spec["lima_home"][
+                            "effective_config_sha256"
+                        ],
+                        "lima_home_receipt_sha256": "l" * 64,
+                    }
+                self.assertEqual("lima-home", phase)
+                return {
+                    "router_identity_receipt": identity_receipt,
+                    "networks_yaml_sha256": hashlib.sha256(
+                        networks.read_bytes()
+                    ).hexdigest(),
+                }
+
+            def atomic(parent: Path, name: str, value: dict[str, object], **_kwargs):
+                captured.update(value)
+                path = parent / name
+                write_json(path, value)
+                path.chmod(0o400)
+                content = path.read_bytes()
+                return path, hashlib.sha256(content).hexdigest()
+
+            patches = {
+                "_locks": lambda: (apply_lock, commission_lock, vm_spec),
+                "_assert_root_apply": lambda *_args: "d" * 64,
+                "_router_operator_identity": lambda _lock: identity_receipt,
+                "_initialize_state": lambda _lock: {
+                    "state": state_root,
+                    "receipt_parent": receipt_parent,
+                    "quarantine_parent": quarantine,
+                },
+                "_acquire_state_lock": lambda _state: 1,
+                "_root_phase_receipt": phase_receipt,
+                "_read_fd_bound_file": lambda path, **_kwargs: path.read_bytes(),
+                "_verify_ssh_keygen": lambda _lock: Path("/usr/bin/ssh-keygen"),
+                "_drop_preexec": lambda *_args: None,
+                "_full_fsync_fd": lambda _descriptor: None,
+                "_sync_directory": lambda _path: None,
+                "_rename_exclusive": lambda source, destination: source.rename(
+                    destination
+                ),
+                "_atomic_receipt": atomic,
+                "_no_named_acl": lambda _path: None,
+            }
+            replacement_sha256 = resume["replacement_commission_apply_sha256"]
+            resume["replacement_commission_apply_sha256"] = "0" * 64
+            with (
+                mock.patch.dict(namespace, patches),
+                self.assertRaisesRegex(
+                    namespace["CommissionError"], "replacement controller differs"
+                ),
+            ):
+                namespace["_vm_management_key"](
+                    SimpleNamespace(
+                        expected_validate_fill_receipt_sha256=resume[
+                            "validate_fill_receipt_sha256"
+                        ],
+                        expected_controller_manifest_sha256=active_controller,
+                    )
+                )
+            resume["replacement_commission_apply_sha256"] = replacement_sha256
+            marker_path.chmod(0o600)
+            marker_path.write_bytes(
+                namespace["_canonical_json"](
+                    {
+                        "schema_version": 1,
+                        "kind": "trading-desk.router-commission.installing",
+                        "phase": "vm-management-key",
+                        "validate_fill_receipt_sha256": resume[
+                            "validate_fill_receipt_sha256"
+                        ],
+                        "controller_manifest_sha256": "e" * 64,
+                    }
+                )
+            )
+            marker_path.chmod(0o400)
+            with (
+                mock.patch.dict(namespace, patches),
+                self.assertRaisesRegex(
+                    namespace["CommissionError"], "retained marker is not compatible"
+                ),
+            ):
+                namespace["_vm_management_key"](
+                    SimpleNamespace(
+                        expected_validate_fill_receipt_sha256=resume[
+                            "validate_fill_receipt_sha256"
+                        ],
+                        expected_controller_manifest_sha256=active_controller,
+                    )
+                )
+            marker_path.chmod(0o600)
+            marker_path.write_bytes(retained_marker)
+            marker_path.chmod(0o400)
+            with mock.patch.dict(namespace, patches), redirect_stdout(io.StringIO()):
+                result = namespace["_vm_management_key"](
+                    SimpleNamespace(
+                        expected_validate_fill_receipt_sha256=resume[
+                            "validate_fill_receipt_sha256"
+                        ],
+                        expected_controller_manifest_sha256=active_controller,
+                    )
+                )
+            self.assertEqual(0, result)
+            self.assertFalse(pending_private.exists())
+            self.assertFalse(pending_public.exists())
+            self.assertTrue(private.exists())
+            self.assertTrue(public.exists())
+            self.assertEqual(0o600, stat.S_IMODE(public.stat().st_mode))
+            self.assertIs(True, captured["retained_public_mode_0600_resume_used"])
+            self.assertEqual(
+                resume["installing_marker_sha256"],
+                captured["installing_marker_sha256"],
+            )
+            self.assertEqual(
+                resume["controller_manifest_sha256"],
+                captured["marker_controller_manifest_sha256"],
+            )
+            self.assertEqual(
+                active_controller, captured["active_controller_manifest_sha256"]
+            )
+            namespace["_validate_vm_management_key_receipt"](
+                captured, apply_lock
+            )
+            for invalid in (
+                {**captured, "public_key_mode": "0644"},
+                {**captured, "unexpected": False},
+            ):
+                with self.assertRaises(namespace["CommissionError"]):
+                    namespace["_validate_vm_management_key_receipt"](
+                        invalid, apply_lock
+                    )
 
     def test_local_image_tree_rejects_partial_or_changed_payload(self) -> None:
         namespace = load_script_namespace(
@@ -503,7 +801,7 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
             private.chmod(0o600)
             public_text = "ssh-ed25519 AAAATEST lima\n"
             public.write_text(public_text, encoding="ascii")
-            public.chmod(0o644)
+            public.chmod(0o600)
             apply_lock["vm_management_ssh"]["private_key_path"] = str(private)
             apply_lock["vm_management_ssh"]["public_key_path"] = str(public)
             plan = b"local-plan\n"
@@ -1400,7 +1698,7 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
             private.write_bytes(b"partial-private")
             private.chmod(0o600)
             public.write_bytes(b"partial-public")
-            public.chmod(0o644)
+            public.chmod(0o600)
             marker = state_root / ".vm-management-key.INSTALLING.json"
             marker.write_bytes(b"marker\n")
             marker.chmod(0o400)
@@ -1460,7 +1758,7 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
             private.write_bytes(b"second-private")
             private.chmod(0o600)
             public.write_bytes(b"second-public")
-            public.chmod(0o644)
+            public.chmod(0o600)
             with mock.patch.dict(namespace, patches), redirect_stdout(io.StringIO()):
                 second = namespace["_quarantine_management_key_pending"](
                     SimpleNamespace(
@@ -2270,7 +2568,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                     "dependency_closure_package_count": 116,
                     "immutable_public_inputs_locked": True,
                     "immutable_public_inputs_verified": False,
-                    "commission_apply_lock_sha256": "df91138d67629f13faafbffe8bcf683c3b614e256b42dc3320b11f5af8e27e2b",
+                    "commission_apply_lock_sha256": "64e8902387ece974014087476fbb9a5dfee738865e7c2944c1c5652d6ca6232a",
                     "enabled_host_prepare_phases": [
                         "host_tools_apply_enabled",
                         "lima_home_apply_enabled",
@@ -2681,6 +2979,15 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
         )
         apply_lock["stop_line"]["venue_writes_authorized"] = True
         with self.assertRaisesRegex(ValueError, "stop line"):
+            vm_renderer.validate_commission_apply_lock(apply_lock)
+
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        apply_lock["vm_management_ssh"][
+            "retained_public_mode_0600_resume_v1"
+        ]["installing_marker_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "VM-management SSH contract"):
             vm_renderer.validate_commission_apply_lock(apply_lock)
 
     def test_refuses_symlinked_inputs_existing_outputs_and_duplicate_keys(self) -> None:

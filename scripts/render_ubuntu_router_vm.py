@@ -749,7 +749,14 @@ def validate_commission_apply_lock(lock: dict[str, Any]) -> dict[str, Any]:
     if lock["vm_management_ssh"] != {
         "comment": "lima",
         "private_key_path": "/private/var/db/trading-desk-lima/_config/user",
+        "public_key_mode": "0600",
         "public_key_path": "/private/var/db/trading-desk-lima/_config/user.pub",
+        "retained_public_mode_0600_resume_v1": {
+            "controller_manifest_sha256": "4d7495d4353ecf1bacee5a2fbcb82bfcb08b0ee2d70aa752c26882e8ca28cede",
+            "installing_marker_sha256": "64ffbd5d71ae88f898a9ff071432f7ba5ad37076bba242ada019b18bd519c467",
+            "replacement_commission_apply_sha256": "4dfa7876bc8592c5e070b6b35f63aaae2434d705f57096d0f40f147fc8a0f5c7",
+            "validate_fill_receipt_sha256": "a71f87dcc141dff4af9fd2d0afdcc1fa4f7be57deeb42886cd3e2d4c09b4af8f",
+        },
         "ssh_keygen_mode": "0755",
         "ssh_keygen_path": "/usr/bin/ssh-keygen",
         "ssh_keygen_sha256": "0d8b8fb52762fa19431b40e8b75cd00b045f10bf206fd67f0598e09bfaad77d0",
