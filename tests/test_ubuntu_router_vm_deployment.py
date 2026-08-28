@@ -731,6 +731,142 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
                     receipt_sha256="0" * 64,
                 )
 
+            retained_inode = legacy_home.stat().st_ino
+            retained_home = quarantine / (
+                f"retired-lima-operator-home-{retained_inode}-v1"
+            )
+            legacy_home.rename(retained_home)
+            apply_lock["legacy_home_retirement_continuation_v1"][
+                "key_receipt_sha256"
+            ] = key_receipt_sha256
+            media_contract = apply_lock["predecessor_media_continuation_v1"]
+            media = root / "predecessor-media"
+            media_source = (
+                media
+                / "evidence"
+                / commission_lock["cloud_image"]["image_filename"]
+            )
+            events: list[str] = []
+
+            class PredecessorMediaReached(Exception):
+                pass
+
+            real_verify_home = namespace["_verify_lima_home_with_management_key"]
+
+            def verify_home(*verify_args, **verify_kwargs):
+                events.append("post-retirement-home-verified")
+                return real_verify_home(*verify_args, **verify_kwargs)
+
+            def local_phase_receipt(_state, phase: str, _digest: str):
+                if phase == "validate-fill":
+                    return {
+                        "effective_config_sha256": vm_spec["lima_home"][
+                            "effective_config_sha256"
+                        ],
+                        "lima_home_receipt_sha256": "l" * 64,
+                    }
+                if phase == "lima-home":
+                    return {
+                        "router_identity_receipt": identity_receipt,
+                        "networks_yaml_sha256": hashlib.sha256(
+                            networks.read_bytes()
+                        ).hexdigest(),
+                        "host_tools_receipt_sha256": "h" * 64,
+                    }
+                if phase == "host-tools":
+                    return {
+                        "media_receipt_sha256": media_contract[
+                            "media_receipt_sha256"
+                        ]
+                    }
+                self.assertEqual("media", phase)
+                return {
+                    "media_path": str(media),
+                    "bundle_manifest_sha256": media_contract[
+                        "bundle_manifest_sha256"
+                    ],
+                    "installing_marker_sha256": "1" * 64,
+                    "ready_marker_sha256": "2" * 64,
+                }
+
+            def local_assert_path(path: Path, **_kwargs):
+                if path == media_source:
+                    raise PredecessorMediaReached
+                return path.stat()
+
+            def local_atomic(
+                parent: Path, name: str, value: dict[str, object], **_kwargs
+            ):
+                if name == "05a-legacy-home-retirement.json":
+                    events.append("retirement-receipt-created")
+                path = parent / name
+                write_json(path, value)
+                path.chmod(0o400)
+                return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+            def verify_predecessor_files(
+                _media,
+                manifest_digest,
+                _commission_lock,
+                *,
+                expected_bundle_files,
+                **_kwargs,
+            ):
+                self.assertEqual(
+                    media_contract["bundle_manifest_sha256"], manifest_digest
+                )
+                self.assertEqual(
+                    set(media_contract["bundle_files"]), expected_bundle_files
+                )
+                events.append("predecessor-media-verified")
+                return {"installing_sha256": "1" * 64, "ready_sha256": "2" * 64}
+
+            resumed_local_patches = dict(patches)
+            resumed_local_patches.update(
+                {
+                    "_root_phase_receipt": local_phase_receipt,
+                    "_assert_real_path": local_assert_path,
+                    "_verify_lima_home_with_management_key": verify_home,
+                    "_atomic_receipt": local_atomic,
+                    "_verify_media_tree_with_files": verify_predecessor_files,
+                }
+            )
+            with (
+                mock.patch.dict(namespace, resumed_local_patches),
+                self.assertRaises(PredecessorMediaReached),
+            ):
+                namespace["_local_image"](
+                    SimpleNamespace(
+                        expected_validate_fill_receipt_sha256=resume[
+                            "validate_fill_receipt_sha256"
+                        ],
+                        expected_vm_management_key_receipt_sha256=(
+                            key_receipt_sha256
+                        ),
+                        expected_controller_manifest_sha256=active_controller,
+                    )
+                )
+            self.assertEqual(
+                [
+                    "retirement-receipt-created",
+                    "post-retirement-home-verified",
+                    "predecessor-media-verified",
+                ],
+                events,
+            )
+            retirement_receipt = json.loads(
+                (receipt_parent / "05a-legacy-home-retirement.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertIs(
+                True,
+                retirement_receipt["recovered_unreceipted_predecessor"],
+            )
+            self.assertEqual(
+                str(retained_home), retirement_receipt["retained_path"]
+            )
+
     def test_local_image_tree_rejects_partial_or_changed_payload(self) -> None:
         namespace = load_script_namespace(
             COMMISSION_APPLY_PATH, "commission_apply_local_image_tree_test"
@@ -771,6 +907,123 @@ class UbuntuRouterVMArtifactTests(unittest.TestCase):
                         expected_sha256=hashlib.sha256(b"exact-image").hexdigest(),
                         expected_size=len(b"exact-image"),
                     )
+
+    def test_predecessor_media_verifies_exact_manifest_file_set_and_hashes(self) -> None:
+        namespace = load_script_namespace(
+            COMMISSION_APPLY_PATH, "commission_apply_predecessor_media_test"
+        )
+        apply_lock = json.loads(
+            COMMISSION_APPLY_LOCK_PATH.read_text(encoding="utf-8")
+        )
+        contract = apply_lock["predecessor_media_continuation_v1"]
+        with tempfile.TemporaryDirectory() as directory:
+            media = Path(directory).resolve() / "media"
+            bundle = media / "bundle"
+            evidence = media / "evidence"
+            bundle.mkdir(mode=0o700, parents=True)
+            evidence.mkdir(mode=0o700)
+            file_hashes: dict[str, str] = {}
+            for name in contract["bundle_files"]:
+                content = f"predecessor:{name}\n".encode("ascii")
+                path = bundle / name
+                path.write_bytes(content)
+                path.chmod(0o400)
+                file_hashes[name] = hashlib.sha256(content).hexdigest()
+            manifest_path = bundle / "bundle-manifest.json"
+            write_json(manifest_path, {"files": file_hashes})
+            manifest_path.chmod(0o400)
+            bundle.chmod(0o500)
+            evidence.chmod(0o500)
+            installing = {
+                "schema_version": 1,
+                "kind": "trading-desk.router-commission.installing",
+                "phase": "media",
+                "bundle_manifest_sha256": contract["bundle_manifest_sha256"],
+                "evidence_set_sha256": "e" * 64,
+            }
+            ready = {
+                "schema_version": 1,
+                "kind": "trading-desk.router-commission.media-ready",
+                "bundle_manifest_sha256": contract["bundle_manifest_sha256"],
+                "evidence_set_sha256": "e" * 64,
+            }
+            installing_path = media / ".INSTALLING.json"
+            ready_path = media / ".READY.json"
+            write_json(installing_path, installing)
+            write_json(ready_path, ready)
+            installing_path.chmod(0o400)
+            ready_path.chmod(0o400)
+            media.chmod(0o500)
+            installing_sha256 = hashlib.sha256(
+                installing_path.read_bytes()
+            ).hexdigest()
+            ready_sha256 = hashlib.sha256(ready_path.read_bytes()).hexdigest()
+
+            def assert_path(path: Path, **_kwargs):
+                return path.stat()
+
+            def pinned_sha256(path: Path) -> str:
+                if path == manifest_path:
+                    return contract["bundle_manifest_sha256"]
+                return hashlib.sha256(path.read_bytes()).hexdigest()
+
+            patches = {
+                "_assert_real_path": assert_path,
+                "_sha256_file": pinned_sha256,
+                "_evidence_hashes": lambda _lock: {},
+            }
+            with mock.patch.dict(namespace, patches):
+                observed = namespace["_verify_predecessor_media_tree"](
+                    media,
+                    contract["bundle_manifest_sha256"],
+                    contract["media_receipt_sha256"],
+                    {},
+                    apply_lock,
+                    expected_installing_sha256=installing_sha256,
+                    expected_ready_sha256=ready_sha256,
+                )
+            self.assertEqual(
+                {
+                    "installing_sha256": installing_sha256,
+                    "ready_sha256": ready_sha256,
+                },
+                observed,
+            )
+            changed = bundle / contract["bundle_files"][0]
+            changed.chmod(0o600)
+            changed.write_bytes(b"changed\n")
+            changed.chmod(0o400)
+            with (
+                mock.patch.dict(namespace, patches),
+                self.assertRaisesRegex(
+                    namespace["CommissionError"], "sealed bundle file differs"
+                ),
+            ):
+                namespace["_verify_predecessor_media_tree"](
+                    media,
+                    contract["bundle_manifest_sha256"],
+                    contract["media_receipt_sha256"],
+                    {},
+                    apply_lock,
+                    expected_installing_sha256=installing_sha256,
+                    expected_ready_sha256=ready_sha256,
+                )
+            with (
+                mock.patch.dict(namespace, patches),
+                self.assertRaisesRegex(
+                    namespace["CommissionError"],
+                    "predecessor sealed media continuation differs",
+                ),
+            ):
+                namespace["_verify_predecessor_media_tree"](
+                    media,
+                    contract["bundle_manifest_sha256"],
+                    "0" * 64,
+                    {},
+                    apply_lock,
+                    expected_installing_sha256=installing_sha256,
+                    expected_ready_sha256=ready_sha256,
+                )
 
     def test_resumed_locked_copy_reestablishes_full_durability(self) -> None:
         namespace = load_script_namespace(
@@ -2622,7 +2875,7 @@ class UbuntuRouterVMRendererTests(unittest.TestCase):
                     "dependency_closure_package_count": 116,
                     "immutable_public_inputs_locked": True,
                     "immutable_public_inputs_verified": False,
-                    "commission_apply_lock_sha256": "0cd6aae7ba996c6929106f49490782fb76c9505768dbe81702549c72a4473e8e",
+                    "commission_apply_lock_sha256": "f05094c2d5f6e5bd3e88574c4ae208c96b0e429ba3dd7c21693a40ef084a57c0",
                     "enabled_host_prepare_phases": [
                         "host_tools_apply_enabled",
                         "lima_home_apply_enabled",

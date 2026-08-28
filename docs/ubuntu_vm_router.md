@@ -224,7 +224,13 @@ writable Lima state. The enabled host-only sequence is:
 8. `apply-local-image` copies the exact signed-image payload from sealed media
    to a root-owned mode-`0444` local path after headroom checks, retires (without
    deleting) the obsolete empty `LIMA_HOME/home`, and validates the separate
-   manifest-bound local-image plan.
+   manifest-bound local-image plan. The live continuation admits only the exact
+   predecessor media-receipt/manifest pair and verifies every predecessor
+   bundle file against that hashed manifest; the new local plan and cloud
+   template still come only from the current sealed controller. It also adopts
+   only the sole empty UID/GID-454 retired-home directory left by the pinned
+   failed controller, durably writes a root-owned recovery receipt, then
+   revalidates the no-`home` Lima layout before any media or image work.
 9. `apply-create-vm` runs only `limactl create --tty=false
    --name=trading-desk-router -` as UID 454. It pins the deterministic raw-disk
    hash, stored plan, cloud config, Lima version and VZ identifier; verifies the

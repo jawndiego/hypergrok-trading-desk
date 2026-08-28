@@ -107,6 +107,27 @@ EXPECTED_BUNDLE_FILES = {
     "ubuntu-cloud-image-signing-key.gpg",
     "vm-spec.json",
 }
+PREDECESSOR_MEDIA_BUNDLE_FILES = {
+    "bootstrap-public.sh",
+    "commission-apply-launcher.sh",
+    "commission-apply-lock.json",
+    "commission-apply.py",
+    "commission-guest.py",
+    "commission-lock.json",
+    "commission-public.py",
+    "guest-preflight.sh",
+    "host-preflight.sh",
+    "image-lock.json",
+    "lima-2.2.0-attestation.jsonl",
+    "lima.yaml",
+    "networks.yaml",
+    "package-lock.json",
+    "sigstore-trusted-root.jsonl",
+    "socket-vmnet-1.2.2-attestation.jsonl",
+    "ubuntu-cloud-image-signing-key.gpg",
+    "vm-spec.json",
+}
+LEGACY_HOME_RETIREMENT_RECEIPT_NAME = "05a-legacy-home-retirement.json"
 
 
 class CommissionError(RuntimeError):
@@ -408,8 +429,10 @@ def _locks() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     expected_apply_keys = {
         "blockers",
         "host",
+        "legacy_home_retirement_continuation_v1",
         "paths",
         "phases",
+        "predecessor_media_continuation_v1",
         "python_runtime",
         "review_status",
         "schema_version",
@@ -470,6 +493,19 @@ def _locks() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     }
     if apply_lock.get("paths") != expected_paths:
         raise CommissionError("commission path contract differs")
+    if apply_lock.get("legacy_home_retirement_continuation_v1") != {
+        "failed_controller_manifest_sha256": "30deaa366700dfa249bf2de9c60ef3320ed96d54b385d3f153ec18b73d73f9b8",
+        "key_receipt_sha256": "b4ed93990ddba27b0d7507807642dda9503c9ef7e3417c5b94cdb07e63c9796f",
+        "producer_commission_apply_sha256": "4ca7ddca32ba6a6bc6a38c9f522bd6aae2c08e19308bad986254ac0db5f2f330",
+        "recovery_receipt_name": LEGACY_HOME_RETIREMENT_RECEIPT_NAME,
+    }:
+        raise CommissionError("legacy Lima HOME continuation contract differs")
+    if apply_lock.get("predecessor_media_continuation_v1") != {
+        "bundle_files": sorted(PREDECESSOR_MEDIA_BUNDLE_FILES),
+        "bundle_manifest_sha256": "12afc70444e13b39488cab24823452b82f9231ef74c6ea388aa9e973c56c2062",
+        "media_receipt_sha256": "f2febdf4fc54913f45ac81c76ab722e3e309accae7eaed78c291b833871e473f",
+    }:
+        raise CommissionError("predecessor media continuation contract differs")
     expected_stop_line = {
         "executor_init_authorized": False,
         "mainnet_authorized": False,
@@ -1834,14 +1870,20 @@ def _media_marker_hashes(media: Path, manifest_digest: str) -> dict[str, str]:
     }
 
 
-def _verify_media_tree(
+def _verify_media_tree_with_files(
     media: Path,
     manifest_digest: str,
     commission_lock: dict[str, Any],
     *,
+    expected_bundle_files: set[str],
     expected_installing_sha256: str | None = None,
     expected_ready_sha256: str | None = None,
 ) -> dict[str, str]:
+    if expected_bundle_files not in (
+        EXPECTED_BUNDLE_FILES,
+        PREDECESSOR_MEDIA_BUNDLE_FILES,
+    ):
+        raise CommissionError("sealed media bundle allowlist is not reviewed")
     _assert_real_path(media, kind="directory", owner_uid=0, owner_gid=0, mode=0o500)
     marker_hashes = _media_marker_hashes(media, manifest_digest)
     installing_sha256 = marker_hashes["installing_sha256"]
@@ -1859,7 +1901,7 @@ def _verify_media_tree(
         raise CommissionError("sealed bundle-manifest digest differs")
     manifest = _read_json(manifest_path, "sealed bundle manifest")
     expected_bundle = dict(manifest["files"])
-    if set(expected_bundle) != EXPECTED_BUNDLE_FILES or any(
+    if set(expected_bundle) != expected_bundle_files or any(
         Path(name).name != name or "/" in name or "\\" in name
         for name in expected_bundle
     ):
@@ -1885,6 +1927,51 @@ def _verify_media_tree(
         if _sha256_file(path) != digest:
             raise CommissionError(f"sealed evidence file differs: {name}")
     return {"installing_sha256": installing_sha256, "ready_sha256": ready_sha256}
+
+
+def _verify_media_tree(
+    media: Path,
+    manifest_digest: str,
+    commission_lock: dict[str, Any],
+    *,
+    expected_installing_sha256: str | None = None,
+    expected_ready_sha256: str | None = None,
+) -> dict[str, str]:
+    return _verify_media_tree_with_files(
+        media,
+        manifest_digest,
+        commission_lock,
+        expected_bundle_files=EXPECTED_BUNDLE_FILES,
+        expected_installing_sha256=expected_installing_sha256,
+        expected_ready_sha256=expected_ready_sha256,
+    )
+
+
+def _verify_predecessor_media_tree(
+    media: Path,
+    manifest_digest: str,
+    media_receipt_sha256: str,
+    commission_lock: dict[str, Any],
+    apply_lock: dict[str, Any],
+    *,
+    expected_installing_sha256: str,
+    expected_ready_sha256: str,
+) -> dict[str, str]:
+    contract = apply_lock["predecessor_media_continuation_v1"]
+    if (
+        manifest_digest != contract["bundle_manifest_sha256"]
+        or media_receipt_sha256 != contract["media_receipt_sha256"]
+        or contract["bundle_files"] != sorted(PREDECESSOR_MEDIA_BUNDLE_FILES)
+    ):
+        raise CommissionError("predecessor sealed media continuation differs")
+    return _verify_media_tree_with_files(
+        media,
+        manifest_digest,
+        commission_lock,
+        expected_bundle_files=PREDECESSOR_MEDIA_BUNDLE_FILES,
+        expected_installing_sha256=expected_installing_sha256,
+        expected_ready_sha256=expected_ready_sha256,
+    )
 
 
 def _seal_media(args: argparse.Namespace) -> int:
@@ -3566,16 +3653,21 @@ def _verify_lima_home_with_management_key(
 def _retire_legacy_operator_home(
     state: dict[str, Path],
     apply_lock: dict[str, Any],
-) -> Path:
+    *,
+    active_controller_manifest_sha256: str,
+    key_receipt_sha256: str,
+) -> tuple[Path, str]:
     lima_home = Path(apply_lock["paths"]["lima_home"])
     source = lima_home / "home"
     uid = apply_lock["host"]["router_operator_uid"]
     gid = apply_lock["host"]["router_operator_gid"]
+    receipt_path = state["receipt_parent"] / LEGACY_HOME_RETIREMENT_RECEIPT_NAME
     matches = tuple(
         state["quarantine_parent"].glob("retired-lima-operator-home-*-v1")
     )
-    if source.exists() or source.is_symlink():
-        if matches:
+    source_was_present = source.exists() or source.is_symlink()
+    if source_was_present:
+        if matches or receipt_path.exists() or receipt_path.is_symlink():
             raise CommissionError("legacy Lima HOME retirement state differs")
         _assert_real_path(source, kind="directory", owner_uid=uid, owner_gid=gid, mode=0o700)
         if any(source.iterdir()):
@@ -3593,7 +3685,76 @@ def _retire_legacy_operator_home(
         f"retired-lima-operator-home-{destination.stat().st_ino}-v1"
     ):
         raise CommissionError("retained legacy Lima HOME differs")
-    return destination
+    continuation = apply_lock["legacy_home_retirement_continuation_v1"]
+    existing_receipt: dict[str, Any] | None = None
+    if receipt_path.exists() or receipt_path.is_symlink():
+        _assert_real_path(
+            receipt_path, kind="file", owner_uid=0, owner_gid=0, mode=0o400
+        )
+        existing_receipt = _read_json(
+            receipt_path, "legacy Lima HOME retirement receipt"
+        )
+        recovered = existing_receipt.get("recovered_unreceipted_predecessor")
+        if type(recovered) is not bool:
+            raise CommissionError("legacy Lima HOME retirement receipt differs")
+        recovered_unreceipted = recovered
+    elif source_was_present:
+        recovered_unreceipted = False
+    else:
+        recovered_unreceipted = True
+    if recovered_unreceipted:
+        if (
+            key_receipt_sha256 != continuation["key_receipt_sha256"]
+            or active_controller_manifest_sha256
+            == continuation["failed_controller_manifest_sha256"]
+            or _sha256_file(Path(__file__).resolve())
+            == continuation["producer_commission_apply_sha256"]
+            or continuation["recovery_receipt_name"]
+            != LEGACY_HOME_RETIREMENT_RECEIPT_NAME
+        ):
+            raise CommissionError("legacy Lima HOME recovery continuation differs")
+        retirement_controller_manifest_sha256 = continuation[
+            "failed_controller_manifest_sha256"
+        ]
+        retirement_commission_apply_sha256 = continuation[
+            "producer_commission_apply_sha256"
+        ]
+    else:
+        retirement_controller_manifest_sha256 = active_controller_manifest_sha256
+        retirement_commission_apply_sha256 = _sha256_file(Path(__file__).resolve())
+    receipt = {
+        "schema_version": 1,
+        "kind": "trading-desk.router-commission.legacy-home-retirement",
+        "phase": "legacy-home-retirement",
+        "source_path": str(source),
+        "retained_path": str(destination),
+        "retained_device": destination.stat().st_dev,
+        "retained_inode": destination.stat().st_ino,
+        "key_receipt_sha256": key_receipt_sha256,
+        "active_controller_manifest_sha256": active_controller_manifest_sha256,
+        "retirement_controller_manifest_sha256": (
+            retirement_controller_manifest_sha256
+        ),
+        "retirement_commission_apply_sha256": retirement_commission_apply_sha256,
+        "recovered_unreceipted_predecessor": recovered_unreceipted,
+        "automatic_delete_performed": False,
+        "network_changes_performed": False,
+        "venue_credentials_touched": False,
+        "venue_writes_authorized": False,
+        "mainnet_authorized": False,
+    }
+    if existing_receipt is not None and existing_receipt != receipt:
+        raise CommissionError("legacy Lima HOME retirement receipt differs")
+    path, digest = _atomic_receipt(
+        state["receipt_parent"],
+        LEGACY_HOME_RETIREMENT_RECEIPT_NAME,
+        receipt,
+        uid=0,
+        gid=0,
+    )
+    if path != receipt_path:
+        raise CommissionError("legacy Lima HOME retirement receipt path differs")
+    return destination, digest
 
 
 def _free_bytes(path: Path) -> int:
@@ -3654,21 +3815,35 @@ def _local_image(args: argparse.Namespace) -> int:
     legacy_home_present = (lima_home / "home").exists() or (
         lima_home / "home"
     ).is_symlink()
-    key_evidence = _verify_lima_home_with_management_key(
-        lima_home,
+    key_evidence: dict[str, object] | None = None
+    if legacy_home_present:
+        key_evidence = _verify_lima_home_with_management_key(
+            lima_home,
+            apply_lock,
+            lima_receipt["networks_yaml_sha256"],
+            key_receipt,
+            legacy_home_present=True,
+        )
+    retained_home, retirement_receipt_sha256 = _retire_legacy_operator_home(
+        state,
         apply_lock,
-        lima_receipt["networks_yaml_sha256"],
-        key_receipt,
-        legacy_home_present=legacy_home_present,
+        active_controller_manifest_sha256=args.expected_controller_manifest_sha256,
+        key_receipt_sha256=args.expected_vm_management_key_receipt_sha256,
     )
-    retained_home = _retire_legacy_operator_home(state, apply_lock)
-    _verify_lima_home_with_management_key(
+    post_retirement_key_evidence = _verify_lima_home_with_management_key(
         lima_home,
         apply_lock,
         lima_receipt["networks_yaml_sha256"],
         key_receipt,
         legacy_home_present=False,
     )
+    if key_evidence is None:
+        key_evidence = post_retirement_key_evidence
+    elif (
+        key_evidence["private_identity"]
+        != post_retirement_key_evidence["private_identity"]
+    ):
+        raise CommissionError("VM-management key changed during HOME retirement")
     host_receipt = _root_phase_receipt(
         state, "host-tools", lima_receipt["host_tools_receipt_sha256"]
     )
@@ -3676,13 +3851,32 @@ def _local_image(args: argparse.Namespace) -> int:
         state, "media", host_receipt["media_receipt_sha256"]
     )
     media = Path(media_receipt["media_path"])
-    _verify_media_tree(
-        media,
-        media_receipt["bundle_manifest_sha256"],
-        commission_lock,
-        expected_installing_sha256=media_receipt["installing_marker_sha256"],
-        expected_ready_sha256=media_receipt["ready_marker_sha256"],
-    )
+    predecessor_media = apply_lock["predecessor_media_continuation_v1"]
+    if host_receipt["media_receipt_sha256"] == predecessor_media[
+        "media_receipt_sha256"
+    ]:
+        _verify_predecessor_media_tree(
+            media,
+            media_receipt["bundle_manifest_sha256"],
+            host_receipt["media_receipt_sha256"],
+            commission_lock,
+            apply_lock,
+            expected_installing_sha256=media_receipt["installing_marker_sha256"],
+            expected_ready_sha256=media_receipt["ready_marker_sha256"],
+        )
+    else:
+        if (
+            media_receipt["bundle_manifest_sha256"]
+            != args.expected_controller_manifest_sha256
+        ):
+            raise CommissionError("sealed media is not current or exact predecessor")
+        _verify_media_tree(
+            media,
+            media_receipt["bundle_manifest_sha256"],
+            commission_lock,
+            expected_installing_sha256=media_receipt["installing_marker_sha256"],
+            expected_ready_sha256=media_receipt["ready_marker_sha256"],
+        )
     cloud = commission_lock["cloud_image"]
     source = media / "evidence" / cloud["image_filename"]
     _assert_real_path(source, kind="file", owner_uid=0, owner_gid=0, mode=0o400)
@@ -3807,6 +4001,7 @@ def _local_image(args: argparse.Namespace) -> int:
         "runtime_receipt_sha256": runtime_receipt_sha,
         "router_identity_receipt": identity_receipt,
         "retained_legacy_operator_home": str(retained_home),
+        "legacy_home_retirement_receipt_sha256": retirement_receipt_sha256,
         "local_image_path": str(image),
         "local_image_sha256": cloud["image_sha256"],
         "local_image_size_bytes": cloud["image_size_bytes"],

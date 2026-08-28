@@ -24,6 +24,12 @@
     ],
     "router_operator_uid": 454
   },
+  "legacy_home_retirement_continuation_v1": {
+    "failed_controller_manifest_sha256": "30deaa366700dfa249bf2de9c60ef3320ed96d54b385d3f153ec18b73d73f9b8",
+    "key_receipt_sha256": "b4ed93990ddba27b0d7507807642dda9503c9ef7e3417c5b94cdb07e63c9796f",
+    "producer_commission_apply_sha256": "4ca7ddca32ba6a6bc6a38c9f522bd6aae2c08e19308bad986254ac0db5f2f330",
+    "recovery_receipt_name": "05a-legacy-home-retirement.json"
+  },
   "paths": {
     "lima_home": "/private/var/db/trading-desk-lima",
     "lima_install": "/opt/trading-desk-router-tools/lima-2.2.0",
@@ -67,6 +73,30 @@
     "qualification_receipt_path": "/opt/trading-desk/runtime-install-receipts/python-3.11.16-sealed-runtime.json",
     "version": "3.11.16"
   },
+  "predecessor_media_continuation_v1": {
+    "bundle_files": [
+      "bootstrap-public.sh",
+      "commission-apply-launcher.sh",
+      "commission-apply-lock.json",
+      "commission-apply.py",
+      "commission-guest.py",
+      "commission-lock.json",
+      "commission-public.py",
+      "guest-preflight.sh",
+      "host-preflight.sh",
+      "image-lock.json",
+      "lima-2.2.0-attestation.jsonl",
+      "lima.yaml",
+      "networks.yaml",
+      "package-lock.json",
+      "sigstore-trusted-root.jsonl",
+      "socket-vmnet-1.2.2-attestation.jsonl",
+      "ubuntu-cloud-image-signing-key.gpg",
+      "vm-spec.json"
+    ],
+    "bundle_manifest_sha256": "12afc70444e13b39488cab24823452b82f9231ef74c6ea388aa9e973c56c2062",
+    "media_receipt_sha256": "f2febdf4fc54913f45ac81c76ab722e3e309accae7eaed78c291b833871e473f"
+  },
   "review_status": "venue_credential_free_create_only_enabled_vm_start_guest_network_disabled",
   "schema_version": 3,
   "storage": {
@@ -93,7 +123,7 @@
       },
       "controller_manifest_sha256": "4d7495d4353ecf1bacee5a2fbcb82bfcb08b0ee2d70aa752c26882e8ca28cede",
       "installing_marker_sha256": "64ffbd5d71ae88f898a9ff071432f7ba5ad37076bba242ada019b18bd519c467",
-      "replacement_commission_apply_sha256": "4ca7ddca32ba6a6bc6a38c9f522bd6aae2c08e19308bad986254ac0db5f2f330",
+      "replacement_commission_apply_sha256": "9aca42b4664db7040264f81761f6053dd04844fbcc5ba6affa1cc3f9465d4d71",
       "validate_fill_receipt_sha256": "a71f87dcc141dff4af9fd2d0afdcc1fa4f7be57deeb42886cd3e2d4c09b4af8f"
     },
     "ssh_keygen_mode": "0755",
