@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "deploy" / "macos" / "testnet" / "04-install-merged-main.sh"
-EXPECTED_COMMIT = "579744653593d2e853d5f09c1fc6db5a13f40f97"
+EXPECTED_COMMIT = "9d5825f67519f41713f0f2002756fe8b303f79ee"
 
 
 def installer_text() -> str:

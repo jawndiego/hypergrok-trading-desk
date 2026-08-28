@@ -47,8 +47,8 @@ class CommissionedReleaseMigrationTests(unittest.TestCase):
         self.assertEqual(0, plan.returncode, plan.stderr)
         self.assertIn("PLAN_ONLY", plan.stdout)
         self.assertIn("rebind_required=0", plan.stdout)
-        self.assertIn("df93d8ca8b69a59d25545cc3a16d38805b18bea3", plan.stdout)
         self.assertIn("579744653593d2e853d5f09c1fc6db5a13f40f97", plan.stdout)
+        self.assertIn("9d5825f67519f41713f0f2002756fe8b303f79ee", plan.stdout)
         attempted = subprocess.run(
             [str(MIGRATOR), "--apply", "/private/tmp/not-opened"],
             check=False,
@@ -62,11 +62,11 @@ class CommissionedReleaseMigrationTests(unittest.TestCase):
         text = source()
         self.assertIn("REBIND_REQUIRED=0", text)
         self.assertIn(
-            "OLD_RECEIPT_SHA256=b1e1663ad12179a0bf9f560f1f9a979274f3342caf838eb649a23d0dede26e6b",
+            "OLD_RECEIPT_SHA256=537a96aa54d7c1f04a3d50b60efb5e769398e18fd01ff26c75368d7d76c1df64",
             text,
         )
         self.assertIn(
-            "NEW_RECEIPT_SHA256=537a96aa54d7c1f04a3d50b60efb5e769398e18fd01ff26c75368d7d76c1df64",
+            "NEW_RECEIPT_SHA256=0ad59c49bba4e6595bceee9dfc2781246fcdf4b4a3f52d6cbeaf1065753adbf8",
             text,
         )
         installer_hash = hashlib.sha256(INSTALLER.read_bytes()).hexdigest()

@@ -49,8 +49,8 @@ class UncommissionedReleaseMigrationTests(unittest.TestCase):
         self.assertIn("rebind_required=0", plan.stdout)
         self.assertIn("a0f82d5928e57c43e511127a490ecbcf48110684", plan.stdout)
         self.assertIn("281b8829eddd4d75a340e0bd1894792904686e0276b84bc6415812e80a10fb9b", plan.stdout)
-        self.assertIn("579744653593d2e853d5f09c1fc6db5a13f40f97", plan.stdout)
-        self.assertIn("537a96aa54d7c1f04a3d50b60efb5e769398e18fd01ff26c75368d7d76c1df64", plan.stdout)
+        self.assertIn("9d5825f67519f41713f0f2002756fe8b303f79ee", plan.stdout)
+        self.assertIn("0ad59c49bba4e6595bceee9dfc2781246fcdf4b4a3f52d6cbeaf1065753adbf8", plan.stdout)
 
     def test_bound_apply_and_restore_require_attended_root(self) -> None:
         text = source()
@@ -66,11 +66,11 @@ class UncommissionedReleaseMigrationTests(unittest.TestCase):
             self.assertNotEqual(0, result.returncode)
             self.assertIn("real/effective root", result.stderr)
         self.assertIn(
-            "NEW_COMMIT=579744653593d2e853d5f09c1fc6db5a13f40f97",
+            "NEW_COMMIT=9d5825f67519f41713f0f2002756fe8b303f79ee",
             text,
         )
         self.assertIn(
-            "NEW_RECEIPT_SHA256=537a96aa54d7c1f04a3d50b60efb5e769398e18fd01ff26c75368d7d76c1df64",
+            "NEW_RECEIPT_SHA256=0ad59c49bba4e6595bceee9dfc2781246fcdf4b4a3f52d6cbeaf1065753adbf8",
             text,
         )
         installer_hash = hashlib.sha256(
