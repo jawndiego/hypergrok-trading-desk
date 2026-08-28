@@ -28,6 +28,8 @@ PLACEHOLDER_RE = re.compile(r"__[A-Z0-9_]+__")
 
 SOURCE_FILES: dict[str, int] = {
     "README.md": 0o600,
+    "airgap-hardware-profile.json.example": 0o600,
+    "airgap-watchdog.py": 0o700,
     "bootstrap-apply-launcher.sh": 0o700,
     "bootstrap-apply.py": 0o700,
     "bootstrap-lock.json": 0o600,
@@ -35,6 +37,7 @@ SOURCE_FILES: dict[str, int] = {
     "finalize-first-boot.sh": 0o700,
     "first-boot-hardening.sh": 0o700,
     "lima-first-boot.yaml.example": 0o600,
+    "lima-first-boot.sudoers": 0o600,
     "networks-first-boot.yaml": 0o600,
     "predecessor-cloud-config.template": 0o600,
     "predecessor-lima-create-local.yaml": 0o600,
@@ -78,7 +81,7 @@ def _load_lock(content: bytes) -> dict[str, Any]:
     if (
         value.get("schema_version") != 1
         or value.get("review_status")
-        != "attended_airgap_hardened_recreate_enabled_start_disabled"
+        != "attended_airgap_hardened_recreate_and_one_boot_enabled"
         or value.get("host", {}).get("router_operator_uid") != 454
         or value.get("host", {}).get("router_operator_gid") != 454
         or value.get("guest", {}).get("instance_name") != "trading-desk-router"
@@ -86,7 +89,7 @@ def _load_lock(content: bytes) -> dict[str, Any]:
         != "1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601"
         or value.get("phases")
         != {
-            "airgapped_start_apply_enabled": False,
+            "airgapped_start_apply_enabled": True,
             "guest_package_apply_enabled": False,
             "hardened_recreate_apply_enabled": True,
             "router_activation_apply_enabled": False,
@@ -104,7 +107,7 @@ def _load_lock(content: bytes) -> dict[str, Any]:
             "router_key_generation_authorized": False,
             "venue_credentials_authorized": False,
             "venue_writes_authorized": False,
-            "vm_start_authorized": False,
+            "unconstrained_vm_start_authorized": False,
         }
     ):
         raise ValueError("bootstrap lock authorization boundary differs")
@@ -137,12 +140,109 @@ def _render_template(path: Path, replacements: dict[str, str]) -> bytes:
     return text.encode("utf-8")
 
 
-def _rendered_files() -> tuple[dict[str, tuple[bytes, int]], dict[str, Any]]:
+def _validate_hardware_profile(content: bytes) -> dict[str, Any]:
+    try:
+        profile = json.loads(content, object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("air-gap hardware profile is invalid") from error
+    if (
+        not isinstance(profile, dict)
+        or set(profile)
+        != {
+            "hardware_ports",
+            "host",
+            "host_only",
+            "kind",
+            "network_services",
+            "passive_interfaces",
+            "schema_version",
+        }
+        or profile.get("schema_version") != 1
+        or profile.get("kind")
+        != "trading-desk.router-bootstrap.airgap-hardware-profile"
+    ):
+        raise ValueError("air-gap hardware profile schema differs")
+    host = profile.get("host")
+    if (
+        not isinstance(host, dict)
+        or set(host) != {"build_version", "machine", "product_version"}
+        or host.get("machine") != "arm64"
+        or not all(isinstance(host.get(key), str) and host[key] for key in host)
+    ):
+        raise ValueError("air-gap hardware host profile differs")
+    ports = profile.get("hardware_ports")
+    mac_re = re.compile(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}")
+    interface_re = re.compile(r"[a-z][a-z0-9]{0,14}")
+    if not isinstance(ports, list) or not ports:
+        raise ValueError("air-gap hardware port profile is empty")
+    for item in ports:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"device", "ethernet_address", "hardware_port", "kind"}
+            or not isinstance(item["device"], str)
+            or interface_re.fullmatch(item["device"]) is None
+            or not isinstance(item["ethernet_address"], str)
+            or mac_re.fullmatch(item["ethernet_address"]) is None
+            or item["kind"]
+            not in {"wifi", "ethernet", "thunderbolt", "usb", "cellular", "other"}
+            or not isinstance(item["hardware_port"], str)
+            or not item["hardware_port"]
+        ):
+            raise ValueError("air-gap hardware port profile differs")
+    if len({item["device"] for item in ports}) != len(ports):
+        raise ValueError("air-gap hardware device repeats")
+    wifi_ports = [item for item in ports if item["hardware_port"] == "Wi-Fi"]
+    if (
+        len(wifi_ports) != 1
+        or wifi_ports[0]["kind"] != "wifi"
+        or sum(item["kind"] == "wifi" for item in ports) != 1
+    ):
+        raise ValueError("air-gap Wi-Fi classification differs")
+    services = profile.get("network_services")
+    if (
+        not isinstance(services, list)
+        or not services
+        or any(not isinstance(value, str) or not value for value in services)
+        or len(set(services)) != len(services)
+    ):
+        raise ValueError("air-gap network-service profile differs")
+    passive = profile.get("passive_interfaces")
+    if not isinstance(passive, list) or any(
+        not isinstance(item, dict)
+        or set(item) != {"interface", "status", "up"}
+        or interface_re.fullmatch(item.get("interface", "")) is None
+        or item.get("status") != "inactive"
+        or item.get("up") is not True
+        for item in passive
+    ):
+        raise ValueError("air-gap passive-interface profile differs")
+    host_only = profile.get("host_only")
+    if (
+        not isinstance(host_only, dict)
+        or host_only != {"interface": "bridge100", "ipv4_cidr": "192.168.106.1/24"}
+    ):
+        raise ValueError("air-gap host-only profile differs")
+    return profile
+
+
+def _rendered_files(
+    hardware_profile_path: Path,
+) -> tuple[dict[str, tuple[bytes, int]], dict[str, Any]]:
     source_bytes = {
         name: _read(SOURCE / name, name)
         for name in SOURCE_FILES
     }
     lock = _load_lock(source_bytes["bootstrap-lock.json"])
+    hardware_profile = _read(
+        hardware_profile_path.resolve(strict=True), "local air-gap hardware profile"
+    )
+    profile = _validate_hardware_profile(hardware_profile)
+    if profile["host"] != {
+        "build_version": lock["host"]["build_version"],
+        "machine": lock["host"]["architecture"],
+        "product_version": lock["host"]["product_version"],
+    }:
+        raise ValueError("air-gap profile host differs from bootstrap lock")
     verifier_sha256 = _sha256(source_bytes["verify-first-boot.py"])
     finalizer_marker = b"__VERIFY_FIRST_BOOT_SHA256__"
     if source_bytes["finalize-first-boot.sh"].count(finalizer_marker) != 1:
@@ -180,6 +280,7 @@ def _rendered_files() -> tuple[dict[str, tuple[bytes, int]], dict[str, Any]]:
     files: dict[str, tuple[bytes, int]] = {
         name: (content, SOURCE_FILES[name]) for name, content in source_bytes.items()
     }
+    files["airgap-hardware-profile.json"] = (hardware_profile, 0o600)
     files["lima-first-boot.yaml"] = (plan, 0o600)
     return files, lock
 
@@ -199,12 +300,12 @@ def _write(path: Path, content: bytes, mode: int) -> None:
     path.chmod(mode)
 
 
-def render(output: Path) -> dict[str, Any]:
+def render(output: Path, hardware_profile_path: Path) -> dict[str, Any]:
     if not output.is_absolute() or output.exists() or output.is_symlink():
         raise ValueError("output must be a new absolute path")
     if not output.parent.is_dir() or output.parent.is_symlink():
         raise ValueError("output parent must be a real directory")
-    files, lock = _rendered_files()
+    files, lock = _rendered_files(hardware_profile_path)
     output.mkdir(mode=0o700)
     try:
         hashes: dict[str, str] = {}
@@ -213,6 +314,7 @@ def render(output: Path) -> dict[str, Any]:
             hashes[name] = _sha256(content)
         manifest = {
             "apply_enabled": False,
+            "attended_airgapped_start_apply_enabled": True,
             "bundle_kind": "trading-desk.ubuntu-router-airgap-bootstrap",
             "files": hashes,
             "hardened_plan_sha256": hashes["lima-first-boot.yaml"],
@@ -232,7 +334,12 @@ def render(output: Path) -> dict[str, Any]:
     return manifest
 
 
-def verify(bundle: Path, expected_manifest_sha256: str, owner_uid: int | None) -> dict[str, Any]:
+def verify(
+    bundle: Path,
+    expected_manifest_sha256: str,
+    owner_uid: int | None,
+    hardware_profile_path: Path,
+) -> dict[str, Any]:
     if SHA256_RE.fullmatch(expected_manifest_sha256) is None:
         raise ValueError("expected manifest digest is invalid")
     if not bundle.is_absolute() or not bundle.is_dir() or bundle.is_symlink():
@@ -249,7 +356,7 @@ def verify(bundle: Path, expected_manifest_sha256: str, owner_uid: int | None) -
         manifest = json.loads(manifest_raw, object_pairs_hook=_unique_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("bundle manifest is invalid") from error
-    expected_files, lock = _rendered_files()
+    expected_files, lock = _rendered_files(hardware_profile_path)
     expected_names = set(expected_files) | {"bundle-manifest.json"}
     if {path.name for path in bundle.iterdir()} != expected_names:
         raise ValueError("bundle file inventory differs")
@@ -258,6 +365,7 @@ def verify(bundle: Path, expected_manifest_sha256: str, owner_uid: int | None) -
         or manifest.get("bundle_kind")
         != "trading-desk.ubuntu-router-airgap-bootstrap"
         or manifest.get("apply_enabled") is not False
+        or manifest.get("attended_airgapped_start_apply_enabled") is not True
         or manifest.get("network_changes_performed") is not False
         or manifest.get("vm_started") is not False
         or manifest.get("venue_writes_authorized") is not False
@@ -285,6 +393,7 @@ def verify(bundle: Path, expected_manifest_sha256: str, owner_uid: int | None) -
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--hardware-profile", type=Path)
     parser.add_argument("--check-bundle", type=Path)
     parser.add_argument("--expected-manifest-sha256")
     parser.add_argument("--require-owner-uid", type=int)
@@ -294,19 +403,25 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = _parser().parse_args()
     try:
-        if args.output_dir is not None and args.check_bundle is None:
-            manifest = render(args.output_dir)
+        if (
+            args.output_dir is not None
+            and args.check_bundle is None
+            and args.hardware_profile is not None
+        ):
+            manifest = render(args.output_dir, args.hardware_profile)
             print(json.dumps(manifest, indent=2, sort_keys=True))
             return 0
         if (
             args.check_bundle is not None
             and args.output_dir is None
             and args.expected_manifest_sha256 is not None
+            and args.hardware_profile is not None
         ):
             manifest = verify(
                 args.check_bundle,
                 args.expected_manifest_sha256,
                 args.require_owner_uid,
+                args.hardware_profile,
             )
             print(json.dumps(manifest, indent=2, sort_keys=True))
             return 0

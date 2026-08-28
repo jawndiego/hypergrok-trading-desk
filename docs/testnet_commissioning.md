@@ -67,7 +67,11 @@ The normative live sequence remains `docs/testnet_qualification.md`.
   unreceipted empty-home retirement left by the failed controller. Its final
   continuation verifies and adopts one exact already-created stopped instance
   under the observed mode-`0077` artifact modes without invoking create again.
-  VM start, guest installation and every network/router-key phase remain disabled.
+  That base launcher keeps VM start, guest installation and every
+  network/router-key phase disabled. The separate receipt-08-bound
+  `lima-bootstrap` launcher now permits only one local-Terminal, physically
+  air-gapped boot/verify/stop cycle; guest package and router/network activation
+  remain disabled.
 - A TESTNET-only proposal-v2 model binds the staging document, ticket,
   protected plan, grant, displayed economics, account identity, policy,
   account/market snapshots, broker session and expiry. A separate control
@@ -154,12 +158,15 @@ their owning machines because their derived public keys are renderer inputs.
    tunnel or qualify the route.
    Receipt 07 is now complete at
    `1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601`.
-   The separately rendered `lima-bootstrap` continuation can recoverably
-   replace only that never-booted instance with a hardened stopped instance;
-   no start is enabled. Its eventual first boot requires a continuously
-   checked physical Mac air-gap until the guest's exact default-drop/lock/APT
-   verifier succeeds. UID-scoped PF is defense in depth, not the first-boot
-   isolation boundary.
+   The separately rendered `lima-bootstrap` continuation recoverably replaced
+   only that never-booted instance with a hardened stopped instance; receipt 08
+   is `8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6`.
+   Its one enabled first-boot phase requires a local Terminal and continuously
+   checked physical Mac air-gap, verifies the exact default-drop/lock/APT
+   receipt over vsock, and stops/seals the VM before permitting host uplinks to
+   return. UID-scoped PF is defense in depth, not the first-boot isolation
+   boundary. Guest network reconnect remains unauthorized until a later
+   stopped migration removes bootstrap sudo/provisioning.
 7. **Proxy/trust environment.** Prove the executor rejects ambient proxy and CA
    override variables and that its urllib openers install an empty proxy
    handler. Retain the root-owned CA path and TLS hostname-verification

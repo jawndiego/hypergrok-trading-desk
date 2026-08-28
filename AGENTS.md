@@ -241,12 +241,20 @@ This repository builds an agent-runtime-neutral trading research and execution h
   retain that exact instance and create an exact hardened replacement that
   also remains stopped. It embeds password-locked/key-only bootstrap identity,
   early APT masks, IPv6 disablement and a default-drop nftables policy, but
-  none of those guest controls exists until first boot. The first boot must
-  therefore remain attended under a host-proven physical air-gap for its whole
-  interval; no current launcher can start it. Do not substitute UID-based PF
-  for that initial air-gap. The continuation retains every predecessor and
-  partial create, performs no deletion, and never authorizes reconnect, router
-  keys, credentials, venue writes or mainnet.
+  none of those guest controls exists until first boot. Receipt 08 for the
+  hardened stopped replacement is
+  `8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6`.
+  The continuation now exposes exactly one local-Terminal-only attended start:
+  it requires every reviewed network service disabled and physical interface
+  inactive, captures the exact offline and host-only topologies, arms an
+  independent watchdog before the single start, verifies the guest only over
+  vsock, stops it, durably seals the disk, and removes/quarantines temporary
+  sudo/socket authority before allowing host uplinks to be restored. Do not
+  substitute UID-based PF for this initial air-gap and never call `limactl
+  start` directly. Guest network reconnect remains false; a later stopped
+  migration must remove bootstrap passwordless sudo/per-boot provisioning
+  before any networked guest boot. Router keys, credentials, venue writes and
+  mainnet remain unauthorized.
 - The VM and router renderers share the fixed `192.168.106.1/32` Mac to
   `192.168.106.2/24` guest ingress contract. The rendered
   `local-nat-lab-test-plan` is print-only: PF enforcement, a remote VPN exit,

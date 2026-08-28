@@ -65,8 +65,8 @@ loads=$("$otool" -L "$python" | /usr/bin/sed '1d' | /usr/bin/awk '{print $1}' | 
 /usr/lib/libSystem.B.dylib' ] || die 'sealed Python load closure differs'
 
 case "${1-}" in
-    apply-hardened-vm) ;;
-    *) die 'launcher accepts only apply-hardened-vm' ;;
+    apply-hardened-vm|check-airgap|apply-airgapped-first-boot) ;;
+    *) die 'launcher accepts only reviewed stopped-create/airgap phases' ;;
 esac
 
 exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C \

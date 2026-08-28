@@ -1,0 +1,31 @@
+{
+  "hardware_ports": [
+    {
+      "device": "REVIEW_DEVICE",
+      "ethernet_address": "REVIEW_LOCAL_MAC",
+      "hardware_port": "REVIEW_HARDWARE_PORT",
+      "kind": "ethernet"
+    }
+  ],
+  "host": {
+    "build_version": "REVIEW_BUILD",
+    "machine": "arm64",
+    "product_version": "REVIEW_VERSION"
+  },
+  "host_only": {
+    "interface": "bridge100",
+    "ipv4_cidr": "192.168.106.1/24"
+  },
+  "kind": "trading-desk.router-bootstrap.airgap-hardware-profile",
+  "network_services": [
+    "REVIEW_NETWORK_SERVICE"
+  ],
+  "passive_interfaces": [
+    {
+      "interface": "REVIEW_PASSIVE_INTERFACE",
+      "status": "inactive",
+      "up": true
+    }
+  ],
+  "schema_version": 1
+}

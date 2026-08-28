@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 import hashlib
 import importlib.util
+import io
+import inspect
 import json
 import copy
 import os
@@ -11,6 +14,7 @@ import re
 import stat
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -235,10 +239,52 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         )
         self.assertFalse(any(value == "REVIEW_REQUIRED" for value in lock["pins"].values()))
         with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory).resolve() / "bundle"
-            manifest = renderer.render(output)
+            root = Path(directory).resolve()
+            output = root / "bundle"
+            profile = root / "hardware-profile.fixture.json"
+            profile.write_text(
+                json.dumps(
+                    {
+                        "hardware_ports": [
+                            {
+                                "device": "en0",
+                                "ethernet_address": "02:00:00:00:00:01",
+                                "hardware_port": "Ethernet",
+                                "kind": "ethernet",
+                            },
+                            {
+                                "device": "en1",
+                                "ethernet_address": "02:00:00:00:00:02",
+                                "hardware_port": "Wi-Fi",
+                                "kind": "wifi",
+                            }
+                        ],
+                        "host": {
+                            "build_version": lock["host"]["build_version"],
+                            "machine": "arm64",
+                            "product_version": lock["host"]["product_version"],
+                        },
+                        "host_only": {
+                            "interface": "bridge100",
+                            "ipv4_cidr": "192.168.106.1/24",
+                        },
+                        "kind": "trading-desk.router-bootstrap.airgap-hardware-profile",
+                        "network_services": ["Ethernet", "Wi-Fi"],
+                        "passive_interfaces": [
+                            {"interface": "anpi0", "status": "inactive", "up": True}
+                        ],
+                        "schema_version": 1,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
+            manifest = renderer.render(output, profile)
             digest = hashlib.sha256((output / "bundle-manifest.json").read_bytes()).hexdigest()
-            self.assertEqual(manifest, renderer.verify(output, digest, os.getuid()))
+            self.assertEqual(
+                manifest, renderer.verify(output, digest, os.getuid(), profile)
+            )
             self.assertFalse(manifest["apply_enabled"])
             self.assertFalse(manifest["vm_started"])
             self.assertFalse(manifest["network_changes_performed"])
@@ -261,16 +307,21 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
                     (json.dumps(mutated, indent=2, sort_keys=True) + "\n").encode()
                 )
 
-    def test_host_controller_has_no_start_or_delete_path(self) -> None:
+    def test_host_controller_exposes_only_one_attended_start_and_no_delete(self) -> None:
         source = HOST_APPLY.read_text(encoding="utf-8")
         self.assertIn('"create", "--tty=false"', source)
-        self.assertNotIn('"start"', source)
+        self.assertEqual(1, source.count('\n    "start",\n'))
+        self.assertIn('"--timeout=600s"', source)
+        self.assertIn("_parse_guest_verifier", source)
+        self.assertIn("_stop_vm", source)
+        self.assertNotIn("_RuntimeGuard", source)
         self.assertNotIn('"delete"', source)
         self.assertNotIn("shutil.rmtree", source)
         self.assertIn("predecessor_instance_retained", source)
         launcher = (BOOTSTRAP / "bootstrap-apply-launcher.sh").read_text()
         self.assertIn("apply-hardened-vm", launcher)
-        for forbidden in ("apply-airgapped-start", "apply-guest-package", "apply-router"):
+        self.assertIn("apply-airgapped-first-boot", launcher)
+        for forbidden in ("apply-guest-package", "apply-router"):
             self.assertNotIn(forbidden, launcher)
 
     def test_stopped_instance_verifier_binds_plan_cloud_and_identifier(self) -> None:
@@ -389,6 +440,179 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             (1, "", ""),
         ):
             self.assertEqual("invalid", controller._authentication_authority_state(*observed))
+
+    def test_airgapped_flow_starts_once_verifies_and_stops(self) -> None:
+        controller = _load_module(HOST_APPLY, "bootstrap_apply_airgap_flow_test")
+        guest_receipt = {
+            "account_passwords_locked": ["root", "routeradmin"],
+            "apt_periodic_sha256": "a" * 64,
+            "apt_units_masked": [
+                "apt-daily.timer",
+                "apt-daily-upgrade.timer",
+                "apt-daily.service",
+                "apt-daily-upgrade.service",
+                "unattended-upgrades.service",
+            ],
+            "dpkg_audit_clean": True,
+            "early_boot_receipt_sha256": "b" * 64,
+            "external_airgap_verified_by_guest": False,
+            "ipv6_sysctl_sha256": "c" * 64,
+            "kind": "trading-desk.router-bootstrap.first-boot",
+            "mainnet_authorized": False,
+            "network_reconnect_authorized": False,
+            "nft_runtime_sha256": "d" * 64,
+            "nftables_sha256": "e" * 64,
+            "package_state_sha256": "f" * 64,
+            "passwordless_sudo_bootstrap_still_enabled": True,
+            "phase": "guest-first-boot-hardening",
+            "requires_host_airgap_receipt": True,
+            "router_key_present": False,
+            "schema_version": 1,
+            "venue_credentials_touched": False,
+            "venue_writes_authorized": False,
+        }
+        guest_bytes = (json.dumps(guest_receipt, indent=2, sort_keys=True) + "\n").encode()
+        guest_digest = hashlib.sha256(guest_bytes).hexdigest()
+        verifier = (
+            "first_boot_verified=true\n"
+            f"first_boot_receipt_sha256={guest_digest}\n"
+            "external_airgap_verified_by_guest=false\n"
+            "network_reconnect_authorized=false\n"
+            "router_key_present=false\n"
+        ).encode()
+
+        class Process:
+            pid = 1234
+            returncode = None
+
+            def poll(self):
+                return None
+
+            def communicate(self, timeout=None):
+                self.returncode = 0
+                return b"", b""
+
+            def terminate(self):
+                self.returncode = -15
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            state = root / "state"
+            receipts = root / "receipts"
+            state.mkdir()
+            receipts.mkdir()
+            lock = json.loads((BOOTSTRAP / "bootstrap-lock.json").read_text())
+            lock["paths"]["airgap_first_boot_receipt"] = str(
+                receipts / "09-airgap-first-boot-stopped.json"
+            )
+            receipt08 = {"instance_path": str(root / "instance")}
+            guest_calls = mock.Mock(side_effect=[verifier, guest_bytes])
+            run_lima = mock.Mock(
+                return_value=SimpleNamespace(returncode=0, stdout=b"start", stderr=b"")
+            )
+            def write_exact(path, content, **_kwargs):
+                path.write_bytes(content)
+
+            def write_receipt(parent, name, value):
+                content = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
+                path = parent / name
+                path.write_bytes(content)
+                return path, hashlib.sha256(content).hexdigest()
+
+            patches = {
+                "_airgap_preconditions": lambda _args: (
+                    lock,
+                    {"state": state, "receipts": receipts, "quarantine": root},
+                    Path("/limactl"),
+                    {
+                        "receipt": receipt08,
+                        "base_capture": {"sha256": "1" * 64},
+                        "local_tty_ancestry_sha256": "9" * 64,
+                        "local_tty_evidence": {
+                            "ancestry": [],
+                            "local_terminal_observed": True,
+                            "remote_or_multiplexer_observed": False,
+                            "tty": "/dev/ttys000",
+                        },
+                    },
+                ),
+                "_adopt_completed_airgap_first_boot": lambda _args: None,
+                "_start_caffeinate": lambda: Process(),
+                "_prepare_vmnet": lambda *_args, **_kwargs: {"sudoers_sha256": "2" * 64},
+                "_start_hostonly_daemon": lambda *_args, **_kwargs: (
+                    Process(),
+                    (object(), object()),
+                    {"command_sha256": "3" * 64, "pid": 1234},
+                ),
+                "_run_watchdog_phase": lambda *_args, **_kwargs: {"sha256": "4" * 64},
+                "_spawn_watchdog": lambda *_args, **_kwargs: (Process(), 99),
+                "_run_lima_guarded": run_lima,
+                "_status": lambda *_args, **_kwargs: {},
+                "_status_guarded": lambda *_args, **_kwargs: {},
+                "_guest_command": guest_calls,
+                "_stop_vm": lambda *_args, **_kwargs: {"forced": False},
+                "_stop_hostonly_daemon": lambda *_args, **_kwargs: {"forced": False, "returncode": 0},
+                "_assert_no_vm_process": lambda: None,
+                "_hardened_instance_evidence": lambda *_args, **_kwargs: {
+                    "cloud_config_sha256": "5" * 64,
+                    "disk_sha256": "6" * 64,
+                    "runtime_files": {},
+                },
+                "_durability_barrier_instance": lambda *_args, **_kwargs: None,
+                "_quarantine_vmnet": lambda *_args, **_kwargs: {
+                    "retained_sudoers": "/q/sudoers",
+                    "retained_vmnet_runtime": "/q/runtime",
+                },
+                "_complete_watchdog": lambda *_args, **_kwargs: {
+                    "sha256": "7" * 64
+                },
+                "_wait_hostonly_teardown": lambda *_args: None,
+                "_stop_caffeinate": lambda _process: None,
+                "_write_exact": write_exact,
+                "_atomic_receipt": write_receipt,
+                "_sync_directory": lambda _path: None,
+            }
+            with mock.patch.dict(controller.__dict__, patches), redirect_stdout(
+                io.StringIO()
+            ):
+                self.assertEqual(
+                    0,
+                    controller._apply_airgapped_first_boot(
+                        SimpleNamespace(
+                            expected_controller_manifest_sha256="8" * 64,
+                            attest_physical_airgap=True,
+                        )
+                    ),
+                )
+            self.assertEqual(1, run_lima.call_count)
+            self.assertEqual(2, guest_calls.call_count)
+            self.assertFalse((state / ".airgap-first-boot.PREPARING.json").exists())
+            self.assertFalse((state / ".airgap-first-boot.STARTING.json").exists())
+            final = json.loads(
+                (receipts / "09-airgap-first-boot-stopped.json").read_text()
+            )
+            self.assertEqual(1, final["start_invocation_count"])
+            self.assertTrue(final["host_uplink_restore_safe_while_vm_stopped"])
+            self.assertFalse(final["guest_network_reconnect_authorized"])
+
+    def test_airgap_controller_orders_guard_before_single_start_and_stops_before_receipt(self) -> None:
+        controller = _load_module(HOST_APPLY, "bootstrap_apply_airgap_order_test")
+        source = inspect.getsource(controller._apply_airgapped_first_boot)
+        ordered = (
+            '_run_watchdog_phase(\n            lock, "capture-host-only"',
+            "_spawn_watchdog(",
+            "start_invoked = True",
+            "started = _run_lima_guarded(",
+            "verifier_output = _guest_command(",
+            "stop_evidence = _stop_vm(",
+            "_durability_barrier_instance(",
+            "vmnet_cleanup = _quarantine_vmnet(",
+            "watchdog_result = _complete_watchdog(",
+            "path, digest = _atomic_receipt(",
+        )
+        positions = [source.index(token) for token in ordered]
+        self.assertEqual(sorted(positions), positions)
+        self.assertEqual(1, source.count("start_arguments = list(AIRGAP_START_ARGUMENTS)"))
 
 
 if __name__ == "__main__":

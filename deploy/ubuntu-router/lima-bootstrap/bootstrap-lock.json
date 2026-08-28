@@ -25,6 +25,8 @@
     "router_identity_receipt_path": "/private/etc/trading-desk/testnet-foreground-router-identity.receipt"
   },
   "paths": {
+    "airgap_first_boot_receipt": "/private/var/db/trading-desk-router-bootstrap-v1/receipts/09-airgap-first-boot-stopped.json",
+    "airgap_state": "/private/var/db/trading-desk-router-bootstrap-v1/airgap",
     "hardened_vm_receipt": "/private/var/db/trading-desk-router-bootstrap-v1/receipts/08-hardened-vm.json",
     "lima_home": "/private/var/db/trading-desk-lima",
     "lima_install": "/opt/trading-desk-router-tools/lima-2.2.0",
@@ -37,15 +39,18 @@
     "vmnet_sudoers": "/private/etc/sudoers.d/trading-desk-router-lima"
   },
   "phases": {
-    "airgapped_start_apply_enabled": false,
+    "airgapped_start_apply_enabled": true,
     "guest_package_apply_enabled": false,
     "hardened_recreate_apply_enabled": true,
     "router_activation_apply_enabled": false
   },
   "pins": {
+    "airgap_session_id": "28de503250ad9a13f25d539c4119ec967c98e8a2feb624b6bc0496fccd6dd5a8",
     "hardened_cloud_template_sha256": "ee4d159bae33ba541ef1b32c0f15e96e39c8b251e28b1cebc15738dace2de225",
     "hardened_plan_sha256": "aea50ab9aeaf1022f1cf1fbd7055cb9d249e6c94cb5bbae96ff04944a67a9874",
+    "hardened_vm_receipt_sha256": "8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6",
     "limactl_sha256": "f19a4fca3875e1017a5285672be4a62699c1e55918fb6a7afce86a14199e10d9",
+    "lima_first_boot_sudoers_sha256": "fb36f1a319cc6bff643c11582ff08afe7564e7c47c309a4a702cf6f4e5b50e35",
     "local_image_sha256": "4a281a921b8d7db952895ab619736f10efe9f63e111fa5b5779ed18f023818aa",
     "networks_first_boot_sha256": "c10aae32617a08160fd0c4501df8c933635fa113cfdb945669f3804acc619ea4",
     "predecessor_bundle_manifest_sha256": "cb8cdd350283e8310fb4ba6cb187017d7b7fa3b67d1e8f037ebe8bf3948cccdd",
@@ -53,9 +58,10 @@
     "predecessor_disk_sha256": "6403de2584166d8a803a42dee4fc58e0046aadf2f756b2256ff1d95824fd6c33",
     "predecessor_networks_sha256": "835de583b196bc448a639cda181daa6670b0430ce84d2478503ff408650ab25e",
     "predecessor_plan_sha256": "00228f7b613418647ae9718989f7d9a2a9bb1493692ed832977294171b324150",
-    "predecessor_vm_receipt_sha256": "1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601"
+    "predecessor_vm_receipt_sha256": "1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601",
+    "socket_vmnet_sha256": "b8a72a62237312f2f756027dea504a844edeb40014702d4a320292c026d282b0"
   },
-  "review_status": "attended_airgap_hardened_recreate_enabled_start_disabled",
+  "review_status": "attended_airgap_hardened_recreate_and_one_boot_enabled",
   "schema_version": 1,
   "storage": {
     "minimum_free_after_bytes": 5368709120,
@@ -68,6 +74,18 @@
     "router_key_generation_authorized": false,
     "venue_credentials_authorized": false,
     "venue_writes_authorized": false,
-    "vm_start_authorized": false
+    "unconstrained_vm_start_authorized": false
+  },
+  "system_tools": {
+    "/bin/ps": "3bbba882e30d91fc4ff6e6844ca7c59fef4351b9a3fea35dca55708d6d487d1c",
+    "/sbin/ifconfig": "187af535a8300e69bf6eafda83bdd053243110f6dbe28a56c7769f83e53aa95b",
+    "/sbin/route": "54488f1a4de4285d73393a6bdad57e3563c8ddd2f026cd56040f5efd1299fb7b",
+    "/usr/bin/caffeinate": "fdd1c163779f87d667b6a4049293e165f2d30b716ca8bff9bed3fe54bc6d1d07",
+    "/usr/bin/pkill": "0d1ffd0bb78cb9e9cba51bb013d67ec48f75bb21eefeec99c7321053fe23fd19",
+    "/usr/bin/ssh": "17542914a3fb55e7efeb35a90d594a21c84bf6a4cfe1fc8ddff5606dc2658fc3",
+    "/usr/sbin/netstat": "86b32ffdf451da6357e4e4325629b5e28a8d4b46c5b4268efc85eeff6973182a",
+    "/usr/sbin/networksetup": "6dc57b30c5c8a1df191015a73b5d236b2499a339933bb47f3b23c9ba124e1edb",
+    "/usr/sbin/scutil": "91e5606342f18f31132dfcba418a2cc73f3ccb5bc60e5431302d709e0ecc3546",
+    "/usr/sbin/sysctl": "0fb3ea0ef2b943cf56f290628bb26531c36f190094b28e22609d59839f146689"
   }
 }

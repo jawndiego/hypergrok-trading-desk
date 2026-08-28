@@ -24,3 +24,5 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+# Host-specific physical interface inventory; contains local MAC addresses.
+airgap-hardware-profile.json

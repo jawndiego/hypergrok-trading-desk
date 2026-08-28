@@ -2,32 +2,46 @@
 
 This continuation consumes only the commissioned receipt-07 VM whose digest is
 `1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601`.
-Its currently enabled phase retains that never-booted instance and creates a
-hardened replacement that remains stopped. It performs no VM start, guest
-execution, active networking, credential access, router-key operation or venue
-operation.
+Its first phase retained that never-booted instance and created a hardened
+replacement that remains stopped. Receipt 08 is
+`8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6`.
+The second phase permits one attended, physically air-gapped first boot and
+returns the VM to `Stopped`. Neither phase accesses credentials or a venue.
 
 Render and replay-check as the desktop operator:
 
 ```sh
 python3 scripts/render_ubuntu_router_bootstrap.py \
+  --hardware-profile /absolute/gitignored/airgap-hardware-profile.json \
   --output-dir /absolute/new/review-directory
 
 manifest_sha256=$(shasum -a 256 \
   /absolute/new/review-directory/bundle-manifest.json | awk '{print $1}')
 
 python3 scripts/render_ubuntu_router_bootstrap.py \
+  --hardware-profile /absolute/gitignored/airgap-hardware-profile.json \
   --check-bundle /absolute/new/review-directory \
   --expected-manifest-sha256 "$manifest_sha256" \
   --require-owner-uid 501
 ```
 
-The root apply must use a separately root-sealed copy and carry that manifest
-hash into `bootstrap-apply-launcher.sh apply-hardened-vm`. On success it prints
-receipt 08 and leaves both the replacement and retained predecessor stopped.
+The real profile is host-local and ignored by Git because it contains interface
+MAC addresses. The committed `.example` is not a usable profile.
 
-Do not start the replacement manually. The next controller must continuously
-prove that all Mac uplinks/default IPv4 and IPv6 routes are absent for the
-whole first boot, stop the VM on every error, and authorize reconnect only
-after `/usr/local/libexec/trading-desk-verify-first-boot` succeeds. The guest
-nftables policy is not present before that air-gapped boot.
+Do not start the replacement manually. From a local Terminal—not SSH, tmux or
+screen—disable all network services, turn Wi-Fi off, physically disconnect
+Ethernet/USB/Thunderbolt uplinks, and close VPN/sharing software. Run the sealed
+controller's `check-airgap --attest-physical-airgap`, then
+`apply-airgapped-first-boot --attest-physical-airgap` without reconnecting in
+between. The controller continuously monitors the complete topology, verifies
+the guest over vsock, and stops it again.
+
+Restore host networking only after the command prints both:
+
+```text
+vm_status=Stopped
+host_uplink_restore_safe_while_vm_stopped=true
+```
+
+This does not authorize another guest boot. A later stopped migration must
+remove bootstrap passwordless sudo and per-boot provisioning first.

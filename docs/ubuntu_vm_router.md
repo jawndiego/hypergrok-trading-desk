@@ -288,11 +288,11 @@ SHA-256 `1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601`.
 It is still `ready_to_start=false`.
 
 `scripts/render_ubuntu_router_bootstrap.py` renders a distinct continuation
-under `deploy/ubuntu-router/lima-bootstrap`. Its sole enabled apply phase
-retains the receipt-07 instance and its network file, then creates an exact
-hardened replacement that remains stopped. It never invokes `limactl start`,
-never deletes a predecessor or partial instance, and performs no active
-network, credential or venue operation. The replacement cloud identity uses a
+under `deploy/ubuntu-router/lima-bootstrap`. Its first apply phase retains the
+receipt-07 instance and its network file, then creates an exact hardened
+replacement that remains stopped; receipt 08 for that replacement is
+`8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6`.
+It never deletes a predecessor or partial instance. The replacement cloud identity uses a
 locked password with the existing UID-454-owned management key and embeds:
 
 - an APT/unattended-upgrade mask and periodic-update disable;
@@ -302,12 +302,24 @@ locked password with the existing UID-454-owned management key and embeds:
 - a root-only exact-hash verifier and durable receipts.
 
 Those controls cannot protect packets sent before cloud-init reaches the
-custom boot command. Consequently the later first start must run while every
-Mac uplink is physically disconnected, with a host controller continuously
-proving that no IPv4 or IPv6 default route appears. It must stop the VM on any
-guest/provisioning failure and may authorize reconnect only after the exact
-guest verifier succeeds with the default-drop table active. That start phase
-is not yet exposed by the current launcher.
+custom boot command. The enabled `check-airgap` and
+`apply-airgapped-first-boot` phases therefore accept only a local Terminal TTY
+with the gitignored machine-local hardware profile sealed into the controller.
+Every reviewed network service must be disabled, every physical interface
+inactive/addressless, and all VPN/sharing/default-route state absent. The
+controller captures the offline topology, temporarily starts only the exact
+host-only socket_vmnet daemon, binds that topology, and waits for an independent
+watchdog's first valid sample before invoking one exact `limactl start` as UID
+454. It runs the fixed guest verifier over vsock, immediately stops the VM,
+full-syncs and hashes the resulting disk, proves all UID-454/VM processes are
+gone, and quarantines the temporary sudoers/runtime paths. Any uncertainty is
+retained as `UNKNOWN` with no automatic retry.
+
+Only the final literal
+`host_uplink_restore_safe_while_vm_stopped=true` permits the operator to
+reenable the Mac's network services. It does not authorize a networked guest
+boot: guest reconnect remains false because bootstrap passwordless sudo and
+per-boot provisioning still exist. Never run `limactl start` directly.
 
 For the reduced first canary, defer remote chat approval, launchd, sleep/reboot
 qualification and long-running PnL collection. Do not defer the physical

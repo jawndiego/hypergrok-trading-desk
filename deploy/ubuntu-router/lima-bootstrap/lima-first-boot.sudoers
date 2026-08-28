@@ -1,0 +1,7 @@
+%trading-router-operator ALL=(root:wheel) NOPASSWD:NOSETENV: /bin/mkdir -m 775 -p /private/var/db/trading-desk-router-vmnet-runtime
+
+# Manage "td-router-ingress" network daemons
+
+%trading-router-operator ALL=(root:wheel) NOPASSWD:NOSETENV: \
+    /opt/socket_vmnet/bin/socket_vmnet --pidfile=/private/var/db/trading-desk-router-vmnet-runtime/td-router-ingress_socket_vmnet.pid --socket-group=trading-router-operator --vmnet-mode=host --vmnet-gateway=192.168.106.1 --vmnet-dhcp-end=192.168.106.254 --vmnet-mask=255.255.255.0 /private/var/db/trading-desk-router-vmnet-runtime/socket_vmnet.td-router-ingress, \
+    /usr/bin/pkill -F /private/var/db/trading-desk-router-vmnet-runtime/td-router-ingress_socket_vmnet.pid

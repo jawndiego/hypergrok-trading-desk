@@ -1,10 +1,11 @@
 #!/usr/bin/false
-"""Recoverably replace the never-booted router VM with a hardened stopped VM.
+"""Recoverably harden and air-gap-bootstrap the TESTNET router VM.
 
-This controller performs no VM start, socket_vmnet activation, guest mutation,
-credential access, route change, or venue operation.  It consumes the exact
-receipt-07 instance, retains it intact, installs a safer inactive network
-definition, and creates exactly one replacement that remains stopped.
+The stopped-replacement phase performs no start or active networking. The
+separate attended first-boot phase temporarily starts only a host-only network,
+requires a continuously monitored physical Mac air-gap, runs one exact start
+and guest verifier, then returns the VM to Stopped and removes the temporary
+sudo/socket authority. No phase accesses a credential or venue endpoint.
 """
 
 from __future__ import annotations
@@ -24,9 +25,11 @@ import pwd
 import re
 import resource
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import time
 from typing import Any
 
 
@@ -62,6 +65,84 @@ REVIEWED_ROUTER_GROUPS = (
         "EE977B55-20FF-44D2-81CD-3A51B6BBC5DC",
         ("ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C",),
     ),
+)
+AIRGAP_START_ARGUMENTS = (
+    "--tty=false",
+    "start",
+    "--timeout=600s",
+    "trading-desk-router",
+)
+AIRGAP_FIRST_BOOT_RECEIPT_KEYS = frozenset(
+    {
+        "airgap_base_capture_sha256",
+        "airgap_hardware_lock_sha256",
+        "airgap_watchdog_result_sha256",
+        "attempt_id",
+        "controller_manifest_sha256",
+        "credentials_accessed",
+        "external_network_opened_by_controller",
+        "guest_first_boot_receipt",
+        "guest_first_boot_receipt_sha256",
+        "guest_network_reconnect_authorized",
+        "guest_verifier_output_sha256",
+        "hardened_vm_receipt_sha256",
+        "host_only_network_temporarily_started",
+        "host_uplink_restore_safe_while_vm_stopped",
+        "kind",
+        "local_tty_ancestry_sha256",
+        "local_tty_evidence",
+        "mainnet_authorized",
+        "passwordless_sudo_bootstrap_still_enabled",
+        "phase",
+        "physical_airgap_attested",
+        "postboot_cloud_config_sha256",
+        "postboot_disk_sha256",
+        "postboot_runtime_files",
+        "router_key_present",
+        "schema_version",
+        "socket_vmnet_command_sha256",
+        "socket_vmnet_pid",
+        "socket_vmnet_stop",
+        "start_invocation_count",
+        "start_stderr_sha256",
+        "start_stdout_sha256",
+        "stop_evidence",
+        "sudoers_sha256",
+        "temporary_vmnet_artifacts",
+        "venue_writes_authorized",
+        "vm_started_then_stopped",
+        "vm_status",
+    }
+)
+WATCHDOG_RESULT_KEYS = frozenset(
+    {
+        "allow_host_only",
+        "armed_at_monotonic_ns",
+        "armed_message_sent",
+        "chain_hash",
+        "completion_socket_vmnet_absent",
+        "credentials_accessed",
+        "disposition",
+        "first_sample_monotonic_ns",
+        "force_stop",
+        "hardware_lock_sha256",
+        "kind",
+        "last_sample_monotonic_ns",
+        "mainnet_authorized",
+        "maximum_sample_gap_ns",
+        "mode",
+        "network_opened",
+        "network_reconnect_authorized",
+        "reason",
+        "sample_count",
+        "schema_version",
+        "session_id",
+        "socket_vmnet_alive_last",
+        "socket_vmnet_identity_sha256",
+        "socket_vmnet_stop",
+        "venue_writes_authorized",
+        "vm_force_stop_only_mutation",
+    }
 )
 
 
@@ -202,6 +283,7 @@ def _read_bound(
     gid: int,
     mode: int,
     maximum: int,
+    allow_empty: bool = False,
 ) -> bytes:
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
@@ -212,7 +294,8 @@ def _read_bound(
             or before.st_gid != gid
             or stat.S_IMODE(before.st_mode) != mode
             or before.st_nlink != 1
-            or not 0 < before.st_size <= maximum
+            or before.st_size > maximum
+            or (before.st_size == 0 and not allow_empty)
         ):
             raise BootstrapError(f"file metadata differs: {path}")
         content = bytearray()
@@ -336,10 +419,10 @@ def _load_lock() -> dict[str, Any]:
     if (
         lock.get("schema_version") != 1
         or lock.get("review_status")
-        != "attended_airgap_hardened_recreate_enabled_start_disabled"
+        != "attended_airgap_hardened_recreate_and_one_boot_enabled"
         or lock.get("phases")
         != {
-            "airgapped_start_apply_enabled": False,
+            "airgapped_start_apply_enabled": True,
             "guest_package_apply_enabled": False,
             "hardened_recreate_apply_enabled": True,
             "router_activation_apply_enabled": False,
@@ -357,7 +440,7 @@ def _load_lock() -> dict[str, Any]:
             "router_key_generation_authorized": False,
             "venue_credentials_authorized": False,
             "venue_writes_authorized": False,
-            "vm_start_authorized": False,
+            "unconstrained_vm_start_authorized": False,
         }
     ):
         raise BootstrapError("bootstrap lock boundary differs")
@@ -385,6 +468,7 @@ def _verify_bundle(expected_manifest_sha256: str) -> dict[str, Any]:
         or manifest.get("bundle_kind")
         != "trading-desk.ubuntu-router-airgap-bootstrap"
         or manifest.get("apply_enabled") is not False
+        or manifest.get("attended_airgapped_start_apply_enabled") is not True
         or manifest.get("network_changes_performed") is not False
         or manifest.get("vm_started") is not False
         or manifest.get("venue_writes_authorized") is not False
@@ -396,6 +480,7 @@ def _verify_bundle(expected_manifest_sha256: str) -> dict[str, Any]:
     if actual != set(files) | {"bundle-manifest.json"}:
         raise BootstrapError("controller file inventory differs")
     executables = {
+        "airgap-watchdog.py",
         "bootstrap-apply-launcher.sh",
         "bootstrap-apply.py",
         "finalize-first-boot.sh",
@@ -850,7 +935,11 @@ def _free_bytes(path: Path) -> int:
     return shutil.disk_usage(path).free
 
 
-def _status(lock: dict[str, Any], limactl: Path) -> dict[str, Any]:
+def _status(
+    lock: dict[str, Any], limactl: Path, *, expected_status: str = "Stopped"
+) -> dict[str, Any]:
+    if expected_status not in {"Stopped", "Running"}:
+        raise BootstrapError("unexpected Lima status expectation")
     uid = lock["host"]["router_operator_uid"]
     gid = lock["host"]["router_operator_gid"]
     result = subprocess.run(
@@ -863,6 +952,17 @@ def _status(lock: dict[str, Any], limactl: Path) -> dict[str, Any]:
         timeout=30,
         check=False,
     )
+    return _parse_status_result(lock, result, expected_status=expected_status)
+
+
+def _parse_status_result(
+    lock: dict[str, Any],
+    result: subprocess.CompletedProcess[bytes],
+    *,
+    expected_status: str,
+) -> dict[str, Any]:
+    if expected_status not in {"Stopped", "Running"}:
+        raise BootstrapError("unexpected Lima status expectation")
     if result.returncode != 0 or result.stderr or len(result.stdout) > 1024 * 1024:
         raise BootstrapError("limactl status failed")
     lines = result.stdout.decode("utf-8", errors="strict").splitlines()
@@ -872,7 +972,7 @@ def _status(lock: dict[str, Any], limactl: Path) -> dict[str, Any]:
     instance = Path(lock["paths"]["lima_home"]) / lock["guest"]["instance_name"]
     if (
         value.get("name") != lock["guest"]["instance_name"]
-        or value.get("status") != "Stopped"
+        or value.get("status") != expected_status
         or value.get("dir") != str(instance)
         or value.get("vmType") != "vz"
         or value.get("arch") != "aarch64"
@@ -929,6 +1029,1024 @@ def _predecessor_receipt(lock: dict[str, Any]) -> dict[str, Any]:
     return receipt
 
 
+def _hardened_vm_receipt(lock: dict[str, Any]) -> dict[str, Any]:
+    path = Path(lock["paths"]["hardened_vm_receipt"])
+    content = _read_bound(path, uid=0, gid=0, mode=0o400, maximum=256 * 1024)
+    if _sha256_bytes(content) != lock["pins"]["hardened_vm_receipt_sha256"]:
+        raise BootstrapError("hardened VM receipt digest differs")
+    receipt = _load_json_bytes(content, "hardened VM receipt")
+    expected_instance = str(
+        Path(lock["paths"]["lima_home"]) / lock["guest"]["instance_name"]
+    )
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("kind") != "trading-desk.router-bootstrap.hardened-vm"
+        or receipt.get("phase") != "hardened-vm"
+        or receipt.get("hardened_plan_sha256") != lock["pins"]["hardened_plan_sha256"]
+        or receipt.get("networks_first_boot_sha256")
+        != lock["pins"]["networks_first_boot_sha256"]
+        or receipt.get("predecessor_vm_receipt_sha256")
+        != lock["pins"]["predecessor_vm_receipt_sha256"]
+        or receipt.get("instance_path") != expected_instance
+        or receipt.get("disk_sha256") != lock["pins"]["predecessor_disk_sha256"]
+        or receipt.get("vm_status") != "Stopped"
+        or receipt.get("vm_started") is not False
+        or receipt.get("ready_for_attended_airgapped_start") is not True
+        or receipt.get("network_changes_performed") is not False
+        or receipt.get("network_reconnect_authorized") is not False
+        or receipt.get("router_key_present") is not False
+        or receipt.get("venue_credentials_touched") is not False
+        or receipt.get("venue_writes_authorized") is not False
+        or receipt.get("mainnet_authorized") is not False
+    ):
+        raise BootstrapError("hardened VM receipt contract differs")
+    return receipt
+
+
+def _assert_attended_root_tty() -> dict[str, Any]:
+    if os.geteuid() != 0 or os.getegid() != 0:
+        raise BootstrapError("root:wheel is required")
+    identities: list[tuple[int, int]] = []
+    names: list[str] = []
+    for descriptor in (0, 1, 2):
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISCHR(metadata.st_mode) or not os.isatty(descriptor):
+            raise BootstrapError("attended character TTY is required")
+        identities.append((metadata.st_dev, metadata.st_ino))
+        names.append(os.ttyname(descriptor))
+    if len(set(identities)) != 1 or len(set(names)) != 1:
+        raise BootstrapError("stdin/stdout/stderr TTY differs")
+    if os.tcgetpgrp(0) != os.getpgrp():
+        raise BootstrapError("controller is not the foreground TTY process group")
+    ancestry: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    process_id = os.getpid()
+    for _ in range(32):
+        if process_id in seen or process_id < 1:
+            raise BootstrapError("TTY process ancestry is invalid")
+        seen.add(process_id)
+        result = subprocess.run(
+            ["/bin/ps", "-p", str(process_id), "-o", "ppid=", "-o", "comm="],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=5,
+            check=False,
+        )
+        fields = result.stdout.strip().split(None, 1)
+        if result.returncode != 0 or result.stderr or len(fields) != 2 or not fields[0].isdigit():
+            raise BootstrapError("TTY process ancestry is unavailable")
+        parent = int(fields[0], 10)
+        command = fields[1]
+        lowered = command.lower()
+        if any(
+            token in lowered
+            for token in ("sshd", "mosh-server", "tmate", "tmux", "screen", "zellij")
+        ):
+            raise BootstrapError("remote attended TTY is not accepted")
+        ancestry.append({"command": command, "pid": process_id, "ppid": parent})
+        if process_id == 1:
+            break
+        process_id = parent
+    else:
+        raise BootstrapError("TTY process ancestry exceeds bound")
+    local_terminal = any(
+        token in item["command"].lower()
+        for item in ancestry
+        for token in ("terminal.app", "iterm", "warp", "ghostty", "codex.app")
+    )
+    if not local_terminal:
+        raise BootstrapError("reviewed local terminal ancestry is absent")
+    evidence = {
+        "ancestry": ancestry,
+        "local_terminal_observed": True,
+        "remote_or_multiplexer_observed": False,
+        "tty": names[0],
+    }
+    return {"evidence": evidence, "sha256": _sha256_bytes(_canonical_json(evidence))}
+
+
+def _verify_system_tools(lock: dict[str, Any]) -> None:
+    expected_modes = {
+        "/bin/ps": 0o755,
+        "/sbin/ifconfig": 0o555,
+        "/sbin/route": 0o555,
+        "/usr/bin/caffeinate": 0o755,
+        "/usr/bin/pkill": 0o755,
+        "/usr/bin/ssh": 0o755,
+        "/usr/sbin/netstat": 0o555,
+        "/usr/sbin/networksetup": 0o755,
+        "/usr/sbin/scutil": 0o755,
+        "/usr/sbin/sysctl": 0o755,
+    }
+    if set(lock.get("system_tools", {})) != set(expected_modes):
+        raise BootstrapError("system tool allowlist differs")
+    for raw_path, mode in expected_modes.items():
+        path = Path(raw_path)
+        _assert_real(path, kind="file", uid=0, gid=0, mode=mode)
+        if _sha256_file(path) != lock["system_tools"][raw_path]:
+            raise BootstrapError(f"system tool digest differs: {path}")
+        result = subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", "=anchor apple", str(path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise BootstrapError(f"system tool signature differs: {path}")
+    privileged = {
+        Path("/usr/bin/sudo"): (0o511, 1575952),
+        Path("/usr/sbin/visudo"): (0o111, 672464),
+    }
+    for path, (mode, size) in privileged.items():
+        metadata = _assert_real(path, kind="file", uid=0, gid=0, mode=mode)
+        if metadata.st_size != size:
+            raise BootstrapError(f"privileged system tool size differs: {path}")
+        result = subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", "=anchor apple", str(path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise BootstrapError(f"privileged system tool signature differs: {path}")
+
+
+def _prepare_vmnet(
+    lock: dict[str, Any], limactl: Path, *, attempt_id: str
+) -> dict[str, Any]:
+    source = SCRIPT_DIR / "lima-first-boot.sudoers"
+    sudoers_content = _read_bound(
+        source, uid=0, gid=0, mode=0o400, maximum=64 * 1024
+    )
+    if _sha256_bytes(sudoers_content) != lock["pins"]["lima_first_boot_sudoers_sha256"]:
+        raise BootstrapError("reviewed Lima sudoers digest differs")
+    generated = subprocess.run(
+        [str(limactl), "sudoers"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_environment(lock),
+        preexec_fn=_drop_preexec(454, 454),
+        timeout=30,
+        check=False,
+    )
+    if (
+        generated.returncode != 0
+        or generated.stderr
+        or len(generated.stdout) > 64 * 1024
+        or generated.stdout != sudoers_content
+    ):
+        raise BootstrapError("generated Lima sudoers differs")
+    sudoers_parent = Path(lock["paths"]["vmnet_sudoers"]).parent
+    _assert_real(sudoers_parent, kind="directory", uid=0, gid=0, mode=0o755)
+    target = Path(lock["paths"]["vmnet_sudoers"])
+    _write_exact(target, sudoers_content, uid=0, gid=0, mode=0o440)
+    for command in (
+        ["/usr/sbin/visudo", "-cf", str(target)],
+        ["/usr/sbin/visudo", "-c"],
+    ):
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0 or len(result.stdout) + len(result.stderr) > 128 * 1024:
+            raise BootstrapError("sudoers validation failed")
+    runtime = Path(lock["paths"]["vmnet_runtime"])
+    if not runtime.exists() and not runtime.is_symlink():
+        runtime.mkdir(mode=0o755)
+        os.chown(runtime, 0, 0)
+        os.chmod(runtime, 0o755)
+        _sync_directory(runtime.parent)
+    _assert_real(runtime, kind="directory", uid=0, gid=0, mode=0o755)
+    if any(runtime.iterdir()):
+        raise BootstrapError("socket_vmnet runtime directory is not empty")
+    _sync_directory(runtime)
+    return {
+        "attempt_id": attempt_id,
+        "runtime_device": runtime.stat().st_dev,
+        "runtime_inode": runtime.stat().st_ino,
+        "sudoers_sha256": _sha256_bytes(sudoers_content),
+    }
+
+
+def _quarantine_vmnet(
+    lock: dict[str, Any], state: dict[str, Path], *, attempt_id: str
+) -> dict[str, str]:
+    target = Path(lock["paths"]["vmnet_sudoers"])
+    runtime = Path(lock["paths"]["vmnet_runtime"])
+    retained_sudoers = state["quarantine"] / f"first-boot-sudoers-{attempt_id}"
+    retained_runtime = state["quarantine"] / f"first-boot-vmnet-runtime-{attempt_id}"
+    if target.exists() or target.is_symlink():
+        content = _read_bound(target, uid=0, gid=0, mode=0o440, maximum=64 * 1024)
+        if _sha256_bytes(content) != lock["pins"]["lima_first_boot_sudoers_sha256"]:
+            raise BootstrapError("installed Lima sudoers differs during cleanup")
+        _rename_exclusive(target, retained_sudoers)
+        os.chmod(retained_sudoers, 0o400)
+        _sync_file(retained_sudoers)
+        _sync_directory(retained_sudoers.parent)
+    else:
+        _assert_real(retained_sudoers, kind="file", uid=0, gid=0, mode=0o400, links=1)
+    if runtime.exists() or runtime.is_symlink():
+        _assert_real(runtime, kind="directory", uid=0, gid=0, mode=0o755)
+        if any(runtime.iterdir()):
+            raise BootstrapError("socket_vmnet runtime is not empty during cleanup")
+        _rename_exclusive(runtime, retained_runtime)
+    else:
+        _assert_real(retained_runtime, kind="directory", uid=0, gid=0, mode=0o755)
+    return {
+        "retained_sudoers": str(retained_sudoers),
+        "retained_vmnet_runtime": str(retained_runtime),
+    }
+
+
+def _start_hostonly_daemon(
+    lock: dict[str, Any], state: dict[str, Path], *, attempt_id: str
+) -> tuple[subprocess.Popen[bytes], tuple[Any, Any], dict[str, str]]:
+    binary = Path(lock["paths"]["socket_vmnet_install"]) / "bin" / "socket_vmnet"
+    _assert_real(binary, kind="file", uid=0, gid=0, mode=0o555, links=1)
+    if _sha256_file(binary) != lock["pins"]["socket_vmnet_sha256"]:
+        raise BootstrapError("socket_vmnet binary digest differs")
+    result = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--strict", str(binary)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise BootstrapError("socket_vmnet signature differs")
+    runtime = Path(lock["paths"]["vmnet_runtime"])
+    pidfile = runtime / "td-router-ingress_socket_vmnet.pid"
+    socket = runtime / "socket_vmnet.td-router-ingress"
+    command = [
+        str(binary),
+        f"--pidfile={pidfile}",
+        "--socket-group=trading-router-operator",
+        "--vmnet-mode=host",
+        "--vmnet-gateway=192.168.106.1",
+        "--vmnet-dhcp-end=192.168.106.254",
+        "--vmnet-mask=255.255.255.0",
+        str(socket),
+    ]
+    stdout_path = state["state"] / f"socket-vmnet-{attempt_id}.stdout"
+    stderr_path = state["state"] / f"socket-vmnet-{attempt_id}.stderr"
+    stdout = stdout_path.open("xb", buffering=0)
+    stderr = stderr_path.open("xb", buffering=0)
+    os.chown(stdout_path, 0, 0)
+    os.chown(stderr_path, 0, 0)
+    os.chmod(stdout_path, 0o600)
+    os.chmod(stderr_path, 0o600)
+    _sync_directory(stdout_path.parent)
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            start_new_session=True,
+        )
+    except BaseException:
+        stdout.close()
+        stderr.close()
+        raise
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stdout.close()
+            stderr.close()
+            raise BootstrapError("socket_vmnet exited before readiness")
+        if pidfile.is_file() and not pidfile.is_symlink() and socket.exists() and not socket.is_symlink():
+            break
+        time.sleep(0.1)
+    else:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        stdout.close()
+        stderr.close()
+        raise BootstrapError("socket_vmnet readiness timed out")
+    return process, (stdout, stderr), {
+        "command_sha256": _sha256_bytes(_canonical_json(command)),
+        "pidfile": str(pidfile),
+        "pid": process.pid,
+        "socket": str(socket),
+        "stderr_path": str(stderr_path),
+        "stdout_path": str(stdout_path),
+    }
+
+
+def _stop_hostonly_daemon(
+    process: subprocess.Popen[bytes], streams: tuple[Any, Any]
+) -> dict[str, Any]:
+    forced = False
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            forced = True
+            process.kill()
+            process.wait(timeout=10)
+    for stream in streams:
+        stream.flush()
+        os.fsync(stream.fileno())
+        stream.close()
+    return {"forced": forced, "returncode": process.returncode}
+
+
+def _run_watchdog_phase(
+    lock: dict[str, Any], mode: str, *, socket_vmnet_pid: int | None = None
+) -> dict[str, str]:
+    watchdog = SCRIPT_DIR / "airgap-watchdog.py"
+    _assert_real(watchdog, kind="file", uid=0, gid=0, mode=0o500, links=1)
+    session_id = lock["pins"]["airgap_session_id"]
+    command = [sys.executable, "-I", "-B", str(watchdog), mode, "--session-id", session_id]
+    if mode == "capture-host-only":
+        if socket_vmnet_pid is None:
+            raise BootstrapError("socket_vmnet PID is required for host-only capture")
+        command.extend(["--socket-vmnet-pid", str(socket_vmnet_pid)])
+    result = subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0 or result.stderr or len(result.stdout) > 64 * 1024:
+        raise BootstrapError(f"air-gap {mode} failed")
+    lines = result.stdout.decode("utf-8", errors="strict").splitlines()
+    expected_prefixes = (
+        ("airgap_base_capture=", "airgap_base_capture_sha256=")
+        if mode == "capture-base"
+        else ("airgap_hardware_lock=", "airgap_hardware_lock_sha256=")
+    )
+    if len(lines) != 2 or not all(
+        lines[index].startswith(prefix) for index, prefix in enumerate(expected_prefixes)
+    ):
+        raise BootstrapError(f"air-gap {mode} output differs")
+    path = lines[0].split("=", 1)[1]
+    digest = lines[1].split("=", 1)[1]
+    if not path.startswith("/private/var/db/trading-desk-router-bootstrap-v1/") or SHA256_RE.fullmatch(digest) is None:
+        raise BootstrapError(f"air-gap {mode} evidence differs")
+    return {"path": path, "sha256": digest}
+
+
+def _spawn_watchdog(
+    lock: dict[str, Any], *, socket_vmnet_pid: int
+) -> tuple[subprocess.Popen[bytes], int]:
+    watchdog = SCRIPT_DIR / "airgap-watchdog.py"
+    read_fd, write_fd = os.pipe()
+    ready_read_fd, ready_write_fd = os.pipe()
+    command = [
+        sys.executable,
+        "-I",
+        "-B",
+        str(watchdog),
+        "watch",
+        "--session-id",
+        lock["pins"]["airgap_session_id"],
+        "--parent-pid",
+        str(os.getpid()),
+        "--control-fd",
+        str(read_fd),
+        "--ready-fd",
+        str(ready_write_fd),
+        "--timeout-seconds",
+        "900",
+        "--sample-ms",
+        "200",
+        "--allow-host-only",
+        "--socket-vmnet-pid",
+        str(socket_vmnet_pid),
+    ]
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            pass_fds=(read_fd, ready_write_fd),
+            start_new_session=True,
+        )
+    except BaseException:
+        os.close(write_fd)
+        os.close(ready_read_fd)
+        raise
+    finally:
+        os.close(read_fd)
+        os.close(ready_write_fd)
+    try:
+        import select
+
+        ready, _, _ = select.select([ready_read_fd], [], [], 15)
+        armed = os.read(ready_read_fd, 16) if ready else b""
+    finally:
+        os.close(ready_read_fd)
+    if armed != b"ARMED\n" or process.poll() is not None:
+        os.close(write_fd)
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            stdout, stderr = process.communicate(timeout=5)
+        if len(stdout) + len(stderr) > 128 * 1024:
+            raise BootstrapError("air-gap watchdog startup output exceeds bound")
+        raise BootstrapError("air-gap watchdog failed to arm")
+    return process, write_fd
+
+
+def _complete_watchdog(
+    lock: dict[str, Any],
+    process: subprocess.Popen[bytes],
+    write_fd: int,
+    *,
+    expected_hardware_lock_sha256: str,
+    expected_socket_vmnet_pid: int,
+) -> dict[str, Any]:
+    os.write(write_fd, b"COMPLETE\n")
+    os.close(write_fd)
+    try:
+        stdout, stderr = process.communicate(timeout=30)
+    except subprocess.TimeoutExpired as error:
+        process.terminate()
+        raise BootstrapError("air-gap watchdog completion timed out") from error
+    if process.returncode != 0 or stderr or len(stdout) > 128 * 1024:
+        raise BootstrapError("air-gap watchdog aborted")
+    lines = stdout.decode("utf-8", errors="strict").splitlines()
+    if (
+        len(lines) != 4
+        or not lines[0].startswith("airgap_watchdog_result=")
+        or not lines[1].startswith("airgap_watchdog_result_sha256=")
+        or lines[2] != "disposition=PASS"
+        or lines[3] != "force_stop_invoked=false"
+    ):
+        raise BootstrapError("air-gap watchdog result output differs")
+    result_path = Path(lines[0].split("=", 1)[1])
+    result_sha256 = lines[1].split("=", 1)[1]
+    content = _read_bound(result_path, uid=0, gid=0, mode=0o400, maximum=256 * 1024)
+    if _sha256_bytes(content) != result_sha256:
+        raise BootstrapError("air-gap watchdog result digest differs")
+    value = _load_json_bytes(content, "air-gap watchdog result")
+    if (
+        set(value) != WATCHDOG_RESULT_KEYS
+        or value.get("schema_version") != 1
+        or value.get("kind") != "trading-desk.router-bootstrap.airgap-watchdog"
+        or value.get("session_id") != lock["pins"]["airgap_session_id"]
+        or value.get("mode") != "watch"
+        or value.get("allow_host_only") is not True
+        or value.get("armed_message_sent") is not True
+        or type(value.get("armed_at_monotonic_ns")) is not int
+        or value.get("completion_socket_vmnet_absent") is not True
+        or value.get("disposition") != "PASS"
+        or value.get("reason") != "none"
+        or value.get("sample_count", 0) < 2
+        or value.get("maximum_sample_gap_ns", 10**18) > 250_000_000
+        or value.get("network_opened") is not False
+        or value.get("network_reconnect_authorized") is not False
+        or value.get("credentials_accessed") is not False
+        or value.get("venue_writes_authorized") is not False
+        or value.get("mainnet_authorized") is not False
+        or value.get("vm_force_stop_only_mutation") is not False
+        or value.get("socket_vmnet_alive_last") is not False
+        or value.get("hardware_lock_sha256") != expected_hardware_lock_sha256
+        or not isinstance(value.get("socket_vmnet_identity_sha256"), str)
+        or SHA256_RE.fullmatch(value["socket_vmnet_identity_sha256"]) is None
+        or not isinstance(value.get("socket_vmnet_stop"), dict)
+        or value["socket_vmnet_stop"].get("pid") != expected_socket_vmnet_pid
+    ):
+        raise BootstrapError("air-gap watchdog result contract differs")
+    return {"path": str(result_path), "sha256": result_sha256, "value": value}
+
+
+def _router_uid_processes() -> list[int]:
+    result = subprocess.run(
+        ["/bin/ps", "-axo", "pid=,uid="],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=5,
+        check=False,
+    )
+    if result.returncode != 0 or result.stderr or len(result.stdout) > 1024 * 1024:
+        raise BootstrapError("router process inventory failed")
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or not all(value.isdigit() for value in fields):
+            raise BootstrapError("router process inventory is malformed")
+        pid, uid = (int(value, 10) for value in fields)
+        if uid == 454:
+            if pid <= 1:
+                raise BootstrapError("router process PID is unsafe")
+            pids.append(pid)
+    return sorted(pids)
+
+
+def _router_pid_still_dedicated(pid: int) -> bool:
+    result = subprocess.run(
+        ["/bin/ps", "-p", str(pid), "-o", "uid="],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=3,
+        check=False,
+    )
+    if result.returncode == 1 and not result.stdout and not result.stderr:
+        return False
+    if (
+        result.returncode != 0
+        or result.stderr
+        or result.stdout.strip() != b"454"
+    ):
+        raise BootstrapError("router PID identity changed before containment")
+    return True
+
+
+def _emergency_contain_until_stopped(lock: dict[str, Any], limactl: Path) -> None:
+    command = [
+        "/usr/bin/sudo",
+        "-n",
+        "-u",
+        lock["host"]["router_operator_account"],
+        "--",
+        "/usr/bin/env",
+        "-i",
+        f"HOME={lock['paths']['lima_home']}",
+        f"LIMA_HOME={lock['paths']['lima_home']}",
+        "LANG=C",
+        "LC_ALL=C",
+        f"PATH={lock['paths']['lima_install']}/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        str(limactl),
+        "--tty=false",
+        "stop",
+        "--force",
+        lock["guest"]["instance_name"],
+    ]
+    while True:
+        try:
+            subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+                timeout=10,
+                check=False,
+            )
+        except BaseException:
+            pass
+        try:
+            for pid in _router_uid_processes():
+                try:
+                    if _router_pid_still_dedicated(pid):
+                        os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            time.sleep(0.1)
+            if _router_uid_processes():
+                continue
+            _status(lock, limactl)
+            if not _router_uid_processes():
+                _assert_no_vm_process()
+                return
+        except BaseException:
+            pass
+        time.sleep(0.2)
+
+
+def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=5)
+
+
+def _run_lima_guarded(
+    lock: dict[str, Any],
+    limactl: Path,
+    arguments: list[str],
+    *,
+    watchdog: subprocess.Popen[bytes],
+    caffeinate: subprocess.Popen[bytes],
+    state: dict[str, Path],
+    attempt_id: str,
+    label: str,
+    timeout: int,
+) -> subprocess.CompletedProcess[bytes]:
+    if re.fullmatch(r"[a-z][a-z0-9-]{0,31}", label) is None or not 1 <= timeout <= 900:
+        raise BootstrapError("guarded Lima command contract differs")
+    if watchdog.poll() is not None or caffeinate.poll() is not None:
+        raise BootstrapError("safety process is unavailable before guarded Lima command")
+    stdout_path = state["state"] / f"limactl-{label}-{attempt_id}.stdout"
+    stderr_path = state["state"] / f"limactl-{label}-{attempt_id}.stderr"
+    stdout = stdout_path.open("xb", buffering=0)
+    stderr = stderr_path.open("xb", buffering=0)
+    os.chown(stdout_path, 0, 0)
+    os.chown(stderr_path, 0, 0)
+    os.chmod(stdout_path, 0o600)
+    os.chmod(stderr_path, 0o600)
+    _sync_directory(stdout_path.parent)
+    try:
+        process = subprocess.Popen(
+            [str(limactl), *arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=stdout,
+            stderr=stderr,
+            env=_environment(lock),
+            preexec_fn=_drop_preexec(454, 454),
+            start_new_session=True,
+        )
+    except BaseException:
+        stdout.close()
+        stderr.close()
+        raise
+    deadline = time.monotonic() + timeout
+    try:
+        while process.poll() is None:
+            if watchdog.poll() is not None:
+                _terminate_process_group(process)
+                raise BootstrapError("air-gap watchdog aborted during guarded Lima command")
+            if caffeinate.poll() is not None:
+                _terminate_process_group(process)
+                raise BootstrapError("sleep inhibitor exited during guarded Lima command")
+            if time.monotonic() >= deadline:
+                _terminate_process_group(process)
+                raise BootstrapError("guarded Lima command timed out")
+            if stdout_path.stat().st_size > 4 * 1024 * 1024 or stderr_path.stat().st_size > 4 * 1024 * 1024:
+                _terminate_process_group(process)
+                raise BootstrapError("guarded Lima command output exceeds bound")
+            time.sleep(0.2)
+    finally:
+        stdout.flush()
+        stderr.flush()
+        _full_sync(stdout.fileno())
+        _full_sync(stderr.fileno())
+        stdout.close()
+        stderr.close()
+    if watchdog.poll() is not None or caffeinate.poll() is not None:
+        raise BootstrapError("safety process exited before guarded Lima result")
+    stdout_content = _read_bound(
+        stdout_path,
+        uid=0,
+        gid=0,
+        mode=0o600,
+        maximum=4 * 1024 * 1024,
+        allow_empty=True,
+    )
+    stderr_content = _read_bound(
+        stderr_path,
+        uid=0,
+        gid=0,
+        mode=0o600,
+        maximum=4 * 1024 * 1024,
+        allow_empty=True,
+    )
+    return subprocess.CompletedProcess(
+        [str(limactl), *arguments], process.returncode, stdout_content, stderr_content
+    )
+
+
+def _guest_command(
+    lock: dict[str, Any],
+    limactl: Path,
+    command: list[str],
+    *,
+    timeout: int,
+    watchdog: subprocess.Popen[bytes],
+    caffeinate: subprocess.Popen[bytes],
+    state: dict[str, Path],
+    attempt_id: str,
+    label: str,
+) -> bytes:
+    result = _run_lima_guarded(
+        lock,
+        limactl,
+        ["--tty=false", "shell", lock["guest"]["instance_name"], *command],
+        watchdog=watchdog,
+        caffeinate=caffeinate,
+        state=state,
+        attempt_id=attempt_id,
+        label=label,
+        timeout=timeout,
+    )
+    if result.returncode != 0 or result.stderr:
+        raise BootstrapError("fixed guest command failed")
+    return result.stdout
+
+
+def _status_guarded(
+    lock: dict[str, Any],
+    limactl: Path,
+    *,
+    expected_status: str,
+    watchdog: subprocess.Popen[bytes],
+    caffeinate: subprocess.Popen[bytes],
+    state: dict[str, Path],
+    attempt_id: str,
+    label: str,
+) -> dict[str, Any]:
+    result = _run_lima_guarded(
+        lock,
+        limactl,
+        ["list", "--format=json"],
+        watchdog=watchdog,
+        caffeinate=caffeinate,
+        state=state,
+        attempt_id=attempt_id,
+        label=label,
+        timeout=30,
+    )
+    return _parse_status_result(lock, result, expected_status=expected_status)
+
+
+def _stop_vm(
+    lock: dict[str, Any],
+    limactl: Path,
+    *,
+    watchdog: subprocess.Popen[bytes],
+    caffeinate: subprocess.Popen[bytes],
+    state: dict[str, Path],
+    attempt_id: str,
+) -> dict[str, Any]:
+    graceful = _run_lima_guarded(
+        lock,
+        limactl,
+        ["--tty=false", "stop", lock["guest"]["instance_name"]],
+        watchdog=watchdog,
+        caffeinate=caffeinate,
+        state=state,
+        attempt_id=attempt_id,
+        label="stop-graceful",
+        timeout=90,
+    )
+    forced = False
+    if graceful.returncode != 0:
+        forced = True
+        forced_result = _run_lima_guarded(
+            lock,
+            limactl,
+            ["--tty=false", "stop", "--force", lock["guest"]["instance_name"]],
+            watchdog=watchdog,
+            caffeinate=caffeinate,
+            state=state,
+            attempt_id=attempt_id,
+            label="stop-force",
+            timeout=30,
+        )
+        if forced_result.returncode != 0:
+            raise BootstrapError("Lima force-stop failed")
+    deadline = time.monotonic() + 30
+    status_attempt = 0
+    while True:
+        try:
+            _status_guarded(
+                lock,
+                limactl,
+                expected_status="Stopped",
+                watchdog=watchdog,
+                caffeinate=caffeinate,
+                state=state,
+                attempt_id=attempt_id,
+                label=f"status-stopped-{status_attempt:02d}",
+            )
+            break
+        except BootstrapError:
+            if watchdog.poll() is not None or caffeinate.poll() is not None:
+                raise
+            if time.monotonic() >= deadline:
+                raise BootstrapError("Lima did not reach stopped state")
+            status_attempt += 1
+            time.sleep(0.25)
+    return {
+        "forced": forced,
+        "graceful_returncode": graceful.returncode,
+        "graceful_stdout_sha256": _sha256_bytes(graceful.stdout),
+        "graceful_stderr_sha256": _sha256_bytes(graceful.stderr),
+    }
+
+
+def _start_caffeinate() -> subprocess.Popen[bytes]:
+    process = subprocess.Popen(
+        ["/usr/bin/caffeinate", "-dimsu", "-w", str(os.getpid())],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+    )
+    time.sleep(0.1)
+    if process.poll() is not None:
+        raise BootstrapError("sleep inhibitor failed to start")
+    return process
+
+
+def _stop_caffeinate(process: subprocess.Popen[bytes] | None) -> None:
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def _wait_hostonly_teardown(
+    watchdog: subprocess.Popen[bytes], caffeinate: subprocess.Popen[bytes]
+) -> None:
+    deadline = time.monotonic() + 15
+    while True:
+        if watchdog.poll() is not None:
+            raise BootstrapError("air-gap watchdog aborted during host-only teardown")
+        if caffeinate.poll() is not None:
+            raise BootstrapError("sleep inhibitor exited during host-only teardown")
+        result = subprocess.run(
+            ["/sbin/ifconfig", "bridge100"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=3,
+            check=False,
+        )
+        text = result.stdout.decode("utf-8", errors="strict")
+        if result.returncode != 0 or (
+            "inet 192.168.106.1 " not in text and "status: active" not in text
+        ):
+            break
+        if time.monotonic() >= deadline:
+            raise BootstrapError("host-only interface teardown timed out")
+        time.sleep(0.1)
+    # Allow at least two 200 ms watchdog samples to bind the base topology.
+    time.sleep(0.5)
+    if watchdog.poll() is not None:
+        raise BootstrapError("air-gap watchdog aborted after host-only teardown")
+def _parse_guest_verifier(content: bytes) -> str:
+    try:
+        lines = content.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise BootstrapError("guest verifier output is not UTF-8") from error
+    if (
+        len(lines) != 5
+        or lines[0] != "first_boot_verified=true"
+        or not lines[1].startswith("first_boot_receipt_sha256=")
+        or lines[2] != "external_airgap_verified_by_guest=false"
+        or lines[3] != "network_reconnect_authorized=false"
+        or lines[4] != "router_key_present=false"
+    ):
+        raise BootstrapError("guest verifier output differs")
+    digest = lines[1].split("=", 1)[1]
+    if SHA256_RE.fullmatch(digest) is None:
+        raise BootstrapError("guest first-boot receipt digest is invalid")
+    return digest
+
+
+def _validate_guest_receipt(content: bytes, expected_sha256: str) -> dict[str, Any]:
+    if _sha256_bytes(content) != expected_sha256:
+        raise BootstrapError("guest first-boot receipt digest differs")
+    receipt = _load_json_bytes(content, "guest first-boot receipt")
+    expected_keys = {
+        "account_passwords_locked",
+        "apt_periodic_sha256",
+        "apt_units_masked",
+        "dpkg_audit_clean",
+        "early_boot_receipt_sha256",
+        "external_airgap_verified_by_guest",
+        "ipv6_sysctl_sha256",
+        "kind",
+        "mainnet_authorized",
+        "network_reconnect_authorized",
+        "nft_runtime_sha256",
+        "nftables_sha256",
+        "package_state_sha256",
+        "passwordless_sudo_bootstrap_still_enabled",
+        "phase",
+        "requires_host_airgap_receipt",
+        "router_key_present",
+        "schema_version",
+        "venue_credentials_touched",
+        "venue_writes_authorized",
+    }
+    if (
+        set(receipt) != expected_keys
+        or receipt.get("schema_version") != 1
+        or receipt.get("kind") != "trading-desk.router-bootstrap.first-boot"
+        or receipt.get("phase") != "guest-first-boot-hardening"
+        or receipt.get("account_passwords_locked") != ["root", "routeradmin"]
+        or receipt.get("apt_units_masked")
+        != [
+            "apt-daily.timer",
+            "apt-daily-upgrade.timer",
+            "apt-daily.service",
+            "apt-daily-upgrade.service",
+            "unattended-upgrades.service",
+        ]
+        or receipt.get("dpkg_audit_clean") is not True
+        or receipt.get("external_airgap_verified_by_guest") is not False
+        or receipt.get("network_reconnect_authorized") is not False
+        or receipt.get("passwordless_sudo_bootstrap_still_enabled") is not True
+        or receipt.get("requires_host_airgap_receipt") is not True
+        or receipt.get("router_key_present") is not False
+        or receipt.get("venue_credentials_touched") is not False
+        or receipt.get("venue_writes_authorized") is not False
+        or receipt.get("mainnet_authorized") is not False
+    ):
+        raise BootstrapError("guest first-boot receipt contract differs")
+    for key in (
+        "apt_periodic_sha256",
+        "early_boot_receipt_sha256",
+        "ipv6_sysctl_sha256",
+        "nft_runtime_sha256",
+        "nftables_sha256",
+        "package_state_sha256",
+    ):
+        if not isinstance(receipt.get(key), str) or SHA256_RE.fullmatch(receipt[key]) is None:
+            raise BootstrapError("guest first-boot receipt digest field differs")
+    return receipt
+
+
+def _hardened_instance_evidence(
+    lock: dict[str, Any], receipt: dict[str, Any], *, allow_runtime_files: bool
+) -> dict[str, Any]:
+    plan = _read_bound(
+        PLAN_PATH, uid=0, gid=0, mode=0o400, maximum=1024 * 1024
+    )
+    cloud_template = _read_bound(
+        CLOUD_TEMPLATE_PATH, uid=0, gid=0, mode=0o400, maximum=1024 * 1024
+    )
+    instance = Path(receipt["instance_path"])
+    evidence = _verify_instance(
+        lock,
+        path=instance,
+        plan=plan,
+        cloud_template=cloud_template,
+        predecessor=None,
+        allow_runtime_files=allow_runtime_files,
+        expected_disk_sha256=(
+            None if allow_runtime_files else receipt["disk_sha256"]
+        ),
+    )
+    fixed = {
+        "instance_device": "instance_device",
+        "instance_inode": "instance_inode",
+        "cloud_config_sha256": "cloud_config_sha256",
+        "hardened_plan_sha256": "plan_sha256",
+        "lima_version_sha256": "lima_version_sha256",
+        "vz_identifier_sha256": "vz_identifier_sha256",
+        "vz_identifier_uuid": "vz_identifier_uuid",
+        "wan_mac": "wan_mac",
+    }
+    if any(receipt.get(receipt_key) != evidence[evidence_key] for receipt_key, evidence_key in fixed.items()):
+        raise BootstrapError("hardened VM receipt/instance binding differs")
+    if not allow_runtime_files and (
+        receipt.get("generated_file_modes") != evidence["generated_file_modes"]
+        or receipt.get("generated_file_sizes") != evidence["generated_file_sizes"]
+    ):
+        raise BootstrapError("hardened VM generated-file receipt differs")
+    return evidence
+
+
 def _verify_instance(
     lock: dict[str, Any],
     *,
@@ -936,12 +2054,17 @@ def _verify_instance(
     plan: bytes,
     cloud_template: bytes,
     predecessor: dict[str, Any] | None,
+    allow_runtime_files: bool = False,
+    expected_disk_sha256: str | None = None,
 ) -> dict[str, Any]:
     uid = lock["host"]["router_operator_uid"]
     gid = lock["host"]["router_operator_gid"]
     metadata = _assert_real(path, kind="directory", uid=uid, gid=gid, mode=0o700)
     expected = {"cloud-config.yaml", "disk", "lima-version", "lima.yaml", "vz-identifier"}
-    if {item.name for item in path.iterdir()} != expected:
+    actual = {item.name for item in path.iterdir()}
+    if (not allow_runtime_files and actual != expected) or (
+        allow_runtime_files and (not expected.issubset(actual) or len(actual) > 64)
+    ):
         raise BootstrapError("stopped instance file inventory differs")
     modes = {
         "cloud-config.yaml": 0o400,
@@ -970,7 +2093,12 @@ def _verify_instance(
         mode=0o600,
         expected_size=20 * 1024**3,
     )
-    if disk_sha != lock["pins"]["predecessor_disk_sha256"]:
+    disk_pin = (
+        lock["pins"]["predecessor_disk_sha256"]
+        if expected_disk_sha256 is None and not allow_runtime_files
+        else expected_disk_sha256
+    )
+    if disk_pin is not None and disk_sha != disk_pin:
         raise BootstrapError("stopped instance disk content differs")
     cloud = _read_bound(
         path / "cloud-config.yaml", uid=uid, gid=gid, mode=0o400, maximum=1024 * 1024
@@ -1028,6 +2156,32 @@ def _verify_instance(
             != {name: (path / name).stat().st_size for name in sorted(expected)}
         ):
             raise BootstrapError("predecessor instance receipt binding differs")
+    runtime_files: dict[str, dict[str, Any]] = {}
+    if allow_runtime_files:
+        for name in sorted(actual - expected):
+            extra = path / name
+            extra_metadata = _assert_real(
+                extra,
+                kind="file",
+                uid=uid,
+                gid=gid,
+                mode=stat.S_IMODE(extra.lstat().st_mode),
+                links=1,
+            )
+            extra_mode = stat.S_IMODE(extra_metadata.st_mode)
+            if extra_mode & 0o022 or extra_metadata.st_size > 16 * 1024 * 1024:
+                raise BootstrapError("post-boot instance artifact is unsafe")
+            runtime_files[name] = {
+                "mode": f"{extra_mode:04o}",
+                "sha256": _hash_bound_file(
+                    extra,
+                    uid=uid,
+                    gid=gid,
+                    mode=extra_mode,
+                    expected_size=extra_metadata.st_size,
+                ),
+                "size": extra_metadata.st_size,
+            }
     return {
         "instance_device": metadata.st_dev,
         "instance_inode": metadata.st_ino,
@@ -1040,6 +2194,7 @@ def _verify_instance(
         "vz_identifier_uuid": value["UUID"].hex(),
         "generated_file_modes": {name: f"{mode:04o}" for name, mode in modes.items()},
         "generated_file_sizes": {name: (path / name).stat().st_size for name in sorted(expected)},
+        "runtime_files": runtime_files,
     }
 
 
@@ -1098,14 +2253,13 @@ def _retained_partial_instances(
 
 
 def _durability_barrier_instance(instance: Path, lima_home: Path) -> None:
-    for name in (
-        "cloud-config.yaml",
-        "disk",
-        "lima-version",
-        "lima.yaml",
-        "vz-identifier",
-    ):
-        descriptor = os.open(instance / name, os.O_RDONLY | os.O_NOFOLLOW)
+    entries = sorted(instance.iterdir())
+    if not entries:
+        raise BootstrapError("instance durability inventory is empty")
+    for path in entries:
+        if path.is_symlink() or not path.is_file():
+            raise BootstrapError("instance durability artifact is unsafe")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         try:
             _full_sync(descriptor)
         finally:
@@ -1407,8 +2561,502 @@ def _apply_hardened_vm(args: argparse.Namespace) -> int:
     print("vm_status=Stopped")
     print("vm_started=false")
     print("network_changes_performed=false")
-    print("next=attended physical-airgap start controller (not yet enabled)")
+    print("next=run check-airgap from a local terminal after all uplinks are disabled")
     return 0
+
+
+def _airgap_preconditions(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Path], Path, dict[str, Any]]:
+    _verify_bundle(args.expected_controller_manifest_sha256)
+    lock = _load_lock()
+    if not lock["phases"]["airgapped_start_apply_enabled"]:
+        raise BootstrapError("attended air-gapped start is disabled")
+    if not args.attest_physical_airgap:
+        raise BootstrapError("literal physical-airgap attestation is required")
+    _verify_system_tools(lock)
+    local_tty = _assert_attended_root_tty()
+    _assert_host_identity(lock)
+    state = _initialize(lock)
+    _assert_no_vm_process()
+    limactl = _limactl(lock)
+    receipt = _hardened_vm_receipt(lock)
+    _status(lock, limactl)
+    _hardened_instance_evidence(lock, receipt, allow_runtime_files=False)
+    base = _run_watchdog_phase(lock, "capture-base")
+    return lock, state, limactl, {
+        "receipt": receipt,
+        "base_capture": base,
+        "local_tty_evidence": local_tty["evidence"],
+        "local_tty_ancestry_sha256": local_tty["sha256"],
+    }
+
+
+def _check_airgap(args: argparse.Namespace) -> int:
+    lock, _state, _limactl_path, evidence = _airgap_preconditions(args)
+    print("airgap_preflight=PASS")
+    print(f"airgap_session_id={lock['pins']['airgap_session_id']}")
+    print(f"airgap_base_capture_sha256={evidence['base_capture']['sha256']}")
+    print("vm_status=Stopped")
+    print("network_reconnect_authorized=false")
+    return 0
+
+
+def _adopt_completed_airgap_first_boot(args: argparse.Namespace) -> int | None:
+    _verify_bundle(args.expected_controller_manifest_sha256)
+    lock = _load_lock()
+    final_path = Path(lock["paths"]["airgap_first_boot_receipt"])
+    pending_path = final_path.parent / f".{final_path.name}.pending"
+    if (
+        not final_path.exists()
+        and not final_path.is_symlink()
+        and not pending_path.exists()
+        and not pending_path.is_symlink()
+    ):
+        return None
+    if (final_path.exists() or final_path.is_symlink()) and (
+        pending_path.exists() or pending_path.is_symlink()
+    ):
+        raise BootstrapError("completed and pending first-boot receipts coexist")
+    if not args.attest_physical_airgap:
+        raise BootstrapError("literal physical-airgap attestation is required")
+    _verify_system_tools(lock)
+    _assert_attended_root_tty()
+    _assert_host_identity(lock)
+    state = _initialize(lock)
+    candidate_path = final_path if final_path.exists() or final_path.is_symlink() else pending_path
+    content = _read_bound(
+        candidate_path, uid=0, gid=0, mode=0o400, maximum=1024 * 1024
+    )
+    receipt = _load_json_bytes(content, "completed air-gap first-boot receipt")
+    attempt_id = lock["pins"]["airgap_session_id"]
+    if (
+        set(receipt) != AIRGAP_FIRST_BOOT_RECEIPT_KEYS
+        or receipt.get("schema_version") != 1
+        or receipt.get("kind")
+        != "trading-desk.router-bootstrap.airgap-first-boot-stopped"
+        or receipt.get("phase") != "airgap-first-boot"
+        or receipt.get("attempt_id") != attempt_id
+        or receipt.get("controller_manifest_sha256")
+        != args.expected_controller_manifest_sha256
+        or receipt.get("hardened_vm_receipt_sha256")
+        != lock["pins"]["hardened_vm_receipt_sha256"]
+        or receipt.get("start_invocation_count") != 1
+        or receipt.get("physical_airgap_attested") is not True
+        or receipt.get("vm_started_then_stopped") is not True
+        or receipt.get("vm_status") != "Stopped"
+        or receipt.get("host_uplink_restore_safe_while_vm_stopped") is not True
+        or receipt.get("guest_network_reconnect_authorized") is not False
+        or receipt.get("passwordless_sudo_bootstrap_still_enabled") is not True
+        or receipt.get("external_network_opened_by_controller") is not False
+        or receipt.get("host_only_network_temporarily_started") is not True
+        or type(receipt.get("socket_vmnet_pid")) is not int
+        or receipt.get("credentials_accessed") is not False
+        or receipt.get("router_key_present") is not False
+        or receipt.get("venue_writes_authorized") is not False
+        or receipt.get("mainnet_authorized") is not False
+    ):
+        raise BootstrapError("completed air-gap first-boot receipt contract differs")
+    tty_evidence = receipt.get("local_tty_evidence")
+    if (
+        not isinstance(tty_evidence, dict)
+        or receipt.get("local_tty_ancestry_sha256")
+        != _sha256_bytes(_canonical_json(tty_evidence))
+    ):
+        raise BootstrapError("completed local TTY evidence differs")
+    receipt08 = _hardened_vm_receipt(lock)
+    _assert_no_vm_process()
+    limactl = _limactl(lock)
+    _status(lock, limactl)
+    postboot = _hardened_instance_evidence(lock, receipt08, allow_runtime_files=True)
+    if (
+        receipt.get("postboot_cloud_config_sha256") != postboot["cloud_config_sha256"]
+        or receipt.get("postboot_disk_sha256") != postboot["disk_sha256"]
+        or receipt.get("postboot_runtime_files") != postboot["runtime_files"]
+    ):
+        raise BootstrapError("completed post-boot instance evidence differs")
+    guest = receipt.get("guest_first_boot_receipt")
+    if not isinstance(guest, dict):
+        raise BootstrapError("completed guest receipt is absent")
+    guest_content = _canonical_json(guest)
+    guest_sha256 = receipt.get("guest_first_boot_receipt_sha256")
+    if not isinstance(guest_sha256, str):
+        raise BootstrapError("completed guest receipt digest is absent")
+    _validate_guest_receipt(guest_content, guest_sha256)
+    watchdog_path = (
+        state["state"]
+        / "airgap-watchdog-results"
+        / f"{attempt_id}-watch.json"
+    )
+    watchdog_content = _read_bound(
+        watchdog_path, uid=0, gid=0, mode=0o400, maximum=256 * 1024
+    )
+    if _sha256_bytes(watchdog_content) != receipt.get("airgap_watchdog_result_sha256"):
+        raise BootstrapError("completed watchdog receipt differs")
+    watchdog_value = _load_json_bytes(watchdog_content, "completed watchdog result")
+    if (
+        set(watchdog_value) != WATCHDOG_RESULT_KEYS
+        or watchdog_value.get("disposition") != "PASS"
+        or watchdog_value.get("mode") != "watch"
+        or watchdog_value.get("session_id") != attempt_id
+        or watchdog_value.get("armed_message_sent") is not True
+        or watchdog_value.get("completion_socket_vmnet_absent") is not True
+        or watchdog_value.get("socket_vmnet_alive_last") is not False
+        or watchdog_value.get("hardware_lock_sha256")
+        != receipt.get("airgap_hardware_lock_sha256")
+        or not isinstance(watchdog_value.get("socket_vmnet_stop"), dict)
+        or watchdog_value["socket_vmnet_stop"].get("pid")
+        != receipt.get("socket_vmnet_pid")
+        or watchdog_value.get("network_reconnect_authorized") is not False
+    ):
+        raise BootstrapError("completed watchdog contract differs")
+    cleanup = receipt.get("temporary_vmnet_artifacts")
+    expected_cleanup = {
+        "retained_sudoers": str(
+            state["quarantine"] / f"first-boot-sudoers-{attempt_id}"
+        ),
+        "retained_vmnet_runtime": str(
+            state["quarantine"] / f"first-boot-vmnet-runtime-{attempt_id}"
+        ),
+    }
+    if cleanup != expected_cleanup:
+        raise BootstrapError("completed VMNet cleanup evidence differs")
+    retained_sudoers = Path(cleanup["retained_sudoers"])
+    retained_runtime = Path(cleanup["retained_vmnet_runtime"])
+    sudoers_content = _read_bound(
+        retained_sudoers, uid=0, gid=0, mode=0o400, maximum=64 * 1024
+    )
+    if _sha256_bytes(sudoers_content) != lock["pins"]["lima_first_boot_sudoers_sha256"]:
+        raise BootstrapError("completed retained sudoers differs")
+    _assert_real(retained_runtime, kind="directory", uid=0, gid=0, mode=0o755)
+    if any(retained_runtime.iterdir()):
+        raise BootstrapError("completed retained VMNet runtime is not empty")
+    for live in (
+        Path(lock["paths"]["vmnet_sudoers"]),
+        Path(lock["paths"]["vmnet_runtime"]),
+    ):
+        if live.exists() or live.is_symlink():
+            raise BootstrapError("completed temporary VMNet authority remains live")
+    preparing = state["state"] / ".airgap-first-boot.PREPARING.json"
+    starting = state["state"] / ".airgap-first-boot.STARTING.json"
+    preparing_value = {
+        "attempt_id": attempt_id,
+        "controller_manifest_sha256": args.expected_controller_manifest_sha256,
+        "hardened_vm_receipt_sha256": lock["pins"]["hardened_vm_receipt_sha256"],
+        "kind": "trading-desk.router-bootstrap.installing",
+        "phase": "airgap-first-boot",
+        "physical_airgap_attested": True,
+        "schema_version": 1,
+        "start_invocation_limit": 1,
+        "state": "PREPARING",
+    }
+    start_arguments = list(AIRGAP_START_ARGUMENTS)
+    starting_value = {
+        **preparing_value,
+        "start_argv_sha256": _sha256_bytes(_canonical_json(start_arguments)),
+        "state": "STARTING",
+    }
+    preparing_present = preparing.exists() or preparing.is_symlink()
+    starting_present = starting.exists() or starting.is_symlink()
+    if candidate_path == pending_path and not (
+        preparing_present and starting_present
+    ):
+        raise BootstrapError("pending first-boot receipt marker state differs")
+    if candidate_path == final_path and starting_present and not preparing_present:
+        raise BootstrapError("completed first-boot marker deletion order differs")
+    for path, value in ((starting, starting_value), (preparing, preparing_value)):
+        if path.exists() or path.is_symlink():
+            observed = _read_bound(
+                path, uid=0, gid=0, mode=0o400, maximum=64 * 1024
+            )
+            if observed != _canonical_json(value):
+                raise BootstrapError("completed first-boot marker differs")
+    if candidate_path == pending_path:
+        _rename_exclusive(pending_path, final_path)
+    for path in (starting, preparing):
+        if path.exists() or path.is_symlink():
+            path.unlink()
+            _sync_directory(path.parent)
+    digest = _sha256_bytes(content)
+    print(f"airgap_first_boot_receipt={final_path}")
+    print(f"airgap_first_boot_receipt_sha256={digest}")
+    print("completed_receipt_markers_removed=true")
+    print("vm_status=Stopped")
+    print("host_uplink_restore_safe_while_vm_stopped=true")
+    return 0
+
+
+def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
+    adopted = _adopt_completed_airgap_first_boot(args)
+    if adopted is not None:
+        return adopted
+    lock, state, limactl, preflight = _airgap_preconditions(args)
+    receipt08 = preflight["receipt"]
+    final_path = Path(lock["paths"]["airgap_first_boot_receipt"])
+    if final_path.exists() or final_path.is_symlink():
+        raise BootstrapError("air-gapped first-boot receipt already exists")
+    preparing_marker = state["state"] / ".airgap-first-boot.PREPARING.json"
+    starting_marker = state["state"] / ".airgap-first-boot.STARTING.json"
+    if (
+        preparing_marker.exists()
+        or preparing_marker.is_symlink()
+        or starting_marker.exists()
+        or starting_marker.is_symlink()
+    ):
+        raise BootstrapError("prior air-gapped first-boot attempt requires review")
+    attempt_id = lock["pins"]["airgap_session_id"]
+    marker_value = {
+        "attempt_id": attempt_id,
+        "controller_manifest_sha256": args.expected_controller_manifest_sha256,
+        "hardened_vm_receipt_sha256": lock["pins"]["hardened_vm_receipt_sha256"],
+        "kind": "trading-desk.router-bootstrap.installing",
+        "phase": "airgap-first-boot",
+        "physical_airgap_attested": True,
+        "schema_version": 1,
+        "start_invocation_limit": 1,
+        "state": "PREPARING",
+    }
+    _write_exact(
+        preparing_marker,
+        _canonical_json(marker_value),
+        uid=0,
+        gid=0,
+        mode=0o400,
+    )
+    caffeinate: subprocess.Popen[bytes] | None = None
+    socket_process: subprocess.Popen[bytes] | None = None
+    socket_streams: tuple[Any, Any] | None = None
+    watchdog: subprocess.Popen[bytes] | None = None
+    watchdog_write_fd: int | None = None
+    start_invoked = False
+    vmnet_cleanup: dict[str, str] | None = None
+    try:
+        caffeinate = _start_caffeinate()
+        vmnet_prepare = _prepare_vmnet(lock, limactl, attempt_id=attempt_id)
+        socket_process, socket_streams, socket_evidence = _start_hostonly_daemon(
+            lock, state, attempt_id=attempt_id
+        )
+        host_only_capture = _run_watchdog_phase(
+            lock, "capture-host-only", socket_vmnet_pid=socket_process.pid
+        )
+        watchdog, watchdog_write_fd = _spawn_watchdog(
+            lock, socket_vmnet_pid=socket_process.pid
+        )
+        if caffeinate.poll() is not None or watchdog.poll() is not None:
+            raise BootstrapError("air-gap guard process exited before VM start")
+        start_arguments = list(AIRGAP_START_ARGUMENTS)
+        starting_value = {
+            **marker_value,
+            "start_argv_sha256": _sha256_bytes(_canonical_json(start_arguments)),
+            "state": "STARTING",
+        }
+        _write_exact(
+            starting_marker,
+            _canonical_json(starting_value),
+            uid=0,
+            gid=0,
+            mode=0o400,
+        )
+        start_invoked = True
+        started = _run_lima_guarded(
+            lock,
+            limactl,
+            start_arguments,
+            watchdog=watchdog,
+            caffeinate=caffeinate,
+            state=state,
+            attempt_id=attempt_id,
+            label="start",
+            timeout=660,
+        )
+        if started.returncode != 0:
+            raise BootstrapError("attended Lima first start failed")
+        if watchdog.poll() is not None or caffeinate.poll() is not None:
+            raise BootstrapError("air-gap guard process exited during VM start")
+        _status_guarded(
+            lock,
+            limactl,
+            expected_status="Running",
+            watchdog=watchdog,
+            caffeinate=caffeinate,
+            state=state,
+            attempt_id=attempt_id,
+            label="status-running",
+        )
+        verifier_output = _guest_command(
+            lock,
+            limactl,
+            [
+                "/usr/bin/sudo",
+                "-n",
+                "/usr/local/libexec/trading-desk-verify-first-boot",
+            ],
+            timeout=120,
+            watchdog=watchdog,
+            caffeinate=caffeinate,
+            state=state,
+            attempt_id=attempt_id,
+            label="guest-verifier",
+        )
+        guest_receipt_sha256 = _parse_guest_verifier(verifier_output)
+        guest_receipt_content = _guest_command(
+            lock,
+            limactl,
+            [
+                "/usr/bin/sudo",
+                "-n",
+                "/bin/cat",
+                "/var/lib/trading-desk-router-bootstrap/first-boot.json",
+            ],
+            timeout=30,
+            watchdog=watchdog,
+            caffeinate=caffeinate,
+            state=state,
+            attempt_id=attempt_id,
+            label="guest-receipt",
+        )
+        guest_receipt = _validate_guest_receipt(
+            guest_receipt_content, guest_receipt_sha256
+        )
+        stop_evidence = _stop_vm(
+            lock,
+            limactl,
+            watchdog=watchdog,
+            caffeinate=caffeinate,
+            state=state,
+            attempt_id=attempt_id,
+        )
+        socket_stop = _stop_hostonly_daemon(socket_process, socket_streams)
+        socket_process = None
+        socket_streams = None
+        _assert_no_vm_process()
+        _status(lock, limactl)
+        postboot = _hardened_instance_evidence(
+            lock, receipt08, allow_runtime_files=True
+        )
+        _durability_barrier_instance(
+            Path(receipt08["instance_path"]), Path(lock["paths"]["lima_home"])
+        )
+        vmnet_cleanup = _quarantine_vmnet(lock, state, attempt_id=attempt_id)
+        _wait_hostonly_teardown(watchdog, caffeinate)
+        if watchdog.poll() is not None:
+            raise BootstrapError("air-gap watchdog exited before completion")
+        watchdog_result = _complete_watchdog(
+            lock,
+            watchdog,
+            watchdog_write_fd,
+            expected_hardware_lock_sha256=host_only_capture["sha256"],
+            expected_socket_vmnet_pid=socket_evidence["pid"],
+        )
+        watchdog = None
+        watchdog_write_fd = None
+        if caffeinate.poll() is not None:
+            raise BootstrapError("sleep inhibitor exited before completion")
+        receipt = {
+            "airgap_base_capture_sha256": preflight["base_capture"]["sha256"],
+            "airgap_hardware_lock_sha256": host_only_capture["sha256"],
+            "airgap_watchdog_result_sha256": watchdog_result["sha256"],
+            "attempt_id": attempt_id,
+            "controller_manifest_sha256": args.expected_controller_manifest_sha256,
+            "credentials_accessed": False,
+            "guest_first_boot_receipt": guest_receipt,
+            "guest_first_boot_receipt_sha256": guest_receipt_sha256,
+            "guest_network_reconnect_authorized": False,
+            "guest_verifier_output_sha256": _sha256_bytes(verifier_output),
+            "hardened_vm_receipt_sha256": lock["pins"]["hardened_vm_receipt_sha256"],
+            "host_uplink_restore_safe_while_vm_stopped": True,
+            "kind": "trading-desk.router-bootstrap.airgap-first-boot-stopped",
+            "local_tty_ancestry_sha256": preflight[
+                "local_tty_ancestry_sha256"
+            ],
+            "local_tty_evidence": preflight["local_tty_evidence"],
+            "mainnet_authorized": False,
+            "external_network_opened_by_controller": False,
+            "host_only_network_temporarily_started": True,
+            "passwordless_sudo_bootstrap_still_enabled": True,
+            "phase": "airgap-first-boot",
+            "physical_airgap_attested": True,
+            "postboot_cloud_config_sha256": postboot["cloud_config_sha256"],
+            "postboot_disk_sha256": postboot["disk_sha256"],
+            "postboot_runtime_files": postboot["runtime_files"],
+            "router_key_present": False,
+            "schema_version": 1,
+            "socket_vmnet_command_sha256": socket_evidence["command_sha256"],
+            "socket_vmnet_pid": socket_evidence["pid"],
+            "socket_vmnet_stop": socket_stop,
+            "start_invocation_count": 1,
+            "start_stderr_sha256": _sha256_bytes(started.stderr),
+            "start_stdout_sha256": _sha256_bytes(started.stdout),
+            "stop_evidence": stop_evidence,
+            "sudoers_sha256": vmnet_prepare["sudoers_sha256"],
+            "temporary_vmnet_artifacts": vmnet_cleanup,
+            "venue_writes_authorized": False,
+            "vm_started_then_stopped": True,
+            "vm_status": "Stopped",
+        }
+        path, digest = _atomic_receipt(
+            state["receipts"], final_path.name, receipt
+        )
+        starting_marker.unlink()
+        preparing_marker.unlink()
+        _sync_directory(preparing_marker.parent)
+        print(f"airgap_first_boot_receipt={path}")
+        print(f"airgap_first_boot_receipt_sha256={digest}")
+        print("vm_status=Stopped")
+        print("host_uplink_restore_safe_while_vm_stopped=true")
+        print("guest_network_reconnect_authorized=false")
+        print("venue_writes_authorized=false")
+        return 0
+    except BaseException as error:
+        if watchdog_write_fd is not None:
+            try:
+                os.close(watchdog_write_fd)
+            except OSError:
+                pass
+            watchdog_write_fd = None
+        if watchdog is not None:
+            try:
+                watchdog.communicate()
+            except OSError:
+                pass
+        if socket_process is not None and socket_streams is not None:
+            try:
+                _stop_hostonly_daemon(socket_process, socket_streams)
+            except BaseException:
+                pass
+        if start_invoked:
+            _emergency_contain_until_stopped(lock, limactl)
+        if vmnet_cleanup is None:
+            try:
+                vmnet_cleanup = _quarantine_vmnet(
+                    lock, state, attempt_id=attempt_id
+                )
+            except BaseException:
+                vmnet_cleanup = None
+        incident = {
+            "attempt_id": attempt_id,
+            "automatic_retry_authorized": False,
+            "disposition": "UNKNOWN" if start_invoked else "FAILED",
+            "error_type": type(error).__name__,
+            "kind": "trading-desk.router-bootstrap.airgap-first-boot-incident",
+            "mainnet_authorized": False,
+            "phase": "airgap-first-boot",
+            "schema_version": 1,
+            "start_invoked": start_invoked,
+            "temporary_vmnet_artifacts": vmnet_cleanup,
+            "venue_writes_authorized": False,
+        }
+        try:
+            _atomic_receipt(
+                state["receipts"],
+                f"09-airgap-first-boot-incident-{attempt_id}.json",
+                incident,
+            )
+        except BaseException:
+            pass
+        raise BootstrapError(
+            "air-gapped first boot failed; keep uplinks disabled and review the retained incident"
+        ) from error
+    finally:
+        _stop_caffeinate(caffeinate)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1416,6 +3064,10 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="phase", required=True)
     apply = subparsers.add_parser("apply-hardened-vm")
     apply.add_argument("--expected-controller-manifest-sha256", required=True)
+    for name in ("check-airgap", "apply-airgapped-first-boot"):
+        airgap = subparsers.add_parser(name)
+        airgap.add_argument("--expected-controller-manifest-sha256", required=True)
+        airgap.add_argument("--attest-physical-airgap", action="store_true")
     return parser
 
 
@@ -1424,6 +3076,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.phase == "apply-hardened-vm":
             return _apply_hardened_vm(args)
+        if args.phase == "check-airgap":
+            return _check_airgap(args)
+        if args.phase == "apply-airgapped-first-boot":
+            return _apply_airgapped_first_boot(args)
         raise BootstrapError("unknown bootstrap phase")
     except (BootstrapError, OSError, KeyError, TypeError, ValueError, plistlib.InvalidFileException) as error:
         print(f"router_bootstrap_failed: {error}", file=sys.stderr)
