@@ -28,11 +28,13 @@ CONTROL_GROUP_GENERATED_UID=2DB06E8A-27DF-49F0-941D-E15142737975
 die() { /bin/echo "ERROR: $*" >&2; exit 1; }
 digest() { /usr/bin/openssl dgst -sha256 "$1" | /usr/bin/awk '{print $2}'; }
 no_acl() {
+  local entries
   entries=$(/bin/ls -led "$1" | /usr/bin/sed -n '/^[[:space:]]*[0-9][0-9]*:/p')
   [ -z "$entries" ] || die "unexpected ACL: $1"
 }
 
 dscl_value() {
+  local node attribute attribute_record attribute_value
   node=$1
   attribute=$2
   attribute_record=$(/usr/bin/dscl . -read "$node" "$attribute" 2>/dev/null) || \
@@ -53,6 +55,7 @@ dscl_value() {
 }
 
 canonical_uuid_set() {
+  local raw_uuid_set
   raw_uuid_set=$1
   /usr/bin/printf '%s\n' "$raw_uuid_set" | /usr/bin/awk '
 function invalid() { failed=1; exit 1 }
@@ -88,6 +91,7 @@ END {
 }
 
 generated_uid_inventory() {
+  local generated_inventory_node raw_generated_inventory canonical_generated_inventory
   generated_inventory_node=$1
   raw_generated_inventory=$(/usr/bin/dscl . -list "$generated_inventory_node" GeneratedUID 2>/dev/null) || \
     die "$generated_inventory_node GeneratedUID inventory failed"
@@ -111,6 +115,7 @@ END { if (failed || NR < 1) exit 1 }
 }
 
 assert_generated_uid_unique() {
+  local generated_node generated_account generated_uid user_results group_results user_matches group_matches user_count group_count
   generated_node=$1
   generated_account=$2
   generated_uid=$(dscl_value "$generated_node/$generated_account" GeneratedUID)
@@ -140,6 +145,7 @@ assert_generated_uid_unique() {
 }
 
 reviewed_group_nested_set() {
+  local reviewed_group reviewed_group_record nested_lines
   reviewed_group=$1
   reviewed_group_record=$(/usr/bin/dscl . -read "/Groups/$reviewed_group" 2>/dev/null) || \
     die "$reviewed_group reviewed group record read failed"
@@ -156,6 +162,7 @@ reviewed_group_nested_set() {
 }
 
 assert_reviewed_group_principal() {
+  local reviewed_gid reviewed_name reviewed_uuid reviewed_nested
   reviewed_gid=$1
   reviewed_name=$2
   reviewed_uuid=$3
@@ -175,6 +182,7 @@ assert_reviewed_supplementary_group_principals() {
 }
 
 supplementary_group_set() {
+  local group_account primary_gid raw_group_ids canonical_groups
   group_account=$1
   primary_gid=$2
   raw_group_ids=$(/usr/bin/id -G "$group_account") || \
@@ -213,6 +221,7 @@ END {
 }
 
 assert_existing_role_identity() {
+  local role_account role_uid expected_user_uuid expected_group_uuid
   role_account=$1
   role_uid=$2
   expected_user_uuid=$3
@@ -233,6 +242,7 @@ assert_existing_role_identity() {
 }
 
 assert_router_group_baseline() {
+  local research_groups executor_groups control_groups router_groups
   research_groups=$(supplementary_group_set trading-research 450)
   executor_groups=$(supplementary_group_set trading-executor 451)
   control_groups=$(supplementary_group_set trading-control 452)
@@ -250,6 +260,7 @@ assert_router_group_baseline() {
 }
 
 directory_id_inventory() {
+  local inventory_node inventory_attribute raw_inventory canonical_inventory
   inventory_node=$1
   inventory_attribute=$2
   raw_inventory=$(/usr/bin/dscl . -list "$inventory_node" "$inventory_attribute" 2>/dev/null) || \
@@ -269,6 +280,7 @@ END { if (failed || NR < 1) exit 1 }
 }
 
 assert_directory_id_singleton() {
+  local node attribute numeric_id expected_name results matches
   node=$1
   attribute=$2
   numeric_id=$3
@@ -286,6 +298,7 @@ assert_directory_id_singleton() {
 }
 
 disabled_account_variant() {
+  local disabled_account user_record password_lines authentication_lines
   disabled_account=$1
   user_record=$(/usr/bin/dscl . -read "/Users/$disabled_account" 2>/dev/null) || \
     die "$disabled_account directory-service record read failed"
@@ -304,6 +317,7 @@ assert_disabled_password_account() {
 }
 
 assert_primary_group_has_no_members() {
+  local member_group group_record
   member_group=$1
   group_record=$(/usr/bin/dscl . -read "/Groups/$member_group" 2>/dev/null) || \
     die "$member_group group record read failed"
@@ -316,6 +330,7 @@ assert_primary_group_has_no_members() {
 }
 
 assert_router_home_exact() {
+  local ancestor
   for ancestor in /private /private/var /private/var/db
   do
     [ -d "$ancestor" ] && [ ! -L "$ancestor" ] && \
@@ -333,6 +348,7 @@ assert_router_home_exact() {
 }
 
 assert_router_identity_receipt() {
+  local receipt_size user_generated_uid group_generated_uid authentication_variant expected_receipt actual_receipt
   [ -f "$ROUTER_IDENTITY_RECEIPT" ] && [ ! -L "$ROUTER_IDENTITY_RECEIPT" ] || \
     die 'router identity receipt is unavailable'
   [ "$(/usr/bin/stat -f '%u:%g:%Lp:%l' "$ROUTER_IDENTITY_RECEIPT")" = 0:0:400:1 ] || \
@@ -393,6 +409,7 @@ assert_router_identity_exact() {
 }
 
 assert_root_sealed_directory_chain() {
+  local sealed_cursor
   sealed_cursor=$1
   case "$sealed_cursor" in /*) ;; *) die "sealed directory must be absolute: $sealed_cursor" ;; esac
   [ "$(/bin/realpath "$sealed_cursor")" = "$sealed_cursor" ] || die "sealed directory path is non-canonical: $sealed_cursor"
@@ -409,6 +426,7 @@ assert_root_sealed_directory_chain() {
 }
 
 assert_root_sealed_regular_file() {
+  local sealed_file
   sealed_file=$1
   [ -f "$sealed_file" ] && [ ! -L "$sealed_file" ] || die "sealed file is unavailable: $sealed_file"
   [ "$(/bin/realpath "$sealed_file")" = "$sealed_file" ] || die "sealed file path is non-canonical: $sealed_file"
@@ -424,6 +442,7 @@ file_signature() {
 }
 
 revalidate_source() {
+  local revalidate_path revalidate_sha256 revalidate_signature
   revalidate_path=$1
   revalidate_sha256=$2
   revalidate_signature=$3
@@ -522,6 +541,7 @@ do
   [ ! -e "$target" ] && [ ! -L "$target" ] || die "target already exists: $target"
 done
 adopt_cache_root() {
+  local cache_root optional_root_file config_dir unexpected
   cache_root=$1
   optional_root_file=$2
   config_dir=$cache_root/$config_hash
@@ -624,6 +644,7 @@ finally:
 no_acl "$COLLECTOR_LOCK"
 
 install_or_adopt() {
+  local install_source install_target install_mode install_sha256 install_signature
   install_source=$1
   install_target=$2
   install_mode=$3

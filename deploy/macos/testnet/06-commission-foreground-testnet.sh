@@ -14,6 +14,7 @@ COLLECTOR_IDENTITY_RECEIPT=/etc/trading-desk/testnet-foreground-collector-identi
 ROUTER_IDENTITY_RECEIPT=/etc/trading-desk/testnet-foreground-router-identity.receipt
 COLLECTOR_BIRTH_MARKER=/etc/trading-desk/.testnet-foreground-collector-birth-v2
 ROUTER_BIRTH_MARKER=/etc/trading-desk/.testnet-foreground-router-birth-v2
+COLLECTOR_RECEIPT_BUG_QUARANTINE=/etc/trading-desk/testnet-foreground-collector-identity.receipt.uid0-bug-79cf0db
 
 DB_ANCESTOR=/private/var/db
 FOREGROUND_ROOT=/private/var/db/trading-desk-testnet-foreground
@@ -70,6 +71,7 @@ plan() {
   /bin/echo 'PLAN_ONLY no identity, path, ACL, config, database, credential, network, service, or venue state changed'
   /bin/echo 'Foreground TESTNET canary phases:'
   /bin/echo '  --apply-identity  create/adopt only exact disabled UID/GID 453'
+  /bin/echo '  --repair-collector-receipt-v3  repair only the exact retained uid0/gid0 receipt bug'
   /bin/echo '  --apply-router-identity  create/adopt only exact disabled UID/GID 454 and its private Lima home'
   /bin/echo '  --apply-preinit   render public config and create empty final-path layout/ACLs'
   /bin/echo '  --apply-postinit  verify initialized databases and convert only future sidecar ACL inheritance'
@@ -80,6 +82,7 @@ plan() {
 }
 
 cleanup() {
+  local safe_to_restore restored path
   if [ "$POSTINIT_CHANGED" = 1 ] && [ "$POSTINIT_COMMITTED" = 0 ]; then
     safe_to_restore=1
     if [ -e "$POSTINIT_RECEIPT" ] || [ -L "$POSTINIT_RECEIPT" ]; then
@@ -118,18 +121,25 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 acl_entries() {
-  /bin/ls -led "$1" | /usr/bin/sed -n '/^[[:space:]]*[0-9][0-9]*:/p'
+  local path
+  path=$1
+  /bin/ls -led "$path" | /usr/bin/sed -n '/^[[:space:]]*[0-9][0-9]*:/p'
 }
 
 acl_export() {
-  acl_entries "$1" | /usr/bin/sed -E 's/^[[:space:]]*[0-9][0-9]*:[[:space:]]*//'
+  local path
+  path=$1
+  acl_entries "$path" | /usr/bin/sed -E 's/^[[:space:]]*[0-9][0-9]*:[[:space:]]*//'
 }
 
 assert_no_acl() {
-  [ -z "$(acl_entries "$1")" ] || die "unexpected named ACL: $1"
+  local path
+  path=$1
+  [ -z "$(acl_entries "$path")" ] || die "unexpected named ACL: $path"
 }
 
 assert_acl_exact() {
+  local path expected actual normalized expected_sorted actual_sorted probe
   path=$1
   expected=$2
   actual=$TEMP_ROOT/acl-actual
@@ -159,6 +169,7 @@ assert_acl_exact() {
 }
 
 assert_acl_export_exact() {
+  local path expected actual expected_sorted actual_sorted
   path=$1
   expected=$2
   actual=$TEMP_ROOT/acl-export-actual
@@ -172,6 +183,7 @@ assert_acl_export_exact() {
 }
 
 set_or_assert_acl() {
+  local path expected current
   path=$1
   expected=$2
   current=$TEMP_ROOT/acl-current
@@ -183,6 +195,7 @@ set_or_assert_acl() {
 }
 
 assert_directory() {
+  local path uid gid mode
   path=$1
   uid=$2
   gid=$3
@@ -194,6 +207,7 @@ assert_directory() {
 }
 
 ensure_directory() {
+  local path uid gid mode acl_file
   path=$1
   uid=$2
   gid=$3
@@ -212,6 +226,7 @@ ensure_directory() {
 }
 
 assert_regular() {
+  local path uid gid mode
   path=$1
   uid=$2
   gid=$3
@@ -224,6 +239,7 @@ assert_regular() {
 }
 
 assert_empty() {
+  local first
   first=$(/usr/bin/find "$1" -mindepth 1 -maxdepth 1 -print -quit)
   [ -z "$first" ] || die "directory must be empty before init: $first"
 }
@@ -246,6 +262,7 @@ for path in sys.argv[1:]:
 }
 
 identity_receipt_payload() {
+    local role account uid gid home user_generated_uid group_generated_uid authentication_variant
     role=$1
     account=$2
     uid=$3
@@ -279,6 +296,7 @@ identity_receipt_payload() {
 }
 
 assert_identity_receipt_exact() {
+  local target role account uid gid home expected_receipt actual_receipt
   target=$1
   role=$2
   account=$3
@@ -293,6 +311,7 @@ assert_identity_receipt_exact() {
 }
 
 write_identity_receipt() {
+  local target role account uid gid home pending
   target=$1
   role=$2
   account=$3
@@ -319,6 +338,7 @@ write_identity_receipt() {
 }
 
 write_or_verify_birth_marker() {
+  local target role account uid gid home pending
   target=$1
   role=$2
   account=$3
@@ -359,6 +379,7 @@ write_or_verify_birth_marker() {
 }
 
 prepare_new_identity_birth() {
+  local marker role account uid gid home marker_preexisted
   marker=$1
   role=$2
   account=$3
@@ -382,6 +403,7 @@ prepare_new_identity_birth() {
 }
 
 assert_identity() {
+  local name uid gid
   name=$1
   uid=$2
   gid=$3
@@ -403,6 +425,7 @@ assert_fixed_identities() {
 }
 
 dscl_value() {
+  local node attribute attribute_record attribute_value
   node=$1
   attribute=$2
   attribute_record=$(/usr/bin/dscl . -read "$node" "$attribute" 2>/dev/null) || \
@@ -423,6 +446,7 @@ dscl_value() {
 }
 
 generated_uid_inventory() {
+  local generated_inventory_node raw_generated_inventory canonical_generated_inventory
   generated_inventory_node=$1
   raw_generated_inventory=$(/usr/bin/dscl . -list "$generated_inventory_node" GeneratedUID 2>/dev/null) || \
     die "$generated_inventory_node GeneratedUID inventory failed"
@@ -446,6 +470,7 @@ END { if (failed || NR < 1) exit 1 }
 }
 
 assert_generated_uid_unique() {
+  local generated_node generated_account generated_uid user_results group_results user_matches group_matches user_count group_count
   generated_node=$1
   generated_account=$2
   generated_uid=$(dscl_value "$generated_node/$generated_account" GeneratedUID)
@@ -479,6 +504,7 @@ assert_generated_uid_unique() {
 }
 
 canonical_uuid_set() {
+  local raw_uuid_set
   raw_uuid_set=$1
   /usr/bin/printf '%s\n' "$raw_uuid_set" | /usr/bin/awk '
 function invalid() { failed=1; exit 1 }
@@ -514,6 +540,7 @@ END {
 }
 
 reviewed_group_nested_set() {
+  local reviewed_group reviewed_group_record nested_lines raw_nested
   reviewed_group=$1
   reviewed_group_record=$(/usr/bin/dscl . -read "/Groups/$reviewed_group" 2>/dev/null) || \
     die "$reviewed_group reviewed group record read failed"
@@ -533,6 +560,7 @@ reviewed_group_nested_set() {
 }
 
 assert_reviewed_group_principal() {
+  local reviewed_gid reviewed_name reviewed_uuid reviewed_nested
   reviewed_gid=$1
   reviewed_name=$2
   reviewed_uuid=$3
@@ -552,6 +580,7 @@ assert_reviewed_supplementary_group_principals() {
 }
 
 supplementary_group_set() {
+  local group_account primary_gid raw_group_ids canonical_groups
   group_account=$1
   primary_gid=$2
   raw_group_ids=$(/usr/bin/id -G "$group_account") || \
@@ -590,6 +619,7 @@ END {
 }
 
 assert_existing_role_identity() {
+  local role_account role_uid expected_user_uuid expected_group_uuid
   role_account=$1
   role_uid=$2
   expected_user_uuid=$3
@@ -614,6 +644,7 @@ assert_existing_role_identity() {
 }
 
 assert_platform_group_baseline() {
+  local research_groups executor_groups control_groups
   research_groups=$(supplementary_group_set trading-research 450)
   executor_groups=$(supplementary_group_set trading-executor 451)
   control_groups=$(supplementary_group_set trading-control 452)
@@ -629,6 +660,7 @@ assert_platform_group_baseline() {
 }
 
 assert_baseline_supplementary_groups() {
+  local group_account primary_gid actual_groups
   group_account=$1
   primary_gid=$2
   [ -n "$BASELINE_SUPPLEMENTARY_GROUPS" ] || assert_platform_group_baseline
@@ -638,6 +670,7 @@ assert_baseline_supplementary_groups() {
 }
 
 disabled_account_variant() {
+  local disabled_account user_record password_lines authentication_lines
   disabled_account=$1
   user_record=$(/usr/bin/dscl . -read "/Users/$disabled_account" 2>/dev/null) || \
     die "$disabled_account directory-service record read failed"
@@ -657,6 +690,7 @@ assert_disabled_password_account() {
 }
 
 assert_primary_group_has_no_members() {
+  local member_group group_record membership_lines member_uuid_lines nested_group_lines
   member_group=$1
   group_record=$(/usr/bin/dscl . -read "/Groups/$member_group" 2>/dev/null) || \
     die "$member_group group record read failed"
@@ -672,6 +706,7 @@ assert_primary_group_has_no_members() {
 }
 
 directory_name_inventory() {
+  local name_node raw_names canonical_names
   name_node=$1
   raw_names=$(/usr/bin/dscl . -list "$name_node" 2>/dev/null) || \
     die "$name_node name inventory failed"
@@ -684,6 +719,7 @@ END { if (failed || NR < 1) exit 1 }
 }
 
 assert_directory_name_absent() {
+  local name_node expected_absent_name name_inventory
   name_node=$1
   expected_absent_name=$2
   name_inventory=$(directory_name_inventory "$name_node") || \
@@ -695,6 +731,7 @@ assert_directory_name_absent() {
 }
 
 assert_resumable_identity_prefix() {
+  local prefix_account prefix_uid prefix_gid prefix_home group_names group_name_count group_record group_id_lines user_names user_name_count user_record shell_lines password_lines home_lines primary_lines hidden_lines unique_lines authentication_lines unexpected_security missing_prefix prefix_value
   prefix_account=$1
   prefix_uid=$2
   prefix_gid=$3
@@ -758,6 +795,7 @@ assert_resumable_identity_prefix() {
 }
 
 directory_id_inventory() {
+  local inventory_node inventory_attribute raw_inventory canonical_inventory
   inventory_node=$1
   inventory_attribute=$2
   raw_inventory=$(/usr/bin/dscl . -list "$inventory_node" "$inventory_attribute" 2>/dev/null) || \
@@ -777,6 +815,7 @@ END { if (failed || NR < 1) exit 1 }
 }
 
 assert_directory_id_singleton() {
+  local node attribute numeric_id expected_name results matches count
   node=$1
   attribute=$2
   numeric_id=$3
@@ -790,6 +829,7 @@ assert_directory_id_singleton() {
 }
 
 assert_directory_id_unused() {
+  local node attribute numeric_id results matches count
   node=$1
   attribute=$2
   numeric_id=$3
@@ -800,6 +840,7 @@ assert_directory_id_unused() {
 }
 
 assert_directory_id_available_to_name() {
+  local node attribute numeric_id expected_name results matches count
   node=$1
   attribute=$2
   numeric_id=$3
@@ -858,6 +899,7 @@ assert_router_home_exact() {
 }
 
 assert_unresolved_user_prefix() {
+  local prefix_account prefix_uid prefix_gid prefix_home
   prefix_account=$1
   prefix_uid=$2
   prefix_gid=$3
@@ -876,6 +918,7 @@ assert_unresolved_user_prefix() {
 }
 
 assert_root_apply() {
+  local script_path script_dir cursor
   [ "$(/usr/bin/uname -s)" = Darwin ] || die 'apply phases are macOS-only'
   [ "$(/usr/bin/id -u)" = 0 ] || die 'apply phases require root'
   script_path=$(/bin/realpath "$0")
@@ -965,6 +1008,44 @@ apply_identity() {
   assert_collector_identity_exact
   write_identity_receipt "$COLLECTOR_IDENTITY_RECEIPT" collector trading-public-collector 453 453 /var/empty
   /bin/echo 'IDENTITY_COMPLETE exact disabled, hidden, no-home UID/GID 453'
+}
+
+repair_collector_receipt_v3() {
+  local actual_receipt correct_receipt buggy_receipt quarantined_receipt
+  assert_root_apply
+  assert_platform_group_baseline
+  assert_system_db_ancestors
+  acquire_lock
+  assert_collector_identity_exact
+  assert_directory /etc/trading-desk 0 0 700
+  correct_receipt=$(identity_receipt_payload collector trading-public-collector 453 453 /var/empty)
+  buggy_receipt=$(identity_receipt_payload collector trading-public-collector 0 0 /var/empty)
+
+  if [ -e "$COLLECTOR_IDENTITY_RECEIPT" ] || [ -L "$COLLECTOR_IDENTITY_RECEIPT" ]; then
+    assert_regular "$COLLECTOR_IDENTITY_RECEIPT" 0 0 400
+    assert_no_acl "$COLLECTOR_IDENTITY_RECEIPT"
+    actual_receipt=$(/bin/cat "$COLLECTOR_IDENTITY_RECEIPT") || die 'collector identity receipt cannot be read'
+    if [ "$actual_receipt" = "$correct_receipt" ]; then
+      /bin/echo 'COLLECTOR_RECEIPT_REPAIR_COMPLETE receipt already exact'
+      return 0
+    fi
+    [ "$actual_receipt" = "$buggy_receipt" ] || die 'collector identity receipt is not the exact retained uid0/gid0 bug'
+    [ ! -e "$COLLECTOR_RECEIPT_BUG_QUARANTINE" ] && [ ! -L "$COLLECTOR_RECEIPT_BUG_QUARANTINE" ] || \
+      die 'collector receipt bug quarantine already exists while source receipt remains'
+    /bin/mv "$COLLECTOR_IDENTITY_RECEIPT" "$COLLECTOR_RECEIPT_BUG_QUARANTINE"
+    fullsync_paths "$COLLECTOR_RECEIPT_BUG_QUARANTINE" /etc/trading-desk
+  else
+    [ -e "$COLLECTOR_RECEIPT_BUG_QUARANTINE" ] && [ ! -L "$COLLECTOR_RECEIPT_BUG_QUARANTINE" ] || \
+      die 'collector identity receipt and exact bug quarantine are both absent'
+  fi
+
+  assert_regular "$COLLECTOR_RECEIPT_BUG_QUARANTINE" 0 0 400
+  assert_no_acl "$COLLECTOR_RECEIPT_BUG_QUARANTINE"
+  quarantined_receipt=$(/bin/cat "$COLLECTOR_RECEIPT_BUG_QUARANTINE") || die 'collector receipt bug quarantine cannot be read'
+  [ "$quarantined_receipt" = "$buggy_receipt" ] || die 'collector receipt bug quarantine differs'
+  write_identity_receipt "$COLLECTOR_IDENTITY_RECEIPT" collector trading-public-collector 453 453 /var/empty
+  assert_identity_receipt_exact "$COLLECTOR_IDENTITY_RECEIPT" collector trading-public-collector 453 453 /var/empty
+  /bin/echo "COLLECTOR_RECEIPT_REPAIR_COMPLETE repaired=$COLLECTOR_IDENTITY_RECEIPT retained=$COLLECTOR_RECEIPT_BUG_QUARANTINE"
 }
 
 apply_router_identity() {
@@ -1105,6 +1186,7 @@ write_acl_templates() {
 }
 
 render_config() {
+  local rendered
   assert_regular "$PROFILE" 0 0 400
   assert_no_acl "$PROFILE"
   rendered=$TEMP_ROOT/testnet-executor.toml
@@ -1132,6 +1214,7 @@ render_config() {
 }
 
 write_receipt() {
+  local target phase mode pending
   target=$1
   phase=$2
   mode=${3-publish}
@@ -1166,7 +1249,7 @@ write_receipt() {
     assert_regular "$target" 0 0 400
     assert_no_acl "$target"
     /usr/bin/cmp -s "$target" "$pending" || die "existing receipt differs: $target"
-    return
+    return 0
   fi
   if [ -e "$target" ] || [ -L "$target" ]; then
     assert_regular "$target" 0 0 400
@@ -1181,6 +1264,7 @@ write_receipt() {
 }
 
 assert_system_db_ancestors() {
+  local path
   for path in /private /private/var /private/var/db; do
     assert_directory "$path" 0 0 755
     assert_no_acl "$path"
@@ -1188,6 +1272,7 @@ assert_system_db_ancestors() {
 }
 
 apply_preinit() {
+  local path HANDOFF_CONFIG READY_CONFIG PRESENTATION_CONFIG EVIDENCE_CONFIG QUOTE_CONFIG REGISTRATION_CONFIG ROUTE_CONFIG REMOTE_ROUTE_CONFIG
   assert_root_apply
   assert_fixed_identities
   acquire_lock
@@ -1267,6 +1352,7 @@ apply_preinit() {
 }
 
 assert_initialized_main_acl() {
+  local path role entries
   path=$1
   role=$2
   entries=$(acl_export "$path")
@@ -1285,6 +1371,7 @@ assert_initialized_main_acl() {
 }
 
 snapshot_mains() {
+  local output path
   output=$1
   : > "$output"
   for path in "$EXECUTION/execution.sqlite3" "$NONCE/nonce.sqlite3" \
@@ -1297,12 +1384,14 @@ snapshot_mains() {
 }
 
 run_as() {
+  local identity
   identity=$1
   shift
   /usr/bin/sudo -n -u "$identity" -- "$@"
 }
 
 verify_initialized_layout() {
+  local path suffix
   for path in "$EXECUTION/execution.sqlite3" "$NONCE/nonce.sqlite3" \
     "$DAILY_LOSS/daily-loss.sqlite3" "$LEARNING/learning.sqlite3" \
     "$LEARNING/staging.sqlite3"; do
@@ -1339,6 +1428,7 @@ verify_initialized_layout() {
 }
 
 apply_postinit() {
+  local before after exec_probe learn_control_probe learn_research_probe
   assert_root_apply
   assert_fixed_identities
   acquire_lock
@@ -1419,6 +1509,10 @@ case "${1-plan}" in
   --apply-router-identity)
     [ "$#" -eq 1 ] || die '--apply-router-identity takes no additional arguments'
     apply_router_identity
+    ;;
+  --repair-collector-receipt-v3)
+    [ "$#" -eq 1 ] || die '--repair-collector-receipt-v3 takes no additional arguments'
+    repair_collector_receipt_v3
     ;;
   --apply-preinit)
     [ "$#" -eq 1 ] || die '--apply-preinit takes no additional arguments'

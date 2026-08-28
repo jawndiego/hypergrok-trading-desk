@@ -217,6 +217,7 @@ class ForegroundCommissionerTests(unittest.TestCase):
         self.assertIn("PLAN_ONLY", plan.stdout)
         self.assertIn("no identity", plan.stdout)
         self.assertIn("--apply-router-identity", plan.stdout)
+        self.assertIn("--repair-collector-receipt-v3", plan.stdout)
         self.assertIn("No phase runs executor init", plan.stdout)
 
     def test_fixed_layout_matches_runtime_validators(self) -> None:
@@ -457,6 +458,42 @@ class ForegroundCommissionerTests(unittest.TestCase):
             router.index("$ROUTER_IDENTITY_RECEIPT"),
             router.index("prepare_new_identity_birth"),
         )
+
+    def test_shell_function_parameters_are_local_and_uid0_receipt_is_recoverable(self) -> None:
+        source = COMMISSIONER.read_text(encoding="utf-8")
+        for function_name in (
+            "assert_directory",
+            "assert_regular",
+            "identity_receipt_payload",
+            "assert_identity_receipt_exact",
+            "write_identity_receipt",
+            "write_or_verify_birth_marker",
+            "prepare_new_identity_birth",
+            "assert_identity",
+            "dscl_value",
+            "assert_directory_id_singleton",
+            "assert_directory_id_unused",
+            "assert_directory_id_available_to_name",
+        ):
+            start = source.index(f"{function_name}() {{")
+            end = source.index("\n}", start)
+            self.assertIn("local ", source[start:end], function_name)
+
+        repair = source[
+            source.index("repair_collector_receipt_v3()") : source.index(
+                "apply_router_identity()"
+            )
+        ]
+        for required in (
+            "COLLECTOR_RECEIPT_BUG_QUARANTINE",
+            "identity_receipt_payload collector trading-public-collector 0 0 /var/empty",
+            "exact retained uid0/gid0 bug",
+            'write_identity_receipt "$COLLECTOR_IDENTITY_RECEIPT" collector trading-public-collector 453 453 /var/empty',
+            "COLLECTOR_RECEIPT_REPAIR_COMPLETE",
+        ):
+            self.assertIn(required, repair)
+        self.assertLess(repair.index("buggy_receipt"), repair.index('/bin/mv "$COLLECTOR_IDENTITY_RECEIPT"'))
+        self.assertNotIn("/bin/rm", repair)
 
     def test_no_apfs_launchd_secret_network_init_or_venue_apply_surface(self) -> None:
         source = COMMISSIONER.read_text(encoding="utf-8")

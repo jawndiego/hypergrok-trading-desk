@@ -74,6 +74,16 @@ key, HMAC, endpoint, or free filesystem path.
    sudo /absolute/sealed/path/06-commission-foreground-testnet.sh --apply-identity
    ```
 
+   One pre-fix attended run could create the exact collector correctly while
+   writing its v3 receipt with `uid=0`/`gid=0` because nested shell functions
+   shared variables. Only that byte-exact retained receipt is eligible for the
+   no-delete recovery phase below; it is moved to a fixed quarantine name
+   before the correct UUID-bound receipt is written:
+
+   ```sh
+   sudo /absolute/sealed/path/06-commission-foreground-testnet.sh --repair-collector-receipt-v3
+   ```
+
 3. Run the separate router-operator identity phase. It creates or exactly
    adopts only disabled UID/GID 454 and its private Lima home; it does not
    create a VM or change networking:
