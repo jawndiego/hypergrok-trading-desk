@@ -80,7 +80,12 @@ def profile() -> dict[str, object]:
 class ForegroundConfigRendererTests(unittest.TestCase):
     def test_rendered_config_round_trips_through_the_authoritative_parser(self) -> None:
         rendered = renderer.render_executor_toml(profile())
-        config = parse_executor_config(rendered, environ={})
+        # The fixed production paths may already exist but be intentionally
+        # unsearchable to the desktop test UID after commissioning. This
+        # renderer test models the documented fresh-machine parse; dedicated
+        # executor-config tests cover existing-path alias detection.
+        with mock.patch.object(Path, "exists", return_value=False):
+            config = parse_executor_config(rendered, environ={})
 
         self.assertEqual(config.config_hash, renderer.executor_config_hash(profile()))
         self.assertEqual(config.risk_policy_hash, RiskSizingPolicy().policy_hash)

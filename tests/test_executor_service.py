@@ -6,8 +6,11 @@ from datetime import timedelta
 from decimal import Decimal
 import os
 from pathlib import Path
+import pwd
 import shutil
 import sqlite3
+import subprocess
+import sys
 from types import SimpleNamespace
 import tempfile
 import unittest
@@ -20,6 +23,10 @@ from trading_harness.errors import (
     ValidationError,
 )
 from trading_harness.daily_loss import DailyLossLedger
+from trading_harness.darwin_acl import (
+    darwin_named_acl_lines,
+    expected_darwin_user_acl,
+)
 from trading_harness.execution_store import ExecutionStore
 from trading_harness.executor_config import parse_executor_config
 from trading_harness.executor_runtime import RuntimeStep
@@ -420,6 +427,71 @@ class ExecutorServiceCompositionTests(unittest.TestCase):
         self.assertEqual(
             self.config.config_hash,
             reopened.runtime_store.read().config_hash,
+        )
+
+    def test_expected_parent_acl_uses_libsystem_directory_rendering(self) -> None:
+        def rendered_principal(uid: int, *, right: str) -> tuple[str, ...]:
+            self.assertEqual("read", right)
+            return (f"user:uuid-{uid}:role-{uid}:{uid}:allow:read",)
+
+        with patch.object(
+            state_binding_module,
+            "expected_darwin_user_acl",
+            side_effect=rendered_principal,
+        ):
+            execution_acl = state_binding_module.expected_state_parent_acl(
+                self.config,
+                self.config.paths.execution_database,
+            )
+            learning_acl = state_binding_module.expected_state_parent_acl(
+                self.config,
+                self.config.paths.learning_database,
+            )
+
+        direct_control = (
+            "user:uuid-452:role-452:452:allow:"
+            "read,write,execute,append,readattr"
+        )
+        direct_research = (
+            "user:uuid-450:role-450:450:allow:"
+            "read,write,execute,append,readattr"
+        )
+        self.assertIn(direct_control, execution_acl)
+        self.assertIn(direct_control, learning_acl)
+        self.assertIn(direct_research, learning_acl)
+        for entries in (execution_acl, learning_acl):
+            self.assertFalse(
+                any("list,search,add_file,add_subdirectory" in row for row in entries)
+            )
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin ACL integration")
+    def test_native_directory_acl_round_trip_uses_generic_right_names(self) -> None:
+        target = self.root / "native-directory-acl"
+        target.mkdir(mode=0o700)
+        uid = os.getuid()
+        account = pwd.getpwuid(uid).pw_name
+        subprocess.run(
+            [
+                "/bin/chmod",
+                "+a",
+                (
+                    f"user:{account} allow "
+                    "list,search,add_file,add_subdirectory,readattr"
+                ),
+                os.fspath(target),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        principal = expected_darwin_user_acl(uid, right="read")[0].rsplit(
+            ":allow:", 1
+        )[0]
+        self.assertEqual(
+            (
+                f"{principal}:allow:read,write,execute,append,readattr",
+            ),
+            darwin_named_acl_lines(target),
         )
 
     def test_reopen_rejects_extra_core_state_named_acls(self) -> None:

@@ -197,7 +197,9 @@ def expected_state_parent_acl(
         _user_acl_line(
             uid,
             qualifier="allow",
-            rights="list,search,add_file,add_subdirectory,readattr",
+            # acl_to_text(3) emits the generic permission names even when
+            # chmod/ls display their directory aliases.
+            rights="read,write,execute,append,readattr",
         )
         for uid in writers
     }
