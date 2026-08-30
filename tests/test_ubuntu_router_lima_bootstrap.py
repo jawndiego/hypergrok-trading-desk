@@ -9,6 +9,7 @@ import json
 import copy
 import os
 from pathlib import Path
+import platform
 import plistlib
 import re
 import stat
@@ -346,6 +347,175 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             "_run_lima_guarded",
         ):
             self.assertNotIn(forbidden, fallback)
+
+    def test_system_tool_contract_is_exact_and_rejects_every_mutation(self) -> None:
+        controller = _load_module(HOST_APPLY, "bootstrap_apply_tool_contract_test")
+        renderer = _load_module(RENDERER, "render_router_tool_contract_test")
+        lock = json.loads((BOOTSTRAP / "bootstrap-lock.json").read_text())
+        self.assertEqual(
+            "f4a543ca644b3d37db613017dd8eaa3454b81e8ca97ff7c988a652416b86eaec",
+            lock["system_tools"]["/usr/bin/sudo"]["sha256"],
+        )
+        self.assertEqual(
+            "55b45bda339e08f4b723e8387b2734df920a348d366daedf58d40a0d109d8d7d",
+            lock["system_tools"]["/usr/sbin/visudo"]["sha256"],
+        )
+        self.assertEqual(
+            "24752389e1d97c9555dd153b644902fadd460dfbe1a166251876c67bbacb0810",
+            lock["system_tools"]["/bin/ls"]["sha256"],
+        )
+        self.assertEqual(13, len(lock["system_tools"]))
+        self.assertEqual("04755", lock["system_tools"]["/bin/ps"]["mode"])
+        self.assertEqual("04511", lock["system_tools"]["/usr/bin/sudo"]["mode"])
+        self.assertEqual(2, lock["system_tools"]["/usr/bin/pkill"]["links"])
+        encoded = (json.dumps(lock, indent=2, sort_keys=True) + "\n").encode()
+        renderer._load_lock(encoded)
+        controller._validated_system_tool_contract(lock)
+
+        mutations = []
+        for path, key, value in (
+            ("/usr/bin/sudo", "sha256", "0" * 64),
+            ("/usr/sbin/visudo", "sha256", "f" * 64),
+            ("/bin/ps", "mode", "00755"),
+            ("/usr/bin/pkill", "links", 1),
+            ("/usr/bin/ssh", "size", lock["system_tools"]["/usr/bin/ssh"]["size"] + 1),
+        ):
+            changed = copy.deepcopy(lock)
+            changed["system_tools"][path][key] = value
+            mutations.append(changed)
+        for key in ("device", "flags"):
+            changed = copy.deepcopy(lock)
+            changed["system_volume"][key] += 1
+            mutations.append(changed)
+        changed = copy.deepcopy(lock)
+        del changed["system_tools"]["/usr/sbin/visudo"]
+        mutations.append(changed)
+
+        for changed in mutations:
+            encoded = (json.dumps(changed, indent=2, sort_keys=True) + "\n").encode()
+            with self.assertRaises(ValueError):
+                renderer._load_lock(encoded)
+            with self.assertRaises(controller.BootstrapError):
+                controller._validated_system_tool_contract(changed)
+
+    def test_system_tool_verifier_is_offline_and_fd_stable(self) -> None:
+        controller = _load_module(HOST_APPLY, "bootstrap_apply_tool_fd_test")
+        source = inspect.getsource(controller._verify_system_tools) + inspect.getsource(
+            controller._verify_exact_system_tool
+        )
+        for forbidden in ("codesign", "spctl", "subprocess"):
+            self.assertNotIn(forbidden, source)
+        ordering = inspect.getsource(controller._verify_system_tools)
+        first = ordering.index(
+            "_verify_exact_system_tool(acl_tool, tools[str(acl_tool)], volume, check_acl=False)"
+        )
+        acl = ordering.index("_no_named_acl(acl_tool)")
+        second = ordering.index(
+            "_verify_exact_system_tool(acl_tool, tools[str(acl_tool)], volume, check_acl=False)",
+            first + 1,
+        )
+        self.assertLess(first, acl)
+        self.assertLess(acl, second)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory).resolve() / "tool"
+            content = b"exact system tool bytes"
+            path.write_bytes(content)
+            metadata = path.stat()
+            specification = {
+                "links": metadata.st_nlink,
+                "mode": f"{stat.S_IMODE(metadata.st_mode):05o}",
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+            }
+            volume = {
+                "device": metadata.st_dev,
+                "flags": getattr(metadata, "st_flags", None),
+            }
+            assertion = mock.Mock(return_value=metadata)
+            real_open = os.open
+            with (
+                mock.patch.object(controller, "_assert_real", assertion),
+                mock.patch.object(controller.os, "open", wraps=real_open) as opened,
+            ):
+                controller._verify_exact_system_tool(path, specification, volume)
+            self.assertTrue(opened.call_args.args[1] & os.O_NOFOLLOW)
+            self.assertEqual(0, assertion.call_args.kwargs["uid"])
+            self.assertEqual(0, assertion.call_args.kwargs["gid"])
+            self.assertEqual(int(specification["mode"], 8), assertion.call_args.kwargs["mode"])
+            self.assertEqual(specification["links"], assertion.call_args.kwargs["links"])
+
+            for field, value in (
+                ("st_dev", metadata.st_dev + 1),
+                ("st_flags", (getattr(metadata, "st_flags", 0) or 0) + 1),
+                ("st_size", metadata.st_size + 1),
+            ):
+                changed = SimpleNamespace(**{
+                    name: getattr(metadata, name, None)
+                    for name in (
+                        "st_dev", "st_flags", "st_gid", "st_ino", "st_mode",
+                        "st_nlink", "st_size", "st_uid",
+                    )
+                })
+                setattr(changed, field, value)
+                with (
+                    mock.patch.object(controller, "_assert_real", return_value=changed),
+                    self.assertRaisesRegex(controller.BootstrapError, "metadata differs"),
+                ):
+                    controller._verify_exact_system_tool(path, specification, volume)
+
+            wrong_hash = {**specification, "sha256": "0" * 64}
+            with (
+                mock.patch.object(controller, "_assert_real", return_value=metadata),
+                self.assertRaisesRegex(controller.BootstrapError, "digest differs"),
+            ):
+                controller._verify_exact_system_tool(path, wrong_hash, volume)
+
+            opened_metadata = SimpleNamespace(**{
+                name: getattr(metadata, name, None)
+                for name in (
+                    "st_ctime_ns", "st_dev", "st_flags", "st_gid", "st_ino",
+                    "st_mode", "st_mtime_ns", "st_nlink", "st_size", "st_uid",
+                )
+            })
+            changed_after = copy.copy(opened_metadata)
+            changed_after.st_ctime_ns += 1
+            with (
+                mock.patch.object(controller, "_assert_real", return_value=opened_metadata),
+                mock.patch.object(controller.os, "open", return_value=99),
+                mock.patch.object(controller.os, "fstat", side_effect=[opened_metadata, changed_after]),
+                mock.patch.object(controller.os, "read", side_effect=[content, b""]),
+                mock.patch.object(controller.os, "close"),
+                self.assertRaisesRegex(controller.BootstrapError, "changed while reading"),
+            ):
+                controller._verify_exact_system_tool(path, specification, volume)
+
+    def test_current_host_system_tool_metadata_matches_the_sealed_table(self) -> None:
+        if platform.system() != "Darwin":
+            self.skipTest("Darwin-only system volume contract")
+        lock = json.loads((BOOTSTRAP / "bootstrap-lock.json").read_text())
+        if platform.mac_ver()[0] != lock["host"]["product_version"]:
+            self.skipTest("host version differs from the commissioned Mac")
+        for raw_path, specification in lock["system_tools"].items():
+            metadata = Path(raw_path).stat()
+            self.assertEqual(0, metadata.st_uid, raw_path)
+            self.assertEqual(0, metadata.st_gid, raw_path)
+            self.assertEqual(int(specification["mode"], 8), stat.S_IMODE(metadata.st_mode), raw_path)
+            self.assertEqual(specification["links"], metadata.st_nlink, raw_path)
+            self.assertEqual(specification["size"], metadata.st_size, raw_path)
+            self.assertEqual(lock["system_volume"]["device"], metadata.st_dev, raw_path)
+            self.assertEqual(lock["system_volume"]["flags"], metadata.st_flags, raw_path)
+
+    @unittest.skipUnless(
+        os.environ.get("TRADING_DESK_RUN_ROOT_SYSTEM_TOOL_TEST") == "1",
+        "opt-in attended root system-tool verification",
+    )
+    def test_attended_root_system_tool_hashes_match_the_sealed_table(self) -> None:
+        if platform.system() != "Darwin" or os.geteuid() != 0 or os.getegid() != 0:
+            self.fail("opt-in system-tool verification requires Darwin root:wheel")
+        controller = _load_module(HOST_APPLY, "bootstrap_apply_root_tool_test")
+        lock = json.loads((BOOTSTRAP / "bootstrap-lock.json").read_text())
+        controller._verify_system_tools(lock)
 
     def test_stopped_after_airgap_verifier_is_nonmutating_and_fail_closed(self) -> None:
         controller = _load_module(HOST_APPLY, "bootstrap_apply_stopped_test")

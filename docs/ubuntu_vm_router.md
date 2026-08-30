@@ -316,6 +316,13 @@ full-syncs and hashes the resulting disk, proves all UID-454/VM processes are
 gone, and quarantines the temporary sudoers/runtime paths. Any uncertainty is
 retained as `UNKNOWN` with no automatic retry.
 
+The cycle's 13-tool ACL/network/process/privilege allowlist is bound to the
+current sealed System volume and checked by exact owner, special mode bits,
+link count, size and a stable `O_NOFOLLOW` descriptor hash. `/bin/ls` is
+verified before it performs ACL checks, and the root-readable pins include
+`sudo` and `visudo`; the air-gapped check does not depend on an online
+code-signing trust lookup.
+
 Only the final literal
 `host_uplink_restore_safe_while_vm_stopped=true` permits the operator to
 reenable the Mac's network services. It does not authorize a networked guest

@@ -43,6 +43,27 @@ F_FULLFSYNC = 51
 AT_FDCWD = -2
 RENAME_EXCL = 0x00000004
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+SYSTEM_TOOL_CONTRACT_SHA256 = (
+    "f2112a4323a7f9bb85cd3e6c6833791bf18c6fa26d709387876d113cfe050610"
+)
+SYSTEM_TOOL_PATHS = frozenset(
+    {
+        "/bin/ls",
+        "/bin/ps",
+        "/sbin/ifconfig",
+        "/sbin/route",
+        "/usr/bin/caffeinate",
+        "/usr/bin/pkill",
+        "/usr/bin/ssh",
+        "/usr/bin/sudo",
+        "/usr/sbin/netstat",
+        "/usr/sbin/networksetup",
+        "/usr/sbin/scutil",
+        "/usr/sbin/sysctl",
+        "/usr/sbin/visudo",
+    }
+)
+SYSTEM_TOOL_SPEC_KEYS = frozenset({"links", "mode", "sha256", "size"})
 MAC_RE = re.compile(rb"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}")
 UUID_RE = re.compile(
     r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}"
@@ -165,6 +186,40 @@ def _canonical_json(value: object) -> bytes:
 
 def _sha256_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+def _validated_system_tool_contract(
+    lock: dict[str, Any],
+) -> tuple[dict[str, int], dict[str, dict[str, Any]]]:
+    volume = lock.get("system_volume")
+    tools = lock.get("system_tools")
+    if (
+        volume != {"device": 16777234, "flags": 524320}
+        or not isinstance(tools, dict)
+        or set(tools) != SYSTEM_TOOL_PATHS
+    ):
+        raise BootstrapError("system tool contract differs")
+    for raw_path, specification in tools.items():
+        if (
+            not isinstance(raw_path, str)
+            or not isinstance(specification, dict)
+            or set(specification) != SYSTEM_TOOL_SPEC_KEYS
+            or not isinstance(specification.get("links"), int)
+            or isinstance(specification.get("links"), bool)
+            or specification["links"] < 1
+            or not isinstance(specification.get("mode"), str)
+            or re.fullmatch(r"0[0-7]{4}", specification["mode"]) is None
+            or not isinstance(specification.get("sha256"), str)
+            or SHA256_RE.fullmatch(specification["sha256"]) is None
+            or not isinstance(specification.get("size"), int)
+            or isinstance(specification.get("size"), bool)
+            or specification["size"] < 1
+        ):
+            raise BootstrapError("system tool specification differs")
+    contract = {"system_tools": tools, "system_volume": volume}
+    if _sha256_bytes(_canonical_json(contract)) != SYSTEM_TOOL_CONTRACT_SHA256:
+        raise BootstrapError("system tool contract digest differs")
+    return volume, tools
 
 
 def _sha256_file(path: Path) -> str:
@@ -450,6 +505,7 @@ def _load_lock() -> dict[str, Any]:
                 raise BootstrapError("predecessor cloud pin differs")
         elif not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
             raise BootstrapError(f"bootstrap pin is invalid: {key}")
+    _validated_system_tool_contract(lock)
     return lock
 
 
@@ -1165,56 +1221,90 @@ def _assert_attended_root_tty() -> dict[str, Any]:
     return {"evidence": evidence, "sha256": _sha256_bytes(_canonical_json(evidence))}
 
 
+def _verify_exact_system_tool(
+    path: Path,
+    specification: dict[str, Any],
+    volume: dict[str, int],
+    *,
+    check_acl: bool = True,
+) -> None:
+    mode = int(specification["mode"], 8)
+    if check_acl:
+        before = _assert_real(
+            path,
+            kind="file",
+            uid=0,
+            gid=0,
+            mode=mode,
+            links=specification["links"],
+        )
+    else:
+        if not path.is_absolute() or path.is_symlink() or path.resolve(strict=True) != path:
+            raise BootstrapError(f"unsafe bootstrap system tool: {path}")
+        before = path.stat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != 0
+            or before.st_gid != 0
+            or stat.S_IMODE(before.st_mode) != mode
+            or before.st_nlink != specification["links"]
+        ):
+            raise BootstrapError(f"bootstrap system tool metadata differs: {path}")
+    if (
+        before.st_dev != volume["device"]
+        or getattr(before, "st_flags", None) != volume["flags"]
+        or before.st_size != specification["size"]
+    ):
+        raise BootstrapError(f"system tool metadata differs: {path}")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(descriptor)
+        identity_fields = (
+            "st_dev",
+            "st_ino",
+            "st_uid",
+            "st_gid",
+            "st_mode",
+            "st_nlink",
+            "st_size",
+            "st_flags",
+        )
+        if any(
+            getattr(opened, field, None) != getattr(before, field, None)
+            for field in identity_fields
+        ):
+            raise BootstrapError(f"system tool changed during open: {path}")
+        digest = hashlib.sha256()
+        remaining = specification["size"]
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise BootstrapError(f"system tool ended early: {path}")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise BootstrapError(f"system tool grew while reading: {path}")
+        after = os.fstat(descriptor)
+        stability_fields = identity_fields + ("st_mtime_ns", "st_ctime_ns")
+        if any(
+            getattr(after, field, None) != getattr(opened, field, None)
+            for field in stability_fields
+        ):
+            raise BootstrapError(f"system tool changed while reading: {path}")
+    finally:
+        os.close(descriptor)
+    if digest.hexdigest() != specification["sha256"]:
+        raise BootstrapError(f"system tool digest differs: {path}")
+
+
 def _verify_system_tools(lock: dict[str, Any]) -> None:
-    expected_modes = {
-        "/bin/ps": 0o755,
-        "/sbin/ifconfig": 0o555,
-        "/sbin/route": 0o555,
-        "/usr/bin/caffeinate": 0o755,
-        "/usr/bin/pkill": 0o755,
-        "/usr/bin/ssh": 0o755,
-        "/usr/sbin/netstat": 0o555,
-        "/usr/sbin/networksetup": 0o755,
-        "/usr/sbin/scutil": 0o755,
-        "/usr/sbin/sysctl": 0o755,
-    }
-    if set(lock.get("system_tools", {})) != set(expected_modes):
-        raise BootstrapError("system tool allowlist differs")
-    for raw_path, mode in expected_modes.items():
-        path = Path(raw_path)
-        _assert_real(path, kind="file", uid=0, gid=0, mode=mode)
-        if _sha256_file(path) != lock["system_tools"][raw_path]:
-            raise BootstrapError(f"system tool digest differs: {path}")
-        result = subprocess.run(
-            ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", "=anchor apple", str(path)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
-            timeout=10,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise BootstrapError(f"system tool signature differs: {path}")
-    privileged = {
-        Path("/usr/bin/sudo"): (0o511, 1575952),
-        Path("/usr/sbin/visudo"): (0o111, 672464),
-    }
-    for path, (mode, size) in privileged.items():
-        metadata = _assert_real(path, kind="file", uid=0, gid=0, mode=mode)
-        if metadata.st_size != size:
-            raise BootstrapError(f"privileged system tool size differs: {path}")
-        result = subprocess.run(
-            ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", "=anchor apple", str(path)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
-            timeout=10,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise BootstrapError(f"privileged system tool signature differs: {path}")
+    volume, tools = _validated_system_tool_contract(lock)
+    acl_tool = Path("/bin/ls")
+    _verify_exact_system_tool(acl_tool, tools[str(acl_tool)], volume, check_acl=False)
+    _no_named_acl(acl_tool)
+    _verify_exact_system_tool(acl_tool, tools[str(acl_tool)], volume, check_acl=False)
+    for raw_path in sorted(set(tools) - {str(acl_tool)}):
+        _verify_exact_system_tool(Path(raw_path), tools[raw_path], volume)
 
 
 def _prepare_vmnet(

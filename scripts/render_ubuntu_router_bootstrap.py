@@ -24,6 +24,27 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "deploy" / "ubuntu-router" / "lima-bootstrap"
 LOCK_PATH = SOURCE / "bootstrap-lock.json"
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+SYSTEM_TOOL_CONTRACT_SHA256 = (
+    "f2112a4323a7f9bb85cd3e6c6833791bf18c6fa26d709387876d113cfe050610"
+)
+SYSTEM_TOOL_PATHS = frozenset(
+    {
+        "/bin/ls",
+        "/bin/ps",
+        "/sbin/ifconfig",
+        "/sbin/route",
+        "/usr/bin/caffeinate",
+        "/usr/bin/pkill",
+        "/usr/bin/ssh",
+        "/usr/bin/sudo",
+        "/usr/sbin/netstat",
+        "/usr/sbin/networksetup",
+        "/usr/sbin/scutil",
+        "/usr/sbin/sysctl",
+        "/usr/sbin/visudo",
+    }
+)
+SYSTEM_TOOL_SPEC_KEYS = frozenset({"links", "mode", "sha256", "size"})
 PLACEHOLDER_RE = re.compile(r"__[A-Z0-9_]+__")
 
 SOURCE_FILES: dict[str, int] = {
@@ -51,6 +72,37 @@ def _sha256(content: bytes) -> str:
 
 def _canonical_json(value: object) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _validate_system_tool_contract(value: dict[str, Any]) -> None:
+    volume = value.get("system_volume")
+    tools = value.get("system_tools")
+    if (
+        volume != {"device": 16777234, "flags": 524320}
+        or not isinstance(tools, dict)
+        or set(tools) != SYSTEM_TOOL_PATHS
+    ):
+        raise ValueError("bootstrap system tool contract differs")
+    for raw_path, specification in tools.items():
+        if (
+            not isinstance(raw_path, str)
+            or not isinstance(specification, dict)
+            or set(specification) != SYSTEM_TOOL_SPEC_KEYS
+            or not isinstance(specification.get("links"), int)
+            or isinstance(specification.get("links"), bool)
+            or specification["links"] < 1
+            or not isinstance(specification.get("mode"), str)
+            or re.fullmatch(r"0[0-7]{4}", specification["mode"]) is None
+            or not isinstance(specification.get("sha256"), str)
+            or SHA256_RE.fullmatch(specification["sha256"]) is None
+            or not isinstance(specification.get("size"), int)
+            or isinstance(specification.get("size"), bool)
+            or specification["size"] < 1
+        ):
+            raise ValueError("bootstrap system tool specification differs")
+    contract = {"system_tools": tools, "system_volume": volume}
+    if _sha256(_canonical_json(contract)) != SYSTEM_TOOL_CONTRACT_SHA256:
+        raise ValueError("bootstrap system tool contract digest differs")
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -111,6 +163,7 @@ def _load_lock(content: bytes) -> dict[str, Any]:
         }
     ):
         raise ValueError("bootstrap lock authorization boundary differs")
+    _validate_system_tool_contract(value)
     return value
 
 

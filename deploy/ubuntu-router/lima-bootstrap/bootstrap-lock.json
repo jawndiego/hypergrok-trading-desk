@@ -76,16 +76,88 @@
     "venue_writes_authorized": false,
     "unconstrained_vm_start_authorized": false
   },
+  "system_volume": {
+    "device": 16777234,
+    "flags": 524320
+  },
   "system_tools": {
-    "/bin/ps": "3bbba882e30d91fc4ff6e6844ca7c59fef4351b9a3fea35dca55708d6d487d1c",
-    "/sbin/ifconfig": "187af535a8300e69bf6eafda83bdd053243110f6dbe28a56c7769f83e53aa95b",
-    "/sbin/route": "54488f1a4de4285d73393a6bdad57e3563c8ddd2f026cd56040f5efd1299fb7b",
-    "/usr/bin/caffeinate": "fdd1c163779f87d667b6a4049293e165f2d30b716ca8bff9bed3fe54bc6d1d07",
-    "/usr/bin/pkill": "0d1ffd0bb78cb9e9cba51bb013d67ec48f75bb21eefeec99c7321053fe23fd19",
-    "/usr/bin/ssh": "17542914a3fb55e7efeb35a90d594a21c84bf6a4cfe1fc8ddff5606dc2658fc3",
-    "/usr/sbin/netstat": "86b32ffdf451da6357e4e4325629b5e28a8d4b46c5b4268efc85eeff6973182a",
-    "/usr/sbin/networksetup": "6dc57b30c5c8a1df191015a73b5d236b2499a339933bb47f3b23c9ba124e1edb",
-    "/usr/sbin/scutil": "91e5606342f18f31132dfcba418a2cc73f3ccb5bc60e5431302d709e0ecc3546",
-    "/usr/sbin/sysctl": "0fb3ea0ef2b943cf56f290628bb26531c36f190094b28e22609d59839f146689"
+    "/bin/ls": {
+      "links": 1,
+      "mode": "00755",
+      "sha256": "24752389e1d97c9555dd153b644902fadd460dfbe1a166251876c67bbacb0810",
+      "size": 154208
+    },
+    "/bin/ps": {
+      "links": 1,
+      "mode": "04755",
+      "sha256": "3bbba882e30d91fc4ff6e6844ca7c59fef4351b9a3fea35dca55708d6d487d1c",
+      "size": 170432
+    },
+    "/sbin/ifconfig": {
+      "links": 1,
+      "mode": "00555",
+      "sha256": "187af535a8300e69bf6eafda83bdd053243110f6dbe28a56c7769f83e53aa95b",
+      "size": 268864
+    },
+    "/sbin/route": {
+      "links": 1,
+      "mode": "00555",
+      "sha256": "54488f1a4de4285d73393a6bdad57e3563c8ddd2f026cd56040f5efd1299fb7b",
+      "size": 169536
+    },
+    "/usr/bin/caffeinate": {
+      "links": 1,
+      "mode": "00755",
+      "sha256": "fdd1c163779f87d667b6a4049293e165f2d30b716ca8bff9bed3fe54bc6d1d07",
+      "size": 135712
+    },
+    "/usr/bin/pkill": {
+      "links": 2,
+      "mode": "00755",
+      "sha256": "0d1ffd0bb78cb9e9cba51bb013d67ec48f75bb21eefeec99c7321053fe23fd19",
+      "size": 137904
+    },
+    "/usr/bin/ssh": {
+      "links": 1,
+      "mode": "00755",
+      "sha256": "17542914a3fb55e7efeb35a90d594a21c84bf6a4cfe1fc8ddff5606dc2658fc3",
+      "size": 1584576
+    },
+    "/usr/bin/sudo": {
+      "links": 1,
+      "mode": "04511",
+      "sha256": "f4a543ca644b3d37db613017dd8eaa3454b81e8ca97ff7c988a652416b86eaec",
+      "size": 1575952
+    },
+    "/usr/sbin/netstat": {
+      "links": 1,
+      "mode": "00555",
+      "sha256": "86b32ffdf451da6357e4e4325629b5e28a8d4b46c5b4268efc85eeff6973182a",
+      "size": 400016
+    },
+    "/usr/sbin/networksetup": {
+      "links": 1,
+      "mode": "00755",
+      "sha256": "6dc57b30c5c8a1df191015a73b5d236b2499a339933bb47f3b23c9ba124e1edb",
+      "size": 453632
+    },
+    "/usr/sbin/scutil": {
+      "links": 1,
+      "mode": "00755",
+      "sha256": "91e5606342f18f31132dfcba418a2cc73f3ccb5bc60e5431302d709e0ecc3546",
+      "size": 578064
+    },
+    "/usr/sbin/sysctl": {
+      "links": 1,
+      "mode": "00755",
+      "sha256": "0fb3ea0ef2b943cf56f290628bb26531c36f190094b28e22609d59839f146689",
+      "size": 119088
+    },
+    "/usr/sbin/visudo": {
+      "links": 1,
+      "mode": "00111",
+      "sha256": "55b45bda339e08f4b723e8387b2734df920a348d366daedf58d40a0d109d8d7d",
+      "size": 672464
+    }
   }
 }
