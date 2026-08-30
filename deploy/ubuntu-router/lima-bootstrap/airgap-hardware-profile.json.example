@@ -16,6 +16,11 @@
     "interface": "bridge100",
     "ipv4_cidr": "192.168.106.1/24"
   },
+  "dormant_apple_interfaces": [
+    {"flags": ["BROADCAST", "MULTICAST", "SIMPLEX", "SMART"], "interface": "awdl0", "mtu": 1500, "route_class": "multicast_link", "status": "inactive"},
+    {"flags": ["MULTICAST", "POINTOPOINT", "RUNNING"], "interface": "ipsec0", "mtu": 1500, "route_class": "scoped_linklocal_multicast", "status": null},
+    {"flags": ["BROADCAST", "MULTICAST", "SIMPLEX", "SMART"], "interface": "llw0", "mtu": 1500, "route_class": "multicast_link", "status": null}
+  ],
   "inert_utun_interfaces": [
     {
       "flags": [

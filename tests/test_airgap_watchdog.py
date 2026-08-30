@@ -33,6 +33,15 @@ def _load():
 
 
 def _fixtures(module):
+    dormant_profile = [dict(item) for item in module.DORMANT_APPLE_PROFILES]
+    dormant_locked = [
+        {**item, "ipv6_link_local_address": address, "prefixlen": 64}
+        for item, address in zip(
+            dormant_profile,
+            ("fe80::a", "fe80::b", "fe80::a"),
+            strict=True,
+        )
+    ]
     inert_utuns = [
         {
             "flags": ["MULTICAST", "POINTOPOINT", "RUNNING", "UP"],
@@ -71,6 +80,12 @@ Internet6:
 Destination                             Gateway                         Flags         Netif Expire
 ::1                                     ::1                             UHL             lo0
 fe80::%lo0/64                           fe80::1%lo0                     UcI             lo0
+ff00::/8                                link#17                         UmCI            awdl0
+ff00::/8                                link#18                         UmCI            llw0
+fe80::%ipsec0/64                        fe80::b%ipsec0                   UcI             ipsec0
+ff00::/8                                fe80::b%ipsec0                   UmCI            ipsec0
+ff01::%ipsec0/32                        fe80::b%ipsec0                   UmCI            ipsec0
+ff02::%ipsec0/32                        fe80::b%ipsec0                   UmCI            ipsec0
 default                                 fe80::%utun0                    UGcIg           utun0
 fe80::%utun0/64                         fe80::1234%utun0                UcI             utun0
 ff00::/8                                fe80::1234%utun0                UmCI            utun0
@@ -80,7 +95,9 @@ ff02::%utun0/32                         fe80::1234%utun0                UmCI    
     nwi = "Network information\nNo network information\n"
     route4_hash, _ = module._canonical_routes(routes4)
     route6_hash, _ = module._canonical_routes(
-        routes6, inert_utun_interfaces=inert_utuns
+        routes6,
+        inert_utun_interfaces=inert_utuns,
+        dormant_apple_interfaces=dormant_locked,
     )
     lock = {
         "schema_version": 1,
@@ -106,6 +123,7 @@ ff02::%utun0/32                         fe80::1234%utun0                UmCI    
                 "kind": "ethernet",
             },
         ],
+        "dormant_apple_interfaces": dormant_locked,
         "inert_utun_interfaces": inert_utuns,
         "network_services": [
             {"name": "Ethernet", "enabled": False},
@@ -137,6 +155,13 @@ en1: flags=8863<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST>
 \tstatus: inactive
 anpi0: flags=8863<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST>
 \tstatus: inactive
+awdl0: flags=8862<BROADCAST,SMART,SIMPLEX,MULTICAST> mtu 1500
+\tinet6 fe80::a%awdl0 prefixlen 64 scopeid 0x11
+\tstatus: inactive
+llw0: flags=8862<BROADCAST,SMART,SIMPLEX,MULTICAST> mtu 1500
+\tinet6 fe80::a%llw0 prefixlen 64 scopeid 0x12
+ipsec0: flags=8050<POINTOPOINT,RUNNING,MULTICAST> mtu 1500
+\tinet6 fe80::b%ipsec0 prefixlen 64 scopeid 0x17
 utun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380
 \tinet6 fe80::1234%utun0 prefixlen 64 scopeid 0x14
 """,
@@ -174,6 +199,10 @@ class AirgapWatchdogTests(unittest.TestCase):
         valid = {
             "schema_version": 1,
             "kind": "trading-desk.router-bootstrap.airgap-hardware-profile",
+            "dormant_apple_interfaces": [
+                {key: item[key] for key in module.DORMANT_APPLE_PROFILES[0]}
+                for item in lock["dormant_apple_interfaces"]
+            ],
             "host": lock["host"],
             "hardware_ports": lock["hardware_ports"],
             "inert_utun_interfaces": lock["inert_utun_interfaces"],
@@ -360,6 +389,56 @@ Network interfaces: bridge100
             with self.assertRaises(module.WatchdogError):
                 module._nwi_unreachable(reachable_nwi)
 
+    def test_dormant_apple_interfaces_bind_down_state_address_and_routes(self) -> None:
+        module = _load()
+        lock, outputs = _fixtures(module)
+        with (
+            mock.patch.object(
+                module, "_run_snapshot_commands", return_value=outputs
+            ),
+            mock.patch.object(
+                module, "NAT_PLIST", Path("/nonexistent/nat.plist")
+            ),
+        ):
+            module._sample(lock, allow_host_only=False)
+        for old, new in (
+            ("flags=8862<BROADCAST", "flags=8863<UP,BROADCAST"),
+            ("fe80::a%awdl0 prefixlen 64", "fd00::1%awdl0 prefixlen 64"),
+            ("fe80::b%ipsec0 prefixlen 64", "fe80::b%ipsec0 prefixlen 48"),
+            ("POINTOPOINT,RUNNING,MULTICAST", "POINTOPOINT,MULTICAST"),
+        ):
+            changed = dict(outputs)
+            changed["ifconfig"] = outputs["ifconfig"].replace(old, new, 1)
+            with (
+                mock.patch.object(
+                    module, "_run_snapshot_commands", return_value=changed
+                ),
+                mock.patch.object(
+                    module, "NAT_PLIST", Path("/nonexistent/nat.plist")
+                ),
+                self.assertRaises(module.WatchdogError),
+            ):
+                module._sample(lock, allow_host_only=False)
+
+        for routes in (
+            outputs["routes6"].replace(
+                "ff00::/8                                link#17                         UmCI            awdl0\n",
+                "",
+            ),
+            outputs["routes6"]
+            + "default fe80::a%awdl0 UGcIg awdl0\n",
+            outputs["routes6"]
+            + "2001:db8::/32 fe80::a%awdl0 UcI awdl0\n",
+        ):
+            with self.assertRaises(module.WatchdogError):
+                module._canonical_routes(
+                    routes,
+                    inert_utun_interfaces=lock["inert_utun_interfaces"],
+                    dormant_apple_interfaces=lock[
+                        "dormant_apple_interfaces"
+                    ],
+                )
+
         link_local_peer = dict(outputs)
         link_local_peer["ifconfig"] += (
             "utun9: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST>\n"
@@ -509,6 +588,10 @@ Network interfaces: bridge100
             "schema_version": 1,
             "kind": "trading-desk.router-bootstrap.airgap-hardware-profile",
             "host": lock["host"],
+            "dormant_apple_interfaces": [
+                {key: item[key] for key in module.DORMANT_APPLE_PROFILES[0]}
+                for item in lock["dormant_apple_interfaces"]
+            ],
             "hardware_ports": lock["hardware_ports"],
             "inert_utun_interfaces": lock["inert_utun_interfaces"],
             "network_services": ["Ethernet", "Wi-Fi"],

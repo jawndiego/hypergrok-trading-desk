@@ -46,6 +46,11 @@ SYSTEM_TOOL_PATHS = frozenset(
     }
 )
 SYSTEM_TOOL_SPEC_KEYS = frozenset({"links", "mode", "sha256", "size"})
+DORMANT_APPLE_PROFILES = [
+    {"flags": ["BROADCAST", "MULTICAST", "SIMPLEX", "SMART"], "interface": "awdl0", "mtu": 1500, "route_class": "multicast_link", "status": "inactive"},
+    {"flags": ["MULTICAST", "POINTOPOINT", "RUNNING"], "interface": "ipsec0", "mtu": 1500, "route_class": "scoped_linklocal_multicast", "status": None},
+    {"flags": ["BROADCAST", "MULTICAST", "SIMPLEX", "SMART"], "interface": "llw0", "mtu": 1500, "route_class": "multicast_link", "status": None},
+]
 PLACEHOLDER_RE = re.compile(r"__[A-Z0-9_]+__")
 
 SOURCE_FILES: dict[str, int] = {
@@ -203,6 +208,7 @@ def _validate_hardware_profile(content: bytes) -> dict[str, Any]:
         not isinstance(profile, dict)
         or set(profile)
         != {
+            "dormant_apple_interfaces",
             "hardware_ports",
             "host",
             "host_only",
@@ -271,6 +277,9 @@ def _validate_hardware_profile(content: bytes) -> dict[str, Any]:
         for item in passive
     ):
         raise ValueError("air-gap passive-interface profile differs")
+    dormant = profile.get("dormant_apple_interfaces")
+    if dormant != DORMANT_APPLE_PROFILES:
+        raise ValueError("air-gap dormant-Apple profile differs")
     inert_utuns = profile.get("inert_utun_interfaces")
     inert_flags = ["MULTICAST", "POINTOPOINT", "RUNNING", "UP"]
     if not isinstance(inert_utuns, list):
@@ -313,7 +322,11 @@ def _validate_hardware_profile(content: bytes) -> dict[str, Any]:
     if (
         len(set(inert_names)) != len(inert_names)
         or set(inert_names) & set(passive_names)
+        or set(inert_names) & {item["interface"] for item in dormant}
         or set(inert_names) & {item["device"] for item in ports}
+        or {item["interface"] for item in dormant} & set(passive_names)
+        or {item["interface"] for item in dormant}
+        & {item["device"] for item in ports}
     ):
         raise ValueError("air-gap inert-utun profile overlaps")
     host_only = profile.get("host_only")

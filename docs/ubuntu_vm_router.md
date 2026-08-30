@@ -326,6 +326,13 @@ or a global IPv6 route lookup selecting any interface still aborts the
 air-gap. Only exact local `bridge100` reachability at `192.168.106.1` is
 permitted during the host-only phase.
 
+The profile separately binds dormant `awdl0`, `llw0` and `ipsec0` classes.
+They must be down with their exact post-down flags, MTU and status, no IPv4,
+and one canonical /64 link-local IPv6 address captured into the session lock.
+Only their exact local multicast rows and IPsec's exact scoped link-local row
+are allowed and hash-bound; any default, global, ULA or other unicast route
+through those names aborts.
+
 The cycle's 13-tool ACL/network/process/privilege allowlist is bound to the
 current sealed System volume and checked by exact owner, special mode bits,
 link count, size and a stable `O_NOFOLLOW` descriptor hash. `/bin/ls` is

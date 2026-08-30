@@ -28,6 +28,7 @@ Hardware-lock schema (all keys are exact)::
        "ethernet_address": "aa:bb:cc:dd:ee:ff", "kind": "wifi"}
     ],
     "network_services": [{"name": "Wi-Fi", "enabled": false}],
+    "dormant_apple_interfaces": [{"interface": "awdl0", "route_class": "multicast_link"}],
     "passive_interfaces": [
       {"interface": "anpi0", "status": "inactive", "up": true}
     ],
@@ -113,6 +114,11 @@ SESSION_RE = re.compile(r"[0-9a-f]{64}")
 INTERFACE_RE = re.compile(r"[a-z][a-z0-9]{0,14}")
 UTUN_INTERFACE_RE = re.compile(r"utun[0-9]{1,3}")
 INERT_UTUN_FLAGS = ["MULTICAST", "POINTOPOINT", "RUNNING", "UP"]
+DORMANT_APPLE_PROFILES = [
+    {"flags": ["BROADCAST", "MULTICAST", "SIMPLEX", "SMART"], "interface": "awdl0", "mtu": 1500, "route_class": "multicast_link", "status": "inactive"},
+    {"flags": ["MULTICAST", "POINTOPOINT", "RUNNING"], "interface": "ipsec0", "mtu": 1500, "route_class": "scoped_linklocal_multicast", "status": None},
+    {"flags": ["BROADCAST", "MULTICAST", "SIMPLEX", "SMART"], "interface": "llw0", "mtu": 1500, "route_class": "multicast_link", "status": None},
+]
 MAC_RE = re.compile(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 MAX_SAMPLE_GAP_NS = 250_000_000
@@ -477,6 +483,7 @@ def _canonical_routes(
     *,
     ignore_host_only_neighbors: bool = False,
     inert_utun_interfaces: list[dict[str, Any]] | None = None,
+    dormant_apple_interfaces: list[dict[str, Any]] | None = None,
 ) -> tuple[str, bool]:
     entries: list[str] = []
     default_present = False
@@ -488,6 +495,12 @@ def _canonical_routes(
         for item in (inert_utun_interfaces or [])
     }
     observed_utun_defaults: list[tuple[str, str, str, str]] = []
+    dormant = {
+        item["interface"]: item for item in (dormant_apple_interfaces or [])
+    }
+    observed_dormant: dict[str, set[tuple[str, str, str]]] = {
+        name: set() for name in dormant
+    }
     for line in content.splitlines():
         fields = line.split()
         if not fields or fields[0] in {
@@ -502,6 +515,29 @@ def _canonical_routes(
         if ignore_host_only_neighbors and _is_host_only_neighbor_route(fields):
             continue
         destination, gateway, flags, interface = fields[:4]
+        if interface in dormant:
+            item = dormant[interface]
+            address = item["ipv6_link_local_address"]
+            route = (destination, gateway, flags)
+            if item["route_class"] == "multicast_link":
+                if (
+                    destination != "ff00::/8"
+                    or re.fullmatch(r"link#[0-9]+", gateway) is None
+                    or flags != "UmCI"
+                ):
+                    raise WatchdogError("dormant_apple_route_drift")
+            else:
+                allowed = {
+                    (f"fe80::%{interface}/64", f"{address}%{interface}", "UcI"),
+                    ("ff00::/8", f"{address}%{interface}", "UmCI"),
+                    (f"ff01::%{interface}/32", f"{address}%{interface}", "UmCI"),
+                    (f"ff02::%{interface}/32", f"{address}%{interface}", "UmCI"),
+                }
+                if route not in allowed:
+                    raise WatchdogError("dormant_apple_route_drift")
+            if route in observed_dormant[interface]:
+                raise WatchdogError("dormant_apple_route_duplicate")
+            observed_dormant[interface].add(route)
         if UTUN_INTERFACE_RE.fullmatch(interface) is not None:
             if interface not in inert_utuns:
                 raise WatchdogError("unexpected_utun_route")
@@ -530,6 +566,10 @@ def _canonical_routes(
         or len(observed_utun_defaults) != len(expected_utun_defaults)
     ):
         raise WatchdogError("inert_utun_default_routes_differ")
+    for name, item in dormant.items():
+        expected_count = 1 if item["route_class"] == "multicast_link" else 4
+        if len(observed_dormant[name]) != expected_count:
+            raise WatchdogError("dormant_apple_routes_incomplete")
     canonical = "\n".join(sorted(entries)) + ("\n" if entries else "")
     return _sha256_bytes(canonical.encode("utf-8")), default_present
 
@@ -707,6 +747,7 @@ def _parse_ifconfig(content: str) -> dict[str, dict[str, Any]]:
                 "status": None,
                 "ipv4": [],
                 "ipv6": [],
+                "ipv6_prefixlen": [],
             }
             continue
         if current is None:
@@ -718,8 +759,15 @@ def _parse_ifconfig(content: str) -> dict[str, dict[str, Any]]:
             address = stripped.split()[1]
             result[current]["ipv4"].append(address)
         elif stripped.startswith("inet6 "):
-            address = stripped.split()[1].split("%", 1)[0]
+            fields = stripped.split()
+            address = fields[1].split("%", 1)[0]
+            if "prefixlen" not in fields:
+                raise WatchdogError("interface_ipv6_prefix_absent")
+            prefix_index = fields.index("prefixlen") + 1
+            if prefix_index >= len(fields) or not fields[prefix_index].isdigit():
+                raise WatchdogError("interface_ipv6_prefix_invalid")
             result[current]["ipv6"].append(address)
+            result[current]["ipv6_prefixlen"].append(int(fields[prefix_index]))
     if "lo0" not in result:
         raise WatchdogError("loopback_absent")
     return result
@@ -771,6 +819,61 @@ def _inert_utun_contract(value: object, label: str) -> list[dict[str, Any]]:
     return sorted(result, key=lambda item: item["interface"])
 
 
+def _dormant_apple_profile(value: object) -> list[dict[str, Any]]:
+    if value != DORMANT_APPLE_PROFILES:
+        raise WatchdogError("hardware_profile_dormant_apple_interfaces")
+    return [dict(item) for item in DORMANT_APPLE_PROFILES]
+
+
+def _dormant_apple_lock(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) != 3:
+        raise WatchdogError("hardware_lock_dormant_apple_interfaces")
+    result: list[dict[str, Any]] = []
+    for profile, item in zip(DORMANT_APPLE_PROFILES, value, strict=True):
+        if (
+            not isinstance(item, dict)
+            or set(item) != set(profile) | {"ipv6_link_local_address", "prefixlen"}
+            or any(item.get(key) != expected for key, expected in profile.items())
+            or item.get("prefixlen") != 64
+            or not isinstance(item.get("ipv6_link_local_address"), str)
+        ):
+            raise WatchdogError("hardware_lock_dormant_apple_interfaces")
+        try:
+            address = ipaddress.ip_address(item["ipv6_link_local_address"])
+        except ValueError as error:
+            raise WatchdogError("hardware_lock_dormant_apple_interfaces") from error
+        if address.version != 6 or not address.is_link_local or str(address) != item["ipv6_link_local_address"]:
+            raise WatchdogError("hardware_lock_dormant_apple_interfaces")
+        result.append(dict(item))
+    return result
+
+
+def _capture_dormant_apple(
+    profile: list[dict[str, Any]], interfaces: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for expected in profile:
+        observed = interfaces.get(expected["interface"])
+        if (
+            observed is None
+            or observed["flags"] != expected["flags"]
+            or observed["mtu"] != expected["mtu"]
+            or observed["status"] != expected["status"]
+            or observed["up"]
+            or observed["ipv4"]
+            or len(observed["ipv6"]) != 1
+            or observed["ipv6_prefixlen"] != [64]
+        ):
+            raise WatchdogError("dormant_apple_interface_drift")
+        address = ipaddress.ip_address(observed["ipv6"][0])
+        if address.version != 6 or not address.is_link_local or str(address) != observed["ipv6"][0]:
+            raise WatchdogError("dormant_apple_interface_drift")
+        result.append(
+            {**expected, "ipv6_link_local_address": str(address), "prefixlen": 64}
+        )
+    return result
+
+
 def _load_hardware_profile() -> tuple[dict[str, Any], str]:
     content = _safe_root_file(HARDWARE_PROFILE, 0o400)
     try:
@@ -783,6 +886,7 @@ def _load_hardware_profile() -> tuple[dict[str, Any], str]:
         != {
             "schema_version",
             "kind",
+            "dormant_apple_interfaces",
             "host",
             "hardware_ports",
             "inert_utun_interfaces",
@@ -856,7 +960,11 @@ def _load_hardware_profile() -> tuple[dict[str, Any], str]:
         value.get("inert_utun_interfaces"), "hardware_profile"
     )
     inert_names = {item["interface"] for item in inert_utuns}
+    dormant_apple = _dormant_apple_profile(value.get("dormant_apple_interfaces"))
+    dormant_names = {item["interface"] for item in dormant_apple}
     if inert_names & (
+        set(passive_names) | dormant_names | {item["device"] for item in ports}
+    ) or dormant_names & (
         set(passive_names) | {item["device"] for item in ports}
     ):
         raise WatchdogError("hardware_profile_inert_utun_overlap")
@@ -870,6 +978,7 @@ def _load_hardware_profile() -> tuple[dict[str, Any], str]:
         or host_only["interface"] in {item["device"] for item in ports}
         or host_only["interface"] in passive_names
         or host_only["interface"] in inert_names
+        or host_only["interface"] in dormant_names
     ):
         raise WatchdogError("hardware_profile_host_only")
     value["hardware_ports"] = sorted(ports, key=lambda item: item["device"])
@@ -892,6 +1001,7 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
         "kind",
         "capture_session_id",
         "hardware_profile_sha256",
+        "dormant_apple_interfaces",
         "host",
         "hardware_ports",
         "inert_utun_interfaces",
@@ -977,7 +1087,11 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
         value.get("inert_utun_interfaces"), "hardware_lock"
     )
     inert_names = {item["interface"] for item in inert_utuns}
+    dormant_apple = _dormant_apple_lock(value.get("dormant_apple_interfaces"))
+    dormant_names = {item["interface"] for item in dormant_apple}
     if inert_names & (
+        set(passive_names) | dormant_names | {item["device"] for item in normalized_ports}
+    ) or dormant_names & (
         set(passive_names) | {item["device"] for item in normalized_ports}
     ):
         raise WatchdogError("hardware_lock_inert_utun_overlap")
@@ -1009,6 +1123,7 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
             or host_only["interface"] in {item["device"] for item in normalized_ports}
             or host_only["interface"] in passive_names
             or host_only["interface"] in inert_names
+            or host_only["interface"] in dormant_names
             or host_only["ipv4_cidr"] != "192.168.106.1/24"
             or host_only["ipv4_addresses"] != ["192.168.106.1"]
             or not isinstance(host_only["ipv6_link_local_addresses"], list)
@@ -1040,6 +1155,7 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
         passive, key=lambda item: item["interface"]
     )
     value["inert_utun_interfaces"] = inert_utuns
+    value["dormant_apple_interfaces"] = dormant_apple
     profile, profile_sha256 = _load_hardware_profile()
     if (
         value.get("hardware_profile_sha256") != profile_sha256
@@ -1056,6 +1172,11 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
         or value["passive_interfaces"] != profile["passive_interfaces"]
         or value["inert_utun_interfaces"]
         != profile["inert_utun_interfaces"]
+        or [
+            {key: item[key] for key in DORMANT_APPLE_PROFILES[0]}
+            for item in value["dormant_apple_interfaces"]
+        ]
+        != profile["dormant_apple_interfaces"]
         or value["host_only"] is None
         or value["host_only"]["interface"]
         != profile["host_only"]["interface"]
@@ -1266,6 +1387,22 @@ def _validate_addresses(
             or interfaces[name]["ipv6"]
         ):
             raise WatchdogError("passive_interface_drift")
+    dormant_apple = {
+        item["interface"]: item for item in lock["dormant_apple_interfaces"]
+    }
+    for name, expected in dormant_apple.items():
+        value = interfaces.get(name)
+        if (
+            value is None
+            or value["flags"] != expected["flags"]
+            or value["mtu"] != expected["mtu"]
+            or value["status"] != expected["status"]
+            or value["up"]
+            or value["ipv4"]
+            or value["ipv6"] != [expected["ipv6_link_local_address"]]
+            or value["ipv6_prefixlen"] != [expected["prefixlen"]]
+        ):
+            raise WatchdogError("dormant_apple_interface_drift")
     inert_utuns = {
         item["interface"]: item for item in lock["inert_utun_interfaces"]
     }
@@ -1284,7 +1421,13 @@ def _validate_addresses(
     host_only = lock["host_only"] if allow_host_only else None
     host_only_observed = False
     for name, value in interfaces.items():
-        if name == "lo0" or name in hardware or name in passive or name in inert_utuns:
+        if (
+            name == "lo0"
+            or name in hardware
+            or name in passive
+            or name in dormant_apple
+            or name in inert_utuns
+        ):
             continue
         if UTUN_INTERFACE_RE.fullmatch(name) is not None:
             raise WatchdogError("unexpected_utun_interface")
@@ -1342,14 +1485,19 @@ def _sample(lock: dict[str, Any], *, allow_host_only: bool) -> dict[str, Any]:
         outputs["routes6"],
         ignore_host_only_neighbors=allow_host_only,
         inert_utun_interfaces=lock["inert_utun_interfaces"],
+        dormant_apple_interfaces=lock["dormant_apple_interfaces"],
     )
     if default4 or default6:
         raise WatchdogError("default_route_present")
     prohibited_route_interfaces = {
         item["device"] for item in lock["hardware_ports"]
     } | {item["interface"] for item in lock["passive_interfaces"]}
+    dormant_route_interfaces = {
+        item["interface"] for item in lock["dormant_apple_interfaces"]
+    }
     if (
-        _route_interfaces(outputs["routes4"]) & prohibited_route_interfaces
+        _route_interfaces(outputs["routes4"])
+        & (prohibited_route_interfaces | dormant_route_interfaces)
         or _route_interfaces(outputs["routes6"]) & prohibited_route_interfaces
     ):
         raise WatchdogError("inactive_interface_route_present")
@@ -1430,10 +1578,15 @@ def _candidate_from_outputs(
         or any(item["enabled"] for item in services)
     ):
         raise WatchdogError("capture_network_services_not_disabled")
+    interfaces = _parse_ifconfig(outputs["ifconfig"])
+    dormant_apple = _capture_dormant_apple(
+        profile["dormant_apple_interfaces"], interfaces
+    )
     route4, default4 = _canonical_routes(outputs["routes4"])
     route6, default6 = _canonical_routes(
         outputs["routes6"],
         inert_utun_interfaces=profile["inert_utun_interfaces"],
+        dormant_apple_interfaces=dormant_apple,
     )
     if default4 or default6:
         raise WatchdogError("capture_default_route_present")
@@ -1444,6 +1597,7 @@ def _candidate_from_outputs(
         "hardware_profile_sha256": profile_sha256,
         "host": dict(profile["host"]),
         "hardware_ports": [dict(item) for item in profile["hardware_ports"]],
+        "dormant_apple_interfaces": dormant_apple,
         "inert_utun_interfaces": [
             dict(item) for item in profile["inert_utun_interfaces"]
         ],
@@ -1527,6 +1681,7 @@ def _capture_host_only(session_id: str) -> tuple[Path, str]:
             "kind",
             "capture_session_id",
             "hardware_profile_sha256",
+            "dormant_apple_interfaces",
             "host",
             "hardware_ports",
             "inert_utun_interfaces",
@@ -1567,6 +1722,7 @@ def _capture_host_only(session_id: str) -> tuple[Path, str]:
         refreshed[key] != candidate[key]
         for key in (
             "host",
+            "dormant_apple_interfaces",
             "hardware_ports",
             "inert_utun_interfaces",
             "network_services",
@@ -1590,6 +1746,7 @@ def _capture_host_only(session_id: str) -> tuple[Path, str]:
         outputs["routes6"],
         ignore_host_only_neighbors=True,
         inert_utun_interfaces=candidate["inert_utun_interfaces"],
+        dormant_apple_interfaces=candidate["dormant_apple_interfaces"],
     )
     if default4 or default6:
         raise WatchdogError("host_only_capture_default_route")
