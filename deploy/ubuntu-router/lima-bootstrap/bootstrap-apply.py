@@ -517,12 +517,21 @@ def _darwin_getxattr(path: Path, name: str) -> bytes:
 def _verify_recovery_xattrs(path: Path, kind: str) -> None:
     if kind == "socket":
         try:
-            _darwin_listxattr(path)
+            names = _darwin_listxattr(path)
         except OSError as error:
-            if error.errno in {errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}:
-                return
             raise BootstrapError("recovery socket xattr probe differs") from error
-        raise BootstrapError("recovery socket xattr support differs")
+        if names != [APPLE_PROVENANCE_NAME]:
+            raise BootstrapError("recovery socket xattrs differ")
+        try:
+            _darwin_getxattr(path, APPLE_PROVENANCE_NAME)
+        except OSError as error:
+            if error.errno in {
+                errno.ENOTSUP,
+                getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
+            }:
+                return
+            raise BootstrapError("recovery socket provenance probe differs") from error
+        raise BootstrapError("recovery socket provenance support differs")
     try:
         names = _darwin_listxattr(path)
     except OSError as error:

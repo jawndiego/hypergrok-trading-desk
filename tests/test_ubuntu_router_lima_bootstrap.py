@@ -498,13 +498,34 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             with self.assertRaises(controller.BootstrapError):
                 controller._verify_recovery_xattrs(probe, "runtime")
         unsupported = OSError(errno.ENOTSUP, "unsupported")
-        with mock.patch.object(
-            controller, "_darwin_listxattr", side_effect=unsupported
+        with (
+            mock.patch.object(
+                controller,
+                "_darwin_listxattr",
+                return_value=[controller.APPLE_PROVENANCE_NAME],
+            ),
+            mock.patch.object(
+                controller, "_darwin_getxattr", side_effect=unsupported
+            ),
         ):
             controller._verify_recovery_xattrs(probe, "socket")
         with mock.patch.object(controller, "_darwin_listxattr", return_value=[]):
             with self.assertRaises(controller.BootstrapError):
                 controller._verify_recovery_xattrs(probe, "socket")
+        with (
+            mock.patch.object(
+                controller,
+                "_darwin_listxattr",
+                return_value=[controller.APPLE_PROVENANCE_NAME],
+            ),
+            mock.patch.object(
+                controller,
+                "_darwin_getxattr",
+                return_value=controller.APPLE_PROVENANCE_VALUE,
+            ),
+            self.assertRaises(controller.BootstrapError),
+        ):
+            controller._verify_recovery_xattrs(probe, "socket")
         with (
             mock.patch.object(
                 controller,
