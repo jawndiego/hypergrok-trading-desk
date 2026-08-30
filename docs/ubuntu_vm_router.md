@@ -353,6 +353,15 @@ instance is exactly `Stopped`, UID 454 has no process, no VM/socket process is
 live, and the temporary socket_vmnet runtime and sudoers file are absent. Do
 not reconnect unless that phase prints the same literal safe-to-restore line.
 
+A failure before `limactl start` uses the narrower
+`recover-failed-prestart` transaction. It accepts only the pinned old
+PREPARING marker/FAILED incident, exact inactive socket/pid residuals, absent
+STARTING/watchdog/receipt/VM processes and the unchanged preboot instance. It
+atomically retains the runtime, base capture and marker without deleting them,
+then issues one recovery receipt for a distinct fresh session. Fresh
+`check-airgap` and apply commands require that receipt hash; the old incident
+never becomes retry authority.
+
 For the reduced first canary, defer remote chat approval, launchd, sleep/reboot
 qualification and long-running PnL collection. Do not defer the physical
 first-boot air-gap, one Proton profile, guest default-drop remote policy,

@@ -1528,6 +1528,20 @@ def _sample(lock: dict[str, Any], *, allow_host_only: bool) -> dict[str, Any]:
     ):
         raise WatchdogError("internet_sharing_enabled")
     interfaces = _parse_ifconfig(outputs["ifconfig"])
+    if not allow_host_only:
+        bridge = interfaces.get("bridge100")
+        if bridge is not None and (
+            bridge["up"]
+            or bridge["status"] == "active"
+            or bridge["ipv4"]
+            or bridge["ipv6"]
+        ):
+            raise WatchdogError("base_bridge_not_dormant")
+        if (
+            "bridge100" in _route_interfaces(outputs["routes4"])
+            or "bridge100" in _route_interfaces(outputs["routes6"])
+        ):
+            raise WatchdogError("base_bridge_route_present")
     host_only_observed = _validate_addresses(interfaces, lock, allow_host_only)
     if host_only_observed != host_match:
         raise WatchdogError("host_only_phase_tuple_drift")

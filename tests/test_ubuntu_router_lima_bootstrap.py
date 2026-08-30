@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+import errno
 import hashlib
 import importlib.util
 import io
@@ -343,8 +344,133 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         self.assertIn("apply-hardened-vm", launcher)
         self.assertIn("apply-airgapped-first-boot", launcher)
         self.assertIn("verify-stopped-after-airgap", launcher)
+        self.assertIn("recover-failed-prestart", launcher)
         for forbidden in ("apply-guest-package", "apply-router"):
             self.assertNotIn(forbidden, launcher)
+
+        recovery_source = inspect.getsource(
+            _load_module(HOST_APPLY, "bootstrap_apply_recovery_static_test")._recover_failed_prestart
+        )
+        for required in (
+            "bf3e6c9c6ce3a514c20a6c5f8a44f5c083d08c9212807cc4e2096ca9c1a7529e",
+            "57f30e5c90dde65de96bbc8a94bab869bd61c59c58f3b65f11fbfd863ec38047",
+            "prestart-vmnet-runtime-",
+            "prestart-recovery-transaction-",
+            ".airgap-hardware-lock.json.pending",
+            "_resume_recovery_moves",
+            "recovery_controller_manifest_sha256",
+            "hardened_vm_receipt_sha256",
+            "instance_identity",
+            "postmove_processes_absent",
+            ".airgap-first-boot.STARTING.json",
+            "limactl-start-",
+            "_assert_no_airgap_watchdog_process",
+            "_hardened_instance_evidence",
+            "fresh_session_id",
+            "failure_stage=",
+        ):
+            self.assertIn(required, recovery_source)
+        self.assertNotIn("unlink(", recovery_source)
+        generic_cleanup = inspect.getsource(
+            _load_module(HOST_APPLY, "bootstrap_apply_cleanup_split_test")._quarantine_vmnet
+        )
+        success_cleanup = inspect.getsource(
+            _load_module(HOST_APPLY, "bootstrap_apply_success_cleanup_test")._quarantine_vmnet_after_success
+        )
+        self.assertIn("runtime is not empty", generic_cleanup)
+        self.assertNotIn("S_ISSOCK", generic_cleanup)
+        self.assertIn("S_ISSOCK", success_cleanup)
+        self.assertGreaterEqual(success_cleanup.count("_assert_no_vm_process()"), 2)
+        self.assertGreaterEqual(success_cleanup.count("_status(lock, limactl)"), 2)
+
+        controller = _load_module(
+            HOST_APPLY, "bootstrap_apply_recovery_resume_test"
+        )
+        for moved_count in range(4):
+            with self.subTest(moved_count=moved_count), tempfile.TemporaryDirectory() as directory:
+                parent = Path(directory)
+                moves = tuple(
+                    (parent / f"source-{index}", parent / f"retained-{index}")
+                    for index in range(3)
+                )
+                for source_path, _ in moves:
+                    source_path.write_bytes(b"retained")
+                for source_path, destination in moves[:moved_count]:
+                    source_path.rename(destination)
+                controller._resume_recovery_moves(moves)
+                self.assertTrue(all(destination.exists() for _, destination in moves))
+                self.assertTrue(all(not source.exists() for source, _ in moves))
+                moves[0][0].write_bytes(b"ambiguous")
+                with self.assertRaisesRegex(
+                    controller.BootstrapError, "ambiguous"
+                ):
+                    controller._resume_recovery_moves(moves)
+
+        probe = Path("/fixed/recovery-object")
+        with (
+            mock.patch.object(
+                controller,
+                "_darwin_listxattr",
+                return_value=[controller.APPLE_PROVENANCE_NAME],
+            ),
+            mock.patch.object(
+                controller,
+                "_darwin_getxattr",
+                return_value=controller.APPLE_PROVENANCE_VALUE,
+            ),
+        ):
+            controller._verify_recovery_xattrs(probe, "runtime")
+            controller._verify_recovery_xattrs(probe, "pidfile")
+
+        successor_args = SimpleNamespace(
+            attest_physical_airgap=True,
+            expected_controller_manifest_sha256="c" * 64,
+            expected_prestart_recovery_receipt_sha256="b" * 64,
+        )
+        successor_lock = {
+            "phases": {"airgapped_start_apply_enabled": True},
+            "pins": {"prestart_recovery_receipt_sha256": "a" * 64},
+        }
+        with (
+            mock.patch.object(controller, "_verify_bundle"),
+            mock.patch.object(controller, "_load_lock", return_value=successor_lock),
+            mock.patch.object(controller, "_verify_system_tools"),
+            mock.patch.object(
+                controller,
+                "_assert_attended_root_tty",
+                return_value={"evidence": {}, "sha256": "d" * 64},
+            ),
+            mock.patch.object(controller, "_assert_host_identity"),
+            mock.patch.object(
+                controller,
+                "_initialize",
+                return_value={"receipts": Path("/fixed/receipts")},
+            ),
+            self.assertRaisesRegex(controller.BootstrapError, "not pinned"),
+        ):
+            controller._airgap_preconditions(successor_args)
+        with mock.patch.object(controller, "_darwin_listxattr", return_value=[]):
+            controller._verify_recovery_xattrs(probe, "pidfile")
+            with self.assertRaises(controller.BootstrapError):
+                controller._verify_recovery_xattrs(probe, "runtime")
+        unsupported = OSError(errno.ENOTSUP, "unsupported")
+        with mock.patch.object(
+            controller, "_darwin_listxattr", side_effect=unsupported
+        ):
+            controller._verify_recovery_xattrs(probe, "socket")
+        with mock.patch.object(controller, "_darwin_listxattr", return_value=[]):
+            with self.assertRaises(controller.BootstrapError):
+                controller._verify_recovery_xattrs(probe, "socket")
+        with (
+            mock.patch.object(
+                controller,
+                "_darwin_listxattr",
+                return_value=[controller.APPLE_PROVENANCE_NAME],
+            ),
+            mock.patch.object(controller, "_darwin_getxattr", return_value=b"wrong"),
+            self.assertRaisesRegex(controller.BootstrapError, "provenance differs"),
+        ):
+            controller._verify_recovery_xattrs(probe, "pidfile")
 
         fallback = source.split(
             "def _verify_stopped_after_airgap", 1
@@ -831,7 +957,7 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
                     "runtime_files": {},
                 },
                 "_durability_barrier_instance": lambda *_args, **_kwargs: None,
-                "_quarantine_vmnet": lambda *_args, **_kwargs: {
+                "_quarantine_vmnet_after_success": lambda *_args, **_kwargs: {
                     "retained_sudoers": "/q/sudoers",
                     "retained_vmnet_runtime": "/q/runtime",
                 },
@@ -878,7 +1004,7 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             "verifier_output = _guest_command(",
             "stop_evidence = _stop_vm(",
             "_durability_barrier_instance(",
-            "vmnet_cleanup = _quarantine_vmnet(",
+            "vmnet_cleanup = _quarantine_vmnet_after_success(",
             "watchdog_result = _complete_watchdog(",
             "path, digest = _atomic_receipt(",
         )

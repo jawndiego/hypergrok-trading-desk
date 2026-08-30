@@ -42,6 +42,8 @@ CLOUD_TEMPLATE_PATH = SCRIPT_DIR / "cloud-config-first-boot.yaml.example"
 F_FULLFSYNC = 51
 AT_FDCWD = -2
 RENAME_EXCL = 0x00000004
+APPLE_PROVENANCE_NAME = "com.apple.provenance"
+APPLE_PROVENANCE_VALUE = bytes.fromhex("010200f2ac997ac0532d6f")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SYSTEM_TOOL_CONTRACT_SHA256 = (
     "f2112a4323a7f9bb85cd3e6c6833791bf18c6fa26d709387876d113cfe050610"
@@ -454,6 +456,95 @@ def _rename_exclusive(source: Path, destination: Path) -> None:
         _sync_directory(destination.parent)
 
 
+def _recovery_current_path(source: Path, destination: Path) -> Path:
+    source_present = source.exists() or source.is_symlink()
+    destination_present = destination.exists() or destination.is_symlink()
+    if source_present == destination_present:
+        raise BootstrapError("recovery move state is ambiguous")
+    return source if source_present else destination
+
+
+def _resume_recovery_moves(moves: tuple[tuple[Path, Path], ...]) -> None:
+    for source, destination in moves:
+        current = _recovery_current_path(source, destination)
+        if current == source:
+            _rename_exclusive(source, destination)
+
+
+def _darwin_listxattr(path: Path) -> list[str]:
+    libc = ctypes.CDLL(None, use_errno=True)
+    function = libc.listxattr
+    function.argtypes = [ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    function.restype = ctypes.c_ssize_t
+    size = function(os.fsencode(path), None, 0, 0)
+    if size < 0:
+        number = ctypes.get_errno()
+        raise OSError(number, os.strerror(number), str(path))
+    if size == 0:
+        return []
+    buffer = ctypes.create_string_buffer(size)
+    observed = function(os.fsencode(path), buffer, size, 0)
+    if observed != size:
+        number = ctypes.get_errno()
+        raise OSError(number or errno.EIO, os.strerror(number or errno.EIO), str(path))
+    return sorted(os.fsdecode(value) for value in buffer.raw.split(b"\0") if value)
+
+
+def _darwin_getxattr(path: Path, name: str) -> bytes:
+    libc = ctypes.CDLL(None, use_errno=True)
+    function = libc.getxattr
+    function.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_uint32,
+        ctypes.c_int,
+    ]
+    function.restype = ctypes.c_ssize_t
+    size = function(os.fsencode(path), os.fsencode(name), None, 0, 0, 0)
+    if size < 0:
+        number = ctypes.get_errno()
+        raise OSError(number, os.strerror(number), str(path))
+    buffer = ctypes.create_string_buffer(size)
+    observed = function(os.fsencode(path), os.fsencode(name), buffer, size, 0, 0)
+    if observed != size:
+        number = ctypes.get_errno()
+        raise OSError(number or errno.EIO, os.strerror(number or errno.EIO), str(path))
+    return buffer.raw[:size]
+
+
+def _verify_recovery_xattrs(path: Path, kind: str) -> None:
+    if kind == "socket":
+        try:
+            _darwin_listxattr(path)
+        except OSError as error:
+            if error.errno in {errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}:
+                return
+            raise BootstrapError("recovery socket xattr probe differs") from error
+        raise BootstrapError("recovery socket xattr support differs")
+    try:
+        names = _darwin_listxattr(path)
+    except OSError as error:
+        raise BootstrapError("recovery xattr probe failed") from error
+    if kind == "runtime":
+        if names != [APPLE_PROVENANCE_NAME]:
+            raise BootstrapError("recovery runtime xattrs differ")
+    elif kind == "pidfile":
+        if names == []:
+            return
+        if names != [APPLE_PROVENANCE_NAME]:
+            raise BootstrapError("recovery pidfile xattrs differ")
+    else:
+        raise BootstrapError("recovery xattr kind differs")
+    try:
+        value = _darwin_getxattr(path, APPLE_PROVENANCE_NAME)
+    except OSError as error:
+        raise BootstrapError("recovery provenance read failed") from error
+    if value != APPLE_PROVENANCE_VALUE:
+        raise BootstrapError("recovery provenance differs")
+
+
 def _atomic_receipt(parent: Path, name: str, value: dict[str, Any]) -> tuple[Path, str]:
     content = _canonical_json(value)
     digest = _sha256_bytes(content)
@@ -503,6 +594,11 @@ def _load_lock() -> dict[str, Any]:
         if key == "predecessor_cloud_config_sha256":
             if value != "RECEIPT_BOUND":
                 raise BootstrapError("predecessor cloud pin differs")
+        elif key == "prestart_recovery_receipt_sha256":
+            if value != "RECOVERY_RECEIPT_REQUIRED" and (
+                not isinstance(value, str) or SHA256_RE.fullmatch(value) is None
+            ):
+                raise BootstrapError("prestart recovery pin differs")
         elif not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
             raise BootstrapError(f"bootstrap pin is invalid: {key}")
     _validated_system_tool_contract(lock)
@@ -992,6 +1088,28 @@ def _assert_no_vm_process() -> None:
         raise BootstrapError("VM or socket_vmnet process is active")
 
 
+def _assert_no_airgap_watchdog_process() -> None:
+    result = subprocess.run(
+        ["/bin/ps", "-axo", "pid=,uid=,comm=,args="],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=10,
+        check=False,
+    )
+    if (
+        result.returncode != 0
+        or result.stderr
+        or len(result.stdout) > 4 * 1024 * 1024
+        or any("airgap-watchdog.py" in line for line in result.stdout.splitlines())
+    ):
+        raise BootstrapError("airgap watchdog process proof differs")
+
+
 def _network_snapshot() -> dict[str, str]:
     commands = {
         "interfaces": ["/sbin/ifconfig", "-l"],
@@ -1400,6 +1518,52 @@ def _quarantine_vmnet(
     }
 
 
+def _quarantine_vmnet_after_success(
+    lock: dict[str, Any], state: dict[str, Path], limactl: Path, *, attempt_id: str
+) -> dict[str, str]:
+    _assert_no_vm_process()
+    if _router_uid_processes():
+        raise BootstrapError("success cleanup router process remains")
+    _status(lock, limactl)
+    target = Path(lock["paths"]["vmnet_sudoers"])
+    runtime = Path(lock["paths"]["vmnet_runtime"])
+    retained_sudoers = state["quarantine"] / f"first-boot-sudoers-{attempt_id}"
+    retained_runtime = state["quarantine"] / f"first-boot-vmnet-runtime-{attempt_id}"
+    content = _read_bound(target, uid=0, gid=0, mode=0o440, maximum=64 * 1024)
+    if _sha256_bytes(content) != lock["pins"]["lima_first_boot_sudoers_sha256"]:
+        raise BootstrapError("success cleanup sudoers differs")
+    _assert_real(runtime, kind="directory", uid=0, gid=0, mode=0o755)
+    socket_path = runtime / "socket_vmnet.td-router-ingress"
+    pid_path = runtime / "td-router-ingress_socket_vmnet.pid"
+    if {path.name for path in runtime.iterdir()} != {socket_path.name, pid_path.name}:
+        raise BootstrapError("success cleanup residual set differs")
+    socket_metadata = socket_path.lstat()
+    pid_content = _read_bound(pid_path, uid=0, gid=0, mode=0o600, maximum=32)
+    if (
+        socket_path.is_symlink()
+        or not stat.S_ISSOCK(socket_metadata.st_mode)
+        or socket_metadata.st_uid != 0
+        or socket_metadata.st_gid != 454
+        or stat.S_IMODE(socket_metadata.st_mode) != 0o770
+        or socket_metadata.st_nlink != 1
+        or socket_metadata.st_size != 0
+        or not pid_content.isdigit()
+    ):
+        raise BootstrapError("success cleanup inactive residual differs")
+    _rename_exclusive(target, retained_sudoers)
+    os.chmod(retained_sudoers, 0o400)
+    _sync_file(retained_sudoers)
+    _rename_exclusive(runtime, retained_runtime)
+    _assert_no_vm_process()
+    if _router_uid_processes():
+        raise BootstrapError("success cleanup postmove process remains")
+    _status(lock, limactl)
+    return {
+        "retained_sudoers": str(retained_sudoers),
+        "retained_vmnet_runtime": str(retained_runtime),
+    }
+
+
 def _start_hostonly_daemon(
     lock: dict[str, Any], state: dict[str, Path], *, attempt_id: str
 ) -> tuple[subprocess.Popen[bytes], tuple[Any, Any], dict[str, str]]:
@@ -1460,7 +1624,21 @@ def _start_hostonly_daemon(
             stderr.close()
             raise BootstrapError("socket_vmnet exited before readiness")
         if pidfile.is_file() and not pidfile.is_symlink() and socket.exists() and not socket.is_symlink():
-            break
+            bridge = subprocess.run(
+                ["/sbin/ifconfig", "bridge100"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+                timeout=2,
+                check=False,
+            )
+            if (
+                bridge.returncode == 0
+                and not bridge.stderr
+                and re.search(rb"(?m)^\s*inet 192\.168\.106\.1\s", bridge.stdout)
+            ):
+                break
         time.sleep(0.1)
     else:
         process.terminate()
@@ -2701,6 +2879,28 @@ def _airgap_preconditions(args: argparse.Namespace) -> tuple[dict[str, Any], dic
     local_tty = _assert_attended_root_tty()
     _assert_host_identity(lock)
     state = _initialize(lock)
+    expected_recovery = args.expected_prestart_recovery_receipt_sha256
+    if not isinstance(expected_recovery, str) or SHA256_RE.fullmatch(expected_recovery) is None:
+        raise BootstrapError("prestart recovery receipt digest is invalid")
+    if lock["pins"].get("prestart_recovery_receipt_sha256") != expected_recovery:
+        raise BootstrapError("prestart recovery receipt is not pinned by this controller")
+    recovery_path = state["receipts"] / (
+        "10-prestart-recovery-28de503250ad9a13f25d539c4119ec967c98e8a2feb624b6bc0496fccd6dd5a8.json"
+    )
+    recovery_content = _read_bound(
+        recovery_path, uid=0, gid=0, mode=0o400, maximum=64 * 1024
+    )
+    recovery = _load_json_bytes(recovery_content, "prestart recovery receipt")
+    if (
+        _sha256_bytes(recovery_content) != expected_recovery
+        or recovery.get("kind") != "trading-desk.router-bootstrap.prestart-recovery"
+        or recovery.get("fresh_session_id") != lock["pins"]["airgap_session_id"]
+        or recovery.get("old_session_id")
+        != "28de503250ad9a13f25d539c4119ec967c98e8a2feb624b6bc0496fccd6dd5a8"
+        or recovery.get("start_invoked") is not False
+        or recovery.get("vm_status") != "Stopped"
+    ):
+        raise BootstrapError("prestart recovery receipt differs")
     _assert_no_vm_process()
     limactl = _limactl(lock)
     receipt = _hardened_vm_receipt(lock)
@@ -2878,8 +3078,25 @@ def _adopt_completed_airgap_first_boot(args: argparse.Namespace) -> int | None:
     if _sha256_bytes(sudoers_content) != lock["pins"]["lima_first_boot_sudoers_sha256"]:
         raise BootstrapError("completed retained sudoers differs")
     _assert_real(retained_runtime, kind="directory", uid=0, gid=0, mode=0o755)
-    if any(retained_runtime.iterdir()):
-        raise BootstrapError("completed retained VMNet runtime is not empty")
+    retained_socket = retained_runtime / "socket_vmnet.td-router-ingress"
+    retained_pid = retained_runtime / "td-router-ingress_socket_vmnet.pid"
+    retained_socket_metadata = retained_socket.lstat()
+    retained_pid_content = _read_bound(
+        retained_pid, uid=0, gid=0, mode=0o600, maximum=32
+    )
+    if (
+        {path.name for path in retained_runtime.iterdir()}
+        != {retained_socket.name, retained_pid.name}
+        or retained_socket.is_symlink()
+        or not stat.S_ISSOCK(retained_socket_metadata.st_mode)
+        or retained_socket_metadata.st_uid != 0
+        or retained_socket_metadata.st_gid != 454
+        or stat.S_IMODE(retained_socket_metadata.st_mode) != 0o770
+        or retained_socket_metadata.st_nlink != 1
+        or retained_socket_metadata.st_size != 0
+        or not retained_pid_content.isdigit()
+    ):
+        raise BootstrapError("completed retained VMNet runtime differs")
     for live in (
         Path(lock["paths"]["vmnet_sudoers"]),
         Path(lock["paths"]["vmnet_runtime"]),
@@ -2979,15 +3196,20 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
     watchdog_write_fd: int | None = None
     start_invoked = False
     vmnet_cleanup: dict[str, str] | None = None
+    failure_stage = "sleep_inhibitor"
     try:
         caffeinate = _start_caffeinate()
+        failure_stage = "vmnet_prepare"
         vmnet_prepare = _prepare_vmnet(lock, limactl, attempt_id=attempt_id)
+        failure_stage = "socket_vmnet_start"
         socket_process, socket_streams, socket_evidence = _start_hostonly_daemon(
             lock, state, attempt_id=attempt_id
         )
+        failure_stage = "host_only_capture"
         host_only_capture = _run_watchdog_phase(
             lock, "capture-host-only", socket_vmnet_pid=socket_process.pid
         )
+        failure_stage = "watchdog_arm"
         watchdog, watchdog_write_fd = _spawn_watchdog(
             lock, socket_vmnet_pid=socket_process.pid
         )
@@ -3007,6 +3229,7 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
             mode=0o400,
         )
         start_invoked = True
+        failure_stage = "vm_start"
         started = _run_lima_guarded(
             lock,
             limactl,
@@ -3086,7 +3309,9 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
         _durability_barrier_instance(
             Path(receipt08["instance_path"]), Path(lock["paths"]["lima_home"])
         )
-        vmnet_cleanup = _quarantine_vmnet(lock, state, attempt_id=attempt_id)
+        vmnet_cleanup = _quarantine_vmnet_after_success(
+            lock, state, limactl, attempt_id=attempt_id
+        )
         _wait_hostonly_teardown(watchdog, caffeinate)
         if watchdog.poll() is not None:
             raise BootstrapError("air-gap watchdog exited before completion")
@@ -3187,6 +3412,7 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
             "automatic_retry_authorized": False,
             "disposition": "UNKNOWN" if start_invoked else "FAILED",
             "error_type": type(error).__name__,
+            "failure_stage": failure_stage,
             "kind": "trading-desk.router-bootstrap.airgap-first-boot-incident",
             "mainnet_authorized": False,
             "phase": "airgap-first-boot",
@@ -3210,6 +3436,271 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
         _stop_caffeinate(caffeinate)
 
 
+def _recover_failed_prestart(args: argparse.Namespace) -> int:
+    stage = "bundle"
+    try:
+        _verify_bundle(args.expected_controller_manifest_sha256)
+        lock = _load_lock()
+        _verify_system_tools(lock)
+        _assert_attended_root_tty()
+        _assert_host_identity(lock)
+        state = _require_existing_state(lock)
+        old_session = "28de503250ad9a13f25d539c4119ec967c98e8a2feb624b6bc0496fccd6dd5a8"
+        old_manifest = "b509a0262e4ea530fd64fbc3c1406b3c52dd36507e490a515f49c656c788278c"
+        fresh_session = "46e7c23627c9e4a1207f86a5a3f186cfee63f302e6940dfd90f1422097cd4e4d"
+        runtime = Path(lock["paths"]["vmnet_runtime"])
+        base = Path("/private/var/db/trading-desk-router-bootstrap-v1/airgap-hardware-base-capture.json")
+        preparing = state["state"] / ".airgap-first-boot.PREPARING.json"
+        moves = (
+            (runtime, state["quarantine"] / f"prestart-vmnet-runtime-{old_session}-52264260"),
+            (base, state["quarantine"] / f"prestart-base-capture-{old_session}"),
+            (preparing, state["quarantine"] / f"prestart-preparing-{old_session}"),
+        )
+
+        stage = "never_started"
+        preparing_current = _recovery_current_path(*moves[2])
+        preparing_content = _read_bound(
+            preparing_current, uid=0, gid=0, mode=0o400, maximum=4096
+        )
+        if (
+            len(preparing_content) != 487
+            or _sha256_bytes(preparing_content)
+            != "bf3e6c9c6ce3a514c20a6c5f8a44f5c083d08c9212807cc4e2096ca9c1a7529e"
+        ):
+            raise BootstrapError("preparing marker differs")
+        expected_marker = {
+            "attempt_id": old_session,
+            "controller_manifest_sha256": old_manifest,
+            "hardened_vm_receipt_sha256": lock["pins"]["hardened_vm_receipt_sha256"],
+            "kind": "trading-desk.router-bootstrap.installing",
+            "phase": "airgap-first-boot",
+            "physical_airgap_attested": True,
+            "schema_version": 1,
+            "start_invocation_limit": 1,
+            "state": "PREPARING",
+        }
+        if preparing_content != _canonical_json(expected_marker):
+            raise BootstrapError("preparing marker bytes differ")
+        absent = [
+            state["state"] / ".airgap-first-boot.STARTING.json",
+            Path(lock["paths"]["airgap_first_boot_receipt"]),
+            Path(lock["paths"]["airgap_first_boot_receipt"]).parent
+            / ".09-airgap-first-boot-stopped.json.pending",
+            state["state"] / f"limactl-start-{old_session}.stdout",
+            state["state"] / f"limactl-start-{old_session}.stderr",
+            Path(lock["paths"]["vmnet_sudoers"]),
+            Path("/private/var/db/trading-desk-router-bootstrap-v1/airgap-hardware-lock.json"),
+            Path("/private/var/db/trading-desk-router-bootstrap-v1/.airgap-hardware-lock.json.pending"),
+            Path("/private/var/db/trading-desk-router-bootstrap-v1/.airgap-hardware-base-capture.json.pending"),
+            Path("/private/var/db/trading-desk-router-bootstrap-v1/airgap-watchdog-results")
+            / f"{old_session}-watch.json",
+            Path("/private/var/db/trading-desk-router-bootstrap-v1/airgap-watchdog-results")
+            / f".{old_session}-watch.json.pending",
+        ]
+        if any(path.exists() or path.is_symlink() for path in absent):
+            raise BootstrapError("never-started absence proof differs")
+        incident_path = state["receipts"] / f"09-airgap-first-boot-incident-{old_session}.json"
+        incident_content = _read_bound(
+            incident_path, uid=0, gid=0, mode=0o400, maximum=4096
+        )
+        incident = _load_json_bytes(incident_content, "prestart incident")
+        if (
+            set(incident)
+            != {
+                "attempt_id",
+                "automatic_retry_authorized",
+                "disposition",
+                "error_type",
+                "kind",
+                "mainnet_authorized",
+                "phase",
+                "schema_version",
+                "start_invoked",
+                "temporary_vmnet_artifacts",
+                "venue_writes_authorized",
+            }
+            or
+            len(incident_content) != 442
+            or _sha256_bytes(incident_content)
+            != "57f30e5c90dde65de96bbc8a94bab869bd61c59c58f3b65f11fbfd863ec38047"
+            or incident.get("attempt_id") != old_session
+            or incident.get("kind")
+            != "trading-desk.router-bootstrap.airgap-first-boot-incident"
+            or incident.get("disposition") != "FAILED"
+            or incident.get("start_invoked") is not False
+            or incident.get("temporary_vmnet_artifacts") is not None
+        ):
+            raise BootstrapError("prestart incident differs")
+        stage = "stopped"
+        _assert_no_vm_process()
+        _assert_no_airgap_watchdog_process()
+        if _router_uid_processes():
+            raise BootstrapError("router process remains")
+        limactl = _limactl(lock)
+        _status(lock, limactl)
+        receipt08 = _hardened_vm_receipt(lock)
+        instance_evidence = _hardened_instance_evidence(
+            lock, receipt08, allow_runtime_files=False
+        )
+        instance_identity = {
+            key: instance_evidence[key]
+            for key in (
+                "cloud_config_sha256",
+                "disk_sha256",
+                "instance_device",
+                "instance_inode",
+                "instance_path",
+                "stored_plan_sha256",
+                "vz_identifier_sha256",
+            )
+        }
+        stage = "residual_runtime"
+        retained_sudoers = state["quarantine"] / f"first-boot-sudoers-{old_session}"
+        sudoers_content = _read_bound(
+            retained_sudoers, uid=0, gid=0, mode=0o400, maximum=4096
+        )
+        if (
+            len(sudoers_content) != 714
+            or retained_sudoers.stat().st_ino != 52264258
+            or _sha256_bytes(sudoers_content)
+            != lock["pins"]["lima_first_boot_sudoers_sha256"]
+        ):
+            raise BootstrapError("retained sudoers differs")
+        runtime_current = _recovery_current_path(*moves[0])
+        runtime_meta = _assert_real(runtime_current, kind="directory", uid=0, gid=0, mode=0o755)
+        if runtime_meta.st_ino != 52264260:
+            raise BootstrapError("runtime identity differs")
+        _verify_recovery_xattrs(runtime_current, "runtime")
+        socket_path = runtime_current / "socket_vmnet.td-router-ingress"
+        socket_meta = socket_path.lstat()
+        _no_named_acl(socket_path)
+        _verify_recovery_xattrs(socket_path, "socket")
+        pid_path = runtime_current / "td-router-ingress_socket_vmnet.pid"
+        pid_content = _read_bound(pid_path, uid=0, gid=0, mode=0o600, maximum=32)
+        _verify_recovery_xattrs(pid_path, "pidfile")
+        if (
+            {path.name for path in runtime_current.iterdir()}
+            != {socket_path.name, pid_path.name}
+            or socket_path.is_symlink()
+            or not stat.S_ISSOCK(socket_meta.st_mode)
+            or (socket_meta.st_uid, socket_meta.st_gid, stat.S_IMODE(socket_meta.st_mode), socket_meta.st_nlink, socket_meta.st_size, socket_meta.st_ino)
+            != (0, 454, 0o770, 1, 0, 52264264)
+            or pid_path.stat().st_ino != 52264263
+            or pid_content != b"81885"
+            or _sha256_bytes(pid_content)
+            != "321d9e6141cfc141be8ac517964335701be098e7fe9281737b2f55dec8fc51f8"
+        ):
+            raise BootstrapError("runtime residual differs")
+        for suffix, inode, size, digest in (
+            ("stdout", 52264261, 0, _sha256_bytes(b"")),
+            ("stderr", 52264262, 176, "267ee3a87f9118555b35926702a83bfa760dfe2e752b7455fa81521c08f56659"),
+        ):
+            path = state["state"] / f"socket-vmnet-{old_session}.{suffix}"
+            content = _read_bound(
+                path, uid=0, gid=0, mode=0o600, maximum=4096, allow_empty=True
+            )
+            if path.stat().st_ino != inode or len(content) != size or _sha256_bytes(content) != digest:
+                raise BootstrapError("socket_vmnet log differs")
+        stage = "quarantine"
+        base_current = _recovery_current_path(*moves[1])
+        base_content = _read_bound(
+            base_current, uid=0, gid=0, mode=0o400, maximum=128 * 1024
+        )
+        if _sha256_bytes(base_content) != "e99befe4cf60f34a70351263e3c672201018f5d2f5424f7f0ef34597936ca034":
+            raise BootstrapError("base capture differs")
+        transaction = {
+            "failed_controller_manifest_sha256": old_manifest,
+            "fresh_session_id": fresh_session,
+            "hardened_vm_receipt_sha256": lock["pins"]["hardened_vm_receipt_sha256"],
+            "instance_identity": instance_identity,
+            "kind": "trading-desk.router-bootstrap.prestart-recovery-transaction",
+            "moves": [
+                {"destination": str(destination), "source": str(source)}
+                for source, destination in moves
+            ],
+            "old_session_id": old_session,
+            "recovery_controller_manifest_sha256": args.expected_controller_manifest_sha256,
+            "schema_version": 1,
+        }
+        transaction_path, transaction_sha256 = _atomic_receipt(
+            state["quarantine"],
+            f"prestart-recovery-transaction-{old_session}.json",
+            transaction,
+        )
+        _resume_recovery_moves(moves)
+        retained_runtime, retained_base, retained_preparing = (
+            destination for _, destination in moves
+        )
+        if (
+            _assert_real(
+                retained_runtime, kind="directory", uid=0, gid=0, mode=0o755
+            ).st_ino
+            != 52264260
+            or _sha256_bytes(
+                _read_bound(
+                    retained_base, uid=0, gid=0, mode=0o400, maximum=128 * 1024
+                )
+            )
+            != "e99befe4cf60f34a70351263e3c672201018f5d2f5424f7f0ef34597936ca034"
+            or _sha256_bytes(
+                _read_bound(
+                    retained_preparing,
+                    uid=0,
+                    gid=0,
+                    mode=0o400,
+                    maximum=4096,
+                )
+            )
+            != "bf3e6c9c6ce3a514c20a6c5f8a44f5c083d08c9212807cc4e2096ca9c1a7529e"
+        ):
+            raise BootstrapError("retained recovery evidence differs")
+        stage = "postmove_proof"
+        _assert_no_vm_process()
+        _assert_no_airgap_watchdog_process()
+        if _router_uid_processes():
+            raise BootstrapError("postmove router process remains")
+        _status(lock, limactl)
+        postmove_instance = _hardened_instance_evidence(
+            lock, receipt08, allow_runtime_files=False
+        )
+        if any(
+            postmove_instance[key] != value
+            for key, value in instance_identity.items()
+        ):
+            raise BootstrapError("postmove instance evidence differs")
+        receipt = {
+            "automatic_delete_performed": False,
+            "failed_controller_manifest_sha256": old_manifest,
+            "fresh_session_id": fresh_session,
+            "hardened_vm_receipt_sha256": lock["pins"]["hardened_vm_receipt_sha256"],
+            "incident_sha256": _sha256_bytes(incident_content),
+            "instance_identity": instance_identity,
+            "kind": "trading-desk.router-bootstrap.prestart-recovery",
+            "mainnet_authorized": False,
+            "old_session_id": old_session,
+            "phase": "prestart-recovery",
+            "postmove_processes_absent": True,
+            "recovery_controller_manifest_sha256": args.expected_controller_manifest_sha256,
+            "quarantined_paths": [str(destination) for _, destination in moves],
+            "schema_version": 1,
+            "start_invoked": False,
+            "transaction_path": str(transaction_path),
+            "transaction_sha256": transaction_sha256,
+            "venue_writes_authorized": False,
+            "vm_status": "Stopped",
+        }
+        path, digest = _atomic_receipt(
+            state["receipts"], f"10-prestart-recovery-{old_session}.json", receipt
+        )
+        print(f"prestart_recovery_receipt={path}")
+        print(f"prestart_recovery_receipt_sha256={digest}")
+        print(f"fresh_session_id={fresh_session}")
+        print("vm_status=Stopped")
+        return 0
+    except BaseException as error:
+        raise BootstrapError(f"failure_stage={stage}") from error
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="phase", required=True)
@@ -3219,8 +3710,13 @@ def _parser() -> argparse.ArgumentParser:
         airgap = subparsers.add_parser(name)
         airgap.add_argument("--expected-controller-manifest-sha256", required=True)
         airgap.add_argument("--attest-physical-airgap", action="store_true")
+        airgap.add_argument(
+            "--expected-prestart-recovery-receipt-sha256", required=True
+        )
     stopped = subparsers.add_parser("verify-stopped-after-airgap")
     stopped.add_argument("--expected-controller-manifest-sha256", required=True)
+    recovery = subparsers.add_parser("recover-failed-prestart")
+    recovery.add_argument("--expected-controller-manifest-sha256", required=True)
     return parser
 
 
@@ -3235,6 +3731,8 @@ def main(argv: list[str] | None = None) -> int:
             return _apply_airgapped_first_boot(args)
         if args.phase == "verify-stopped-after-airgap":
             return _verify_stopped_after_airgap(args)
+        if args.phase == "recover-failed-prestart":
+            return _recover_failed_prestart(args)
         raise BootstrapError("unknown bootstrap phase")
     except (BootstrapError, OSError, KeyError, TypeError, ValueError, plistlib.InvalidFileException) as error:
         print(f"router_bootstrap_failed: {error}", file=sys.stderr)
