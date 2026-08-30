@@ -313,6 +313,15 @@ class AirgapWatchdogTests(unittest.TestCase):
             """Network information
 
 IPv4 network interface information
+  No IPv4 states found
+  REACH : flags 0x00000000 (Not Reachable)
+IPv6 network interface information
+  No IPv6 states found
+  REACH : flags 0x00000000 (Not Reachable)
+""",
+            """Network information
+
+IPv4 network interface information
   No network interfaces
 IPv6 network interface information
   No network interfaces

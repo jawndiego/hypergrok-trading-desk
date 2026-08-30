@@ -595,6 +595,16 @@ def _nwi_unreachable(content: str, *, allow_host_only: bool = False) -> None:
         raise WatchdogError("nwi_output_shape")
     if lines == ["Network information", "No network information"]:
         return
+    if lines == [
+        "Network information",
+        "IPv4 network interface information",
+        "No IPv4 states found",
+        "REACH : flags 0x00000000 (Not Reachable)",
+        "IPv6 network interface information",
+        "No IPv6 states found",
+        "REACH : flags 0x00000000 (Not Reachable)",
+    ]:
+        return
     allowed_headers = {
         "IPv4 network interface information",
         "IPv6 network interface information",
