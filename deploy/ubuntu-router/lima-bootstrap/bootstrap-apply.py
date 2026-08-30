@@ -545,19 +545,27 @@ def _verify_recovery_xattrs(path: Path, kind: str) -> None:
         raise BootstrapError("recovery provenance differs")
 
 
-def _recovery_instance_identity(instance_evidence: dict[str, Any]) -> dict[str, Any]:
+def _recovery_instance_identity(
+    instance_evidence: dict[str, Any], instance_path: str
+) -> dict[str, Any]:
     keys = (
         "cloud_config_sha256",
         "disk_sha256",
         "instance_device",
         "instance_inode",
-        "instance_path",
         "plan_sha256",
         "vz_identifier_sha256",
     )
-    if set(keys) - set(instance_evidence):
+    if (
+        set(keys) - set(instance_evidence)
+        or not isinstance(instance_path, str)
+        or not instance_path.startswith("/private/var/db/trading-desk-lima/")
+    ):
         raise BootstrapError("recovery instance evidence keys differ")
-    return {key: instance_evidence[key] for key in keys}
+    return {
+        **{key: instance_evidence[key] for key in keys},
+        "instance_path": instance_path,
+    }
 
 
 def _atomic_receipt(parent: Path, name: str, value: dict[str, Any]) -> tuple[Path, str]:
@@ -3561,7 +3569,9 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
         instance_evidence = _hardened_instance_evidence(
             lock, receipt08, allow_runtime_files=False
         )
-        instance_identity = _recovery_instance_identity(instance_evidence)
+        instance_identity = _recovery_instance_identity(
+            instance_evidence, receipt08["instance_path"]
+        )
         stage = "residual_runtime"
         retained_sudoers = state["quarantine"] / f"first-boot-sudoers-{old_session}"
         sudoers_content = _read_bound(
@@ -3671,10 +3681,10 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
         postmove_instance = _hardened_instance_evidence(
             lock, receipt08, allow_runtime_files=False
         )
-        if any(
-            postmove_instance[key] != value
-            for key, value in instance_identity.items()
-        ):
+        postmove_identity = _recovery_instance_identity(
+            postmove_instance, receipt08["instance_path"]
+        )
+        if postmove_identity != instance_identity:
             raise BootstrapError("postmove instance evidence differs")
         receipt = {
             "automatic_delete_performed": False,

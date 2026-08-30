@@ -436,20 +436,26 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
                     "disk_sha256",
                     "instance_device",
                     "instance_inode",
-                    "instance_path",
                     "plan_sha256",
                     "vz_identifier_sha256",
                 )
             )
         }
+        instance_path = "/private/var/db/trading-desk-lima/trading-desk-router"
         self.assertEqual(
-            set(instance_evidence),
-            set(controller._recovery_instance_identity(instance_evidence)),
+            set(instance_evidence) | {"instance_path"},
+            set(
+                controller._recovery_instance_identity(
+                    instance_evidence, instance_path
+                )
+            ),
         )
         missing_plan = dict(instance_evidence)
         del missing_plan["plan_sha256"]
         with self.assertRaisesRegex(controller.BootstrapError, "keys differ"):
-            controller._recovery_instance_identity(missing_plan)
+            controller._recovery_instance_identity(missing_plan, instance_path)
+        with self.assertRaisesRegex(controller.BootstrapError, "keys differ"):
+            controller._recovery_instance_identity(instance_evidence, "/tmp/instance")
 
         successor_args = SimpleNamespace(
             attest_physical_airgap=True,
