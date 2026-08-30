@@ -545,6 +545,21 @@ def _verify_recovery_xattrs(path: Path, kind: str) -> None:
         raise BootstrapError("recovery provenance differs")
 
 
+def _recovery_instance_identity(instance_evidence: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "cloud_config_sha256",
+        "disk_sha256",
+        "instance_device",
+        "instance_inode",
+        "instance_path",
+        "plan_sha256",
+        "vz_identifier_sha256",
+    )
+    if set(keys) - set(instance_evidence):
+        raise BootstrapError("recovery instance evidence keys differ")
+    return {key: instance_evidence[key] for key in keys}
+
+
 def _atomic_receipt(parent: Path, name: str, value: dict[str, Any]) -> tuple[Path, str]:
     content = _canonical_json(value)
     digest = _sha256_bytes(content)
@@ -3531,29 +3546,22 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             or incident.get("temporary_vmnet_artifacts") is not None
         ):
             raise BootstrapError("prestart incident differs")
-        stage = "stopped"
+        stage = "stopped_no_vm"
         _assert_no_vm_process()
+        stage = "stopped_no_watchdog"
         _assert_no_airgap_watchdog_process()
+        stage = "stopped_no_uid454"
         if _router_uid_processes():
             raise BootstrapError("router process remains")
+        stage = "stopped_limactl_status"
         limactl = _limactl(lock)
         _status(lock, limactl)
+        stage = "stopped_receipt08_instance"
         receipt08 = _hardened_vm_receipt(lock)
         instance_evidence = _hardened_instance_evidence(
             lock, receipt08, allow_runtime_files=False
         )
-        instance_identity = {
-            key: instance_evidence[key]
-            for key in (
-                "cloud_config_sha256",
-                "disk_sha256",
-                "instance_device",
-                "instance_inode",
-                "instance_path",
-                "stored_plan_sha256",
-                "vz_identifier_sha256",
-            )
-        }
+        instance_identity = _recovery_instance_identity(instance_evidence)
         stage = "residual_runtime"
         retained_sudoers = state["quarantine"] / f"first-boot-sudoers-{old_session}"
         sudoers_content = _read_bound(

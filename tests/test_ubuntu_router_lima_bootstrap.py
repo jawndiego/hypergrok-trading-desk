@@ -368,8 +368,14 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             "_hardened_instance_evidence",
             "fresh_session_id",
             "failure_stage=",
+            'stage = "stopped_no_vm"',
+            'stage = "stopped_no_watchdog"',
+            'stage = "stopped_no_uid454"',
+            'stage = "stopped_limactl_status"',
+            'stage = "stopped_receipt08_instance"',
         ):
             self.assertIn(required, recovery_source)
+        self.assertNotIn('"stored_plan_sha256"', recovery_source)
         self.assertNotIn("unlink(", recovery_source)
         generic_cleanup = inspect.getsource(
             _load_module(HOST_APPLY, "bootstrap_apply_cleanup_split_test")._quarantine_vmnet
@@ -421,6 +427,29 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         ):
             controller._verify_recovery_xattrs(probe, "runtime")
             controller._verify_recovery_xattrs(probe, "pidfile")
+
+        instance_evidence = {
+            key: index
+            for index, key in enumerate(
+                (
+                    "cloud_config_sha256",
+                    "disk_sha256",
+                    "instance_device",
+                    "instance_inode",
+                    "instance_path",
+                    "plan_sha256",
+                    "vz_identifier_sha256",
+                )
+            )
+        }
+        self.assertEqual(
+            set(instance_evidence),
+            set(controller._recovery_instance_identity(instance_evidence)),
+        )
+        missing_plan = dict(instance_evidence)
+        del missing_plan["plan_sha256"]
+        with self.assertRaisesRegex(controller.BootstrapError, "keys differ"):
+            controller._recovery_instance_identity(missing_plan)
 
         successor_args = SimpleNamespace(
             attest_physical_airgap=True,
