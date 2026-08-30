@@ -298,6 +298,15 @@ class AirgapWatchdogTests(unittest.TestCase):
             module.WatchdogError, "global_ipv6_selects_utun"
         ):
             module._global_ipv6_unreachable(selected)
+        for returncode in (0, 1):
+            absent = module._canonical_json(
+                {
+                    "returncode": returncode,
+                    "stderr": "route: writing to routing socket: not in table\n",
+                    "stdout": "",
+                }
+            ).decode("utf-8")
+            module._global_ipv6_unreachable(absent)
 
         for safe_nwi in (
             "Network information\nNo network information\n",

@@ -566,6 +566,16 @@ def _global_ipv6_unreachable(content: str) -> None:
         "stdout",
     }:
         raise WatchdogError("global_ipv6_probe_shape")
+    no_route_errors = {
+        "route: route has not been found",
+        "route: writing to routing socket: not in table",
+    }
+    if (
+        value["returncode"] in {0, 1}
+        and value["stdout"] == ""
+        and value["stderr"].strip() in no_route_errors
+    ):
+        return
     if value["returncode"] == 0:
         match = re.search(r"(?m)^\s*interface:\s*(\S+)\s*$", value["stdout"])
         if match and UTUN_INTERFACE_RE.fullmatch(match.group(1)) is not None:
@@ -574,11 +584,7 @@ def _global_ipv6_unreachable(content: str) -> None:
     if (
         value["returncode"] != 1
         or value["stdout"] != ""
-        or value["stderr"].strip()
-        not in {
-            "route: route has not been found",
-            "route: writing to routing socket: not in table",
-        }
+        or value["stderr"].strip() not in no_route_errors
     ):
         raise WatchdogError("global_ipv6_probe_failed")
 
