@@ -373,6 +373,15 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             'stage = "stopped_no_uid454"',
             'stage = "stopped_limactl_status"',
             'stage = "stopped_receipt08_instance"',
+            'stage = "residual_retained_sudoers"',
+            'stage = "residual_runtime_identity"',
+            'stage = "residual_runtime_xattr"',
+            'stage = "residual_socket_acl"',
+            'stage = "residual_socket_xattr"',
+            'stage = "residual_pid_read"',
+            'stage = "residual_pid_xattr"',
+            'stage = "residual_inventory"',
+            'stage = "residual_logs"',
         ):
             self.assertIn(required, recovery_source)
         self.assertNotIn('"stored_plan_sha256"', recovery_source)

@@ -3572,7 +3572,7 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
         instance_identity = _recovery_instance_identity(
             instance_evidence, receipt08["instance_path"]
         )
-        stage = "residual_runtime"
+        stage = "residual_retained_sudoers"
         retained_sudoers = state["quarantine"] / f"first-boot-sudoers-{old_session}"
         sudoers_content = _read_bound(
             retained_sudoers, uid=0, gid=0, mode=0o400, maximum=4096
@@ -3584,18 +3584,25 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             != lock["pins"]["lima_first_boot_sudoers_sha256"]
         ):
             raise BootstrapError("retained sudoers differs")
+        stage = "residual_runtime_identity"
         runtime_current = _recovery_current_path(*moves[0])
         runtime_meta = _assert_real(runtime_current, kind="directory", uid=0, gid=0, mode=0o755)
         if runtime_meta.st_ino != 52264260:
             raise BootstrapError("runtime identity differs")
+        stage = "residual_runtime_xattr"
         _verify_recovery_xattrs(runtime_current, "runtime")
+        stage = "residual_socket_acl"
         socket_path = runtime_current / "socket_vmnet.td-router-ingress"
         socket_meta = socket_path.lstat()
         _no_named_acl(socket_path)
+        stage = "residual_socket_xattr"
         _verify_recovery_xattrs(socket_path, "socket")
+        stage = "residual_pid_read"
         pid_path = runtime_current / "td-router-ingress_socket_vmnet.pid"
         pid_content = _read_bound(pid_path, uid=0, gid=0, mode=0o600, maximum=32)
+        stage = "residual_pid_xattr"
         _verify_recovery_xattrs(pid_path, "pidfile")
+        stage = "residual_inventory"
         if (
             {path.name for path in runtime_current.iterdir()}
             != {socket_path.name, pid_path.name}
@@ -3609,6 +3616,7 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             != "321d9e6141cfc141be8ac517964335701be098e7fe9281737b2f55dec8fc51f8"
         ):
             raise BootstrapError("runtime residual differs")
+        stage = "residual_logs"
         for suffix, inode, size, digest in (
             ("stdout", 52264261, 0, _sha256_bytes(b"")),
             ("stderr", 52264262, 176, "267ee3a87f9118555b35926702a83bfa760dfe2e752b7455fa81521c08f56659"),
