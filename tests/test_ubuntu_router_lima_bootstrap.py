@@ -377,7 +377,6 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             'stage = "residual_runtime_identity"',
             'stage = "residual_runtime_xattr"',
             'stage = "residual_socket_acl"',
-            'stage = "residual_socket_xattr"',
             'stage = "residual_pid_read"',
             'stage = "residual_pid_xattr"',
             'stage = "residual_inventory"',
@@ -497,35 +496,8 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             controller._verify_recovery_xattrs(probe, "pidfile")
             with self.assertRaises(controller.BootstrapError):
                 controller._verify_recovery_xattrs(probe, "runtime")
-        unsupported = OSError(errno.ENOTSUP, "unsupported")
-        with (
-            mock.patch.object(
-                controller,
-                "_darwin_listxattr",
-                return_value=[controller.APPLE_PROVENANCE_NAME],
-            ),
-            mock.patch.object(
-                controller, "_darwin_getxattr", side_effect=unsupported
-            ),
-        ):
-            controller._verify_recovery_xattrs(probe, "socket")
-        with mock.patch.object(controller, "_darwin_listxattr", return_value=[]):
-            with self.assertRaises(controller.BootstrapError):
-                controller._verify_recovery_xattrs(probe, "socket")
-        with (
-            mock.patch.object(
-                controller,
-                "_darwin_listxattr",
-                return_value=[controller.APPLE_PROVENANCE_NAME],
-            ),
-            mock.patch.object(
-                controller,
-                "_darwin_getxattr",
-                return_value=controller.APPLE_PROVENANCE_VALUE,
-            ),
-            self.assertRaises(controller.BootstrapError),
-        ):
-            controller._verify_recovery_xattrs(probe, "socket")
+        recovery_source = inspect.getsource(controller._recover_failed_prestart)
+        self.assertNotIn('_verify_recovery_xattrs(socket_path, "socket")', recovery_source)
         with (
             mock.patch.object(
                 controller,

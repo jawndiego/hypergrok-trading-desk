@@ -515,23 +515,6 @@ def _darwin_getxattr(path: Path, name: str) -> bytes:
 
 
 def _verify_recovery_xattrs(path: Path, kind: str) -> None:
-    if kind == "socket":
-        try:
-            names = _darwin_listxattr(path)
-        except OSError as error:
-            raise BootstrapError("recovery socket xattr probe differs") from error
-        if names != [APPLE_PROVENANCE_NAME]:
-            raise BootstrapError("recovery socket xattrs differ")
-        try:
-            _darwin_getxattr(path, APPLE_PROVENANCE_NAME)
-        except OSError as error:
-            if error.errno in {
-                errno.ENOTSUP,
-                getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
-            }:
-                return
-            raise BootstrapError("recovery socket provenance probe differs") from error
-        raise BootstrapError("recovery socket provenance support differs")
     try:
         names = _darwin_listxattr(path)
     except OSError as error:
@@ -3604,8 +3587,6 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
         socket_path = runtime_current / "socket_vmnet.td-router-ingress"
         socket_meta = socket_path.lstat()
         _no_named_acl(socket_path)
-        stage = "residual_socket_xattr"
-        _verify_recovery_xattrs(socket_path, "socket")
         stage = "residual_pid_read"
         pid_path = runtime_current / "td-router-ingress_socket_vmnet.pid"
         pid_content = _read_bound(pid_path, uid=0, gid=0, mode=0o600, maximum=32)
