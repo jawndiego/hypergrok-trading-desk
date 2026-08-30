@@ -31,6 +31,11 @@ Hardware-lock schema (all keys are exact)::
     "passive_interfaces": [
       {"interface": "anpi0", "status": "inactive", "up": true}
     ],
+    "inert_utun_interfaces": [
+      {"interface": "utun0", "flags": ["MULTICAST", "POINTOPOINT", "RUNNING", "UP"],
+       "mtu": 1380, "status": null, "ipv4_addresses": [],
+       "ipv6_link_local_addresses": ["fe80::1"]}
+    ],
     "wifi_interfaces": ["en0"],
     "route_topology_sha256": {"ipv4": "...", "ipv6": "..."},
     "nwi_sha256": "...",
@@ -106,6 +111,8 @@ ROUTER_GUEST_IPV6_LINK_LOCAL = ipaddress.ip_address("fe80::74:64ff:fe00:1")
 ROUTER_GUEST_MAC = "02:74:64:00:00:01"
 SESSION_RE = re.compile(r"[0-9a-f]{64}")
 INTERFACE_RE = re.compile(r"[a-z][a-z0-9]{0,14}")
+UTUN_INTERFACE_RE = re.compile(r"utun[0-9]{1,3}")
+INERT_UTUN_FLAGS = ["MULTICAST", "POINTOPOINT", "RUNNING", "UP"]
 MAC_RE = re.compile(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 MAX_SAMPLE_GAP_NS = 250_000_000
@@ -466,10 +473,21 @@ def _is_host_only_neighbor_route(fields: list[str]) -> bool:
 
 
 def _canonical_routes(
-    content: str, *, ignore_host_only_neighbors: bool = False
+    content: str,
+    *,
+    ignore_host_only_neighbors: bool = False,
+    inert_utun_interfaces: list[dict[str, Any]] | None = None,
 ) -> tuple[str, bool]:
     entries: list[str] = []
     default_present = False
+    inert_utuns = {
+        item["interface"]: item for item in (inert_utun_interfaces or [])
+    }
+    expected_utun_defaults = {
+        ("default", f"fe80::%{item['interface']}", "UGcIg", item["interface"])
+        for item in (inert_utun_interfaces or [])
+    }
+    observed_utun_defaults: list[tuple[str, str, str, str]] = []
     for line in content.splitlines():
         fields = line.split()
         if not fields or fields[0] in {
@@ -484,9 +502,34 @@ def _canonical_routes(
         if ignore_host_only_neighbors and _is_host_only_neighbor_route(fields):
             continue
         destination, gateway, flags, interface = fields[:4]
+        if UTUN_INTERFACE_RE.fullmatch(interface) is not None:
+            if interface not in inert_utuns:
+                raise WatchdogError("unexpected_utun_route")
+            address = inert_utuns[interface]["ipv6_link_local_addresses"][0]
+            allowed_nondefault = {
+                (f"fe80::%{interface}/64", f"{address}%{interface}", "UcI"),
+                ("ff00::/8", f"{address}%{interface}", "UmCI"),
+                (f"ff01::%{interface}/32", f"{address}%{interface}", "UmCI"),
+                (f"ff02::%{interface}/32", f"{address}%{interface}", "UmCI"),
+            }
+            if destination != "default" and (
+                destination,
+                gateway,
+                flags,
+            ) not in allowed_nondefault:
+                raise WatchdogError("inert_utun_route_drift")
         if destination == "default":
-            default_present = True
+            route = (destination, gateway, flags, interface)
+            if route in expected_utun_defaults:
+                observed_utun_defaults.append(route)
+            else:
+                default_present = True
         entries.append("|".join((destination, gateway, flags, interface)))
+    if (
+        set(observed_utun_defaults) != expected_utun_defaults
+        or len(observed_utun_defaults) != len(expected_utun_defaults)
+    ):
+        raise WatchdogError("inert_utun_default_routes_differ")
     canonical = "\n".join(sorted(entries)) + ("\n" if entries else "")
     return _sha256_bytes(canonical.encode("utf-8")), default_present
 
@@ -512,6 +555,122 @@ def _normalize_text(content: str) -> str:
     return "\n".join(line.rstrip() for line in content.strip().splitlines()) + "\n"
 
 
+def _global_ipv6_unreachable(content: str) -> None:
+    try:
+        value = json.loads(content, object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise WatchdogError("global_ipv6_probe_shape") from error
+    if not isinstance(value, dict) or set(value) != {
+        "returncode",
+        "stderr",
+        "stdout",
+    }:
+        raise WatchdogError("global_ipv6_probe_shape")
+    if value["returncode"] == 0:
+        match = re.search(r"(?m)^\s*interface:\s*(\S+)\s*$", value["stdout"])
+        if match and UTUN_INTERFACE_RE.fullmatch(match.group(1)) is not None:
+            raise WatchdogError("global_ipv6_selects_utun")
+        raise WatchdogError("global_ipv6_route_present")
+    if (
+        value["returncode"] != 1
+        or value["stdout"] != ""
+        or value["stderr"].strip()
+        not in {
+            "route: route has not been found",
+            "route: writing to routing socket: not in table",
+        }
+    ):
+        raise WatchdogError("global_ipv6_probe_failed")
+
+
+def _nwi_unreachable(content: str, *, allow_host_only: bool = False) -> None:
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if not lines or lines[0] != "Network information":
+        raise WatchdogError("nwi_output_shape")
+    if lines == ["Network information", "No network information"]:
+        return
+    allowed_headers = {
+        "IPv4 network interface information",
+        "IPv6 network interface information",
+    }
+    no_network_shape = (
+        sum(line == "No network interfaces" for line in lines) != 2
+        or sum(line in allowed_headers for line in lines) != 2
+        or {line for line in lines if line in allowed_headers} != allowed_headers
+        or "Network interfaces:" not in lines
+        or any(
+            line not in allowed_headers
+            and line
+            not in {
+                "Network information",
+                "Network interfaces:",
+                "No network interfaces",
+                "REACH : flags 0x00000000 (Not Reachable)",
+            }
+            for line in lines
+        )
+    )
+    if not no_network_shape:
+        return
+    if not allow_host_only or "DNS" in content:
+        raise WatchdogError("nwi_reachable_interface_present")
+
+    interface_lines = [
+        match
+        for line in lines
+        if (
+            match := re.fullmatch(
+                r"([a-z][a-z0-9]{0,14})\s*:\s*flags\s*:\s*"
+                r"0x[0-9a-fA-F]+\s*\(([^)]*)\)",
+                line,
+            )
+        )
+    ]
+    address_matches = [
+        match
+        for line in lines
+        if (match := re.fullmatch(r"address\s*:\s*(\S+)", line))
+    ]
+    addresses = [match.group(1) for match in address_matches]
+    final_matches = [
+        match
+        for line in lines
+        if (match := re.fullmatch(r"Network interfaces:\s*(.*)", line))
+    ]
+    final_interfaces = [match.group(1).strip() for match in final_matches]
+    reach_lines = [
+        line
+        for line in lines
+        if re.fullmatch(
+            r"(?:reach\s*:|REACH\s*:\s*flags)\s*"
+            r"0x[0-9a-fA-F]+\s*\([^)]*\)",
+            line,
+            flags=re.IGNORECASE,
+        )
+    ]
+    recognized = {
+        "Network information",
+        *allowed_headers,
+        "No network interfaces",
+        *[match.group(0) for match in interface_lines],
+        *[match.group(0) for match in address_matches],
+        *reach_lines,
+        *[match.group(0) for match in final_matches],
+    }
+    if (
+        len(interface_lines) != 1
+        or interface_lines[0].group(1) != "bridge100"
+        or interface_lines[0].group(2) != "IPv4"
+        or addresses != ["192.168.106.1"]
+        or final_interfaces != ["bridge100"]
+        or not reach_lines
+        or sum(line == "No network interfaces" for line in lines) != 1
+        or {line for line in lines if line in allowed_headers} != allowed_headers
+        or any(line not in recognized for line in lines)
+    ):
+        raise WatchdogError("nwi_host_only_shape")
+
+
 def _parse_ifconfig(content: str) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     current: str | None = None
@@ -524,7 +683,10 @@ def _parse_ifconfig(content: str) -> dict[str, dict[str, Any]]:
             if current in result:
                 raise WatchdogError("interface_duplicate")
             flags = {item.strip() for item in header.group(2).split(",")}
+            mtu_match = re.search(r"(?:^|\s)mtu ([0-9]+)(?:\s|$)", line)
             result[current] = {
+                "flags": sorted(flags),
+                "mtu": int(mtu_match.group(1)) if mtu_match else None,
                 "up": "UP" in flags,
                 "status": None,
                 "ipv4": [],
@@ -547,6 +709,52 @@ def _parse_ifconfig(content: str) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _inert_utun_contract(value: object, label: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise WatchdogError(f"{label}_inert_utun_interfaces")
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {
+                "flags",
+                "interface",
+                "ipv4_addresses",
+                "ipv6_link_local_addresses",
+                "mtu",
+                "status",
+            }
+            or not isinstance(item.get("interface"), str)
+            or UTUN_INTERFACE_RE.fullmatch(item["interface"]) is None
+            or item.get("flags") != INERT_UTUN_FLAGS
+            or not isinstance(item.get("mtu"), int)
+            or isinstance(item.get("mtu"), bool)
+            or not 576 <= item["mtu"] <= 9000
+            or item.get("status") is not None
+            or item.get("ipv4_addresses") != []
+            or not isinstance(item.get("ipv6_link_local_addresses"), list)
+            or len(item["ipv6_link_local_addresses"]) != 1
+            or not isinstance(item["ipv6_link_local_addresses"][0], str)
+        ):
+            raise WatchdogError(f"{label}_inert_utun_interfaces")
+        address_text = item["ipv6_link_local_addresses"][0]
+        try:
+            address = ipaddress.ip_address(address_text)
+        except ValueError as error:
+            raise WatchdogError(f"{label}_inert_utun_interfaces") from error
+        if (
+            address.version != 6
+            or not address.is_link_local
+            or str(address) != address_text
+        ):
+            raise WatchdogError(f"{label}_inert_utun_interfaces")
+        result.append(dict(item))
+    if len({item["interface"] for item in result}) != len(result):
+        raise WatchdogError(f"{label}_inert_utun_interface_duplicate")
+    return sorted(result, key=lambda item: item["interface"])
+
+
 def _load_hardware_profile() -> tuple[dict[str, Any], str]:
     content = _safe_root_file(HARDWARE_PROFILE, 0o400)
     try:
@@ -561,6 +769,7 @@ def _load_hardware_profile() -> tuple[dict[str, Any], str]:
             "kind",
             "host",
             "hardware_ports",
+            "inert_utun_interfaces",
             "network_services",
             "passive_interfaces",
             "host_only",
@@ -627,6 +836,14 @@ def _load_hardware_profile() -> tuple[dict[str, Any], str]:
         or set(passive_names) & {item["device"] for item in ports}
     ):
         raise WatchdogError("hardware_profile_passive_interface_duplicate")
+    inert_utuns = _inert_utun_contract(
+        value.get("inert_utun_interfaces"), "hardware_profile"
+    )
+    inert_names = {item["interface"] for item in inert_utuns}
+    if inert_names & (
+        set(passive_names) | {item["device"] for item in ports}
+    ):
+        raise WatchdogError("hardware_profile_inert_utun_overlap")
     host_only = value.get("host_only")
     if (
         not isinstance(host_only, dict)
@@ -636,6 +853,7 @@ def _load_hardware_profile() -> tuple[dict[str, Any], str]:
         or INTERFACE_RE.fullmatch(host_only["interface"]) is None
         or host_only["interface"] in {item["device"] for item in ports}
         or host_only["interface"] in passive_names
+        or host_only["interface"] in inert_names
     ):
         raise WatchdogError("hardware_profile_host_only")
     value["hardware_ports"] = sorted(ports, key=lambda item: item["device"])
@@ -643,6 +861,7 @@ def _load_hardware_profile() -> tuple[dict[str, Any], str]:
     value["passive_interfaces"] = sorted(
         passive, key=lambda item: item["interface"]
     )
+    value["inert_utun_interfaces"] = inert_utuns
     return value, _sha256_bytes(content)
 
 
@@ -659,6 +878,7 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
         "hardware_profile_sha256",
         "host",
         "hardware_ports",
+        "inert_utun_interfaces",
         "network_services",
         "passive_interfaces",
         "wifi_interfaces",
@@ -737,6 +957,14 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
         or set(passive_names) & {item["device"] for item in normalized_ports}
     ):
         raise WatchdogError("hardware_lock_passive_interface_duplicate")
+    inert_utuns = _inert_utun_contract(
+        value.get("inert_utun_interfaces"), "hardware_lock"
+    )
+    inert_names = {item["interface"] for item in inert_utuns}
+    if inert_names & (
+        set(passive_names) | {item["device"] for item in normalized_ports}
+    ):
+        raise WatchdogError("hardware_lock_inert_utun_overlap")
     wifi = value.get("wifi_interfaces")
     expected_wifi = sorted(
         item["device"] for item in normalized_ports if item["kind"] == "wifi"
@@ -764,6 +992,7 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
             INTERFACE_RE.fullmatch(host_only["interface"]) is None
             or host_only["interface"] in {item["device"] for item in normalized_ports}
             or host_only["interface"] in passive_names
+            or host_only["interface"] in inert_names
             or host_only["ipv4_cidr"] != "192.168.106.1/24"
             or host_only["ipv4_addresses"] != ["192.168.106.1"]
             or not isinstance(host_only["ipv6_link_local_addresses"], list)
@@ -794,6 +1023,7 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
     value["passive_interfaces"] = sorted(
         passive, key=lambda item: item["interface"]
     )
+    value["inert_utun_interfaces"] = inert_utuns
     profile, profile_sha256 = _load_hardware_profile()
     if (
         value.get("hardware_profile_sha256") != profile_sha256
@@ -808,6 +1038,8 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
             if item["kind"] == "wifi"
         )
         or value["passive_interfaces"] != profile["passive_interfaces"]
+        or value["inert_utun_interfaces"]
+        != profile["inert_utun_interfaces"]
         or value["host_only"] is None
         or value["host_only"]["interface"]
         != profile["host_only"]["interface"]
@@ -829,6 +1061,13 @@ def _command_map(lock: dict[str, Any]) -> dict[str, list[str]]:
         "vpn": ["/usr/sbin/scutil", "--nc", "list"],
         "forward4": ["/usr/sbin/sysctl", "-n", "net.inet.ip.forwarding"],
         "forward6": ["/usr/sbin/sysctl", "-n", "net.inet6.ip6.forwarding"],
+        "global6": [
+            "/sbin/route",
+            "-n",
+            "get",
+            "-inet6",
+            "2606:4700:4700::1111",
+        ],
         "processes": ["/bin/ps", "-axo", "uid=,comm="],
     }
     for interface in lock["wifi_interfaces"]:
@@ -886,6 +1125,15 @@ def _run_snapshot_commands(lock: dict[str, Any]) -> dict[str, str]:
         for future in as_completed(futures):
             name = futures[future]
             returncode, stdout, stderr = future.result()
+            if name == "global6":
+                outputs[name] = _canonical_json(
+                    {
+                        "returncode": returncode,
+                        "stderr": stderr,
+                        "stdout": stdout,
+                    }
+                ).decode("utf-8")
+                continue
             if returncode != 0 or stderr:
                 raise WatchdogError(f"local_command_failed_{name.split(':', 1)[0]}")
             outputs[name] = stdout
@@ -903,6 +1151,13 @@ def _run_core_snapshot_commands() -> dict[str, str]:
         "vpn": ["/usr/sbin/scutil", "--nc", "list"],
         "forward4": ["/usr/sbin/sysctl", "-n", "net.inet.ip.forwarding"],
         "forward6": ["/usr/sbin/sysctl", "-n", "net.inet6.ip6.forwarding"],
+        "global6": [
+            "/sbin/route",
+            "-n",
+            "get",
+            "-inet6",
+            "2606:4700:4700::1111",
+        ],
         "processes": ["/bin/ps", "-axo", "uid=,comm="],
     }
     outputs: dict[str, str] = {}
@@ -914,6 +1169,15 @@ def _run_core_snapshot_commands() -> dict[str, str]:
         for future in as_completed(futures):
             name = futures[future]
             returncode, stdout, stderr = future.result()
+            if name == "global6":
+                outputs[name] = _canonical_json(
+                    {
+                        "returncode": returncode,
+                        "stderr": stderr,
+                        "stdout": stdout,
+                    }
+                ).decode("utf-8")
+                continue
             if returncode != 0 or stderr:
                 raise WatchdogError(f"capture_command_failed_{name}")
             outputs[name] = stdout
@@ -986,11 +1250,28 @@ def _validate_addresses(
             or interfaces[name]["ipv6"]
         ):
             raise WatchdogError("passive_interface_drift")
+    inert_utuns = {
+        item["interface"]: item for item in lock["inert_utun_interfaces"]
+    }
+    for name, expected in inert_utuns.items():
+        value = interfaces.get(name)
+        if (
+            value is None
+            or value["flags"] != expected["flags"]
+            or value["mtu"] != expected["mtu"]
+            or value["status"] is not expected["status"]
+            or value["ipv4"] != expected["ipv4_addresses"]
+            or sorted(value["ipv6"])
+            != expected["ipv6_link_local_addresses"]
+        ):
+            raise WatchdogError("inert_utun_interface_drift")
     host_only = lock["host_only"] if allow_host_only else None
     host_only_observed = False
     for name, value in interfaces.items():
-        if name == "lo0" or name in hardware or name in passive:
+        if name == "lo0" or name in hardware or name in passive or name in inert_utuns:
             continue
+        if UTUN_INTERFACE_RE.fullmatch(name) is not None:
+            raise WatchdogError("unexpected_utun_interface")
         if host_only is not None and name == host_only["interface"]:
             if (
                 not value["up"]
@@ -1015,6 +1296,8 @@ def _validate_addresses(
 def _sample(lock: dict[str, Any], *, allow_host_only: bool) -> dict[str, Any]:
     started = time.monotonic_ns()
     outputs = _run_snapshot_commands(lock)
+    _global_ipv6_unreachable(outputs["global6"])
+    _nwi_unreachable(outputs["nwi"], allow_host_only=allow_host_only)
     observed_ports = _parse_hardware_ports(outputs["hardware"])
     locked_ports = [
         {
@@ -1040,7 +1323,9 @@ def _sample(lock: dict[str, Any], *, allow_host_only: bool) -> dict[str, Any]:
         outputs["routes4"], ignore_host_only_neighbors=allow_host_only
     )
     route6, default6 = _canonical_routes(
-        outputs["routes6"], ignore_host_only_neighbors=allow_host_only
+        outputs["routes6"],
+        ignore_host_only_neighbors=allow_host_only,
+        inert_utun_interfaces=lock["inert_utun_interfaces"],
     )
     if default4 or default6:
         raise WatchdogError("default_route_present")
@@ -1107,7 +1392,11 @@ def _candidate_from_outputs(
     profile_sha256: str,
     session_id: str,
     outputs: dict[str, str],
+    *,
+    allow_host_only: bool = False,
 ) -> dict[str, Any]:
+    _global_ipv6_unreachable(outputs["global6"])
+    _nwi_unreachable(outputs["nwi"], allow_host_only=allow_host_only)
     observed_ports = _parse_hardware_ports(outputs["hardware"])
     expected_ports = [
         {
@@ -1126,7 +1415,10 @@ def _candidate_from_outputs(
     ):
         raise WatchdogError("capture_network_services_not_disabled")
     route4, default4 = _canonical_routes(outputs["routes4"])
-    route6, default6 = _canonical_routes(outputs["routes6"])
+    route6, default6 = _canonical_routes(
+        outputs["routes6"],
+        inert_utun_interfaces=profile["inert_utun_interfaces"],
+    )
     if default4 or default6:
         raise WatchdogError("capture_default_route_present")
     return {
@@ -1136,6 +1428,9 @@ def _candidate_from_outputs(
         "hardware_profile_sha256": profile_sha256,
         "host": dict(profile["host"]),
         "hardware_ports": [dict(item) for item in profile["hardware_ports"]],
+        "inert_utun_interfaces": [
+            dict(item) for item in profile["inert_utun_interfaces"]
+        ],
         "network_services": services,
         "passive_interfaces": [
             dict(item) for item in profile["passive_interfaces"]
@@ -1218,6 +1513,7 @@ def _capture_host_only(session_id: str) -> tuple[Path, str]:
             "hardware_profile_sha256",
             "host",
             "hardware_ports",
+            "inert_utun_interfaces",
             "network_services",
             "passive_interfaces",
             "wifi_interfaces",
@@ -1245,13 +1541,18 @@ def _capture_host_only(session_id: str) -> tuple[Path, str]:
         raise WatchdogError("base_capture_candidate_drift")
     outputs = _run_core_snapshot_commands()
     refreshed = _candidate_from_outputs(
-        profile, profile_sha256, session_id, outputs
+        profile,
+        profile_sha256,
+        session_id,
+        outputs,
+        allow_host_only=True,
     )
     if any(
         refreshed[key] != candidate[key]
         for key in (
             "host",
             "hardware_ports",
+            "inert_utun_interfaces",
             "network_services",
             "passive_interfaces",
             "wifi_interfaces",
@@ -1270,7 +1571,9 @@ def _capture_host_only(session_id: str) -> tuple[Path, str]:
         outputs["routes4"], ignore_host_only_neighbors=True
     )
     route6, default6 = _canonical_routes(
-        outputs["routes6"], ignore_host_only_neighbors=True
+        outputs["routes6"],
+        ignore_host_only_neighbors=True,
+        inert_utun_interfaces=candidate["inert_utun_interfaces"],
     )
     if default4 or default6:
         raise WatchdogError("host_only_capture_default_route")

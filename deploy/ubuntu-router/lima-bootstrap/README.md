@@ -26,7 +26,12 @@ python3 scripts/render_ubuntu_router_bootstrap.py \
 ```
 
 The real profile is host-local and ignored by Git because it contains interface
-MAC addresses. The committed `.example` is not a usable profile.
+MAC addresses and exact inert-utun link-local identities. The committed
+`.example` is not a usable profile. Profiled inert utuns do not authorize
+Internet reachability: only their exact scoped IPv6 defaults are accepted,
+and the global IPv6 route/NWI probes must still prove no externally reachable
+interface. During the host-only phase, only exact local `bridge100`
+reachability at `192.168.106.1` is permitted.
 
 Do not start the replacement manually. From a local Terminal—not SSH, tmux or
 screen—disable all network services, turn Wi-Fi off, physically disconnect

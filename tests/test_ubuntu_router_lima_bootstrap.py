@@ -269,6 +269,21 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
                             "interface": "bridge100",
                             "ipv4_cidr": "192.168.106.1/24",
                         },
+                        "inert_utun_interfaces": [
+                            {
+                                "flags": [
+                                    "MULTICAST",
+                                    "POINTOPOINT",
+                                    "RUNNING",
+                                    "UP",
+                                ],
+                                "interface": "utun0",
+                                "ipv4_addresses": [],
+                                "ipv6_link_local_addresses": ["fe80::1234"],
+                                "mtu": 1380,
+                                "status": None,
+                            }
+                        ],
                         "kind": "trading-desk.router-bootstrap.airgap-hardware-profile",
                         "network_services": ["Ethernet", "Wi-Fi"],
                         "passive_interfaces": [

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -205,6 +206,7 @@ def _validate_hardware_profile(content: bytes) -> dict[str, Any]:
             "hardware_ports",
             "host",
             "host_only",
+            "inert_utun_interfaces",
             "kind",
             "network_services",
             "passive_interfaces",
@@ -269,10 +271,56 @@ def _validate_hardware_profile(content: bytes) -> dict[str, Any]:
         for item in passive
     ):
         raise ValueError("air-gap passive-interface profile differs")
+    inert_utuns = profile.get("inert_utun_interfaces")
+    inert_flags = ["MULTICAST", "POINTOPOINT", "RUNNING", "UP"]
+    if not isinstance(inert_utuns, list):
+        raise ValueError("air-gap inert-utun profile differs")
+    for item in inert_utuns:
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {
+                "flags",
+                "interface",
+                "ipv4_addresses",
+                "ipv6_link_local_addresses",
+                "mtu",
+                "status",
+            }
+            or re.fullmatch(r"utun[0-9]{1,3}", item.get("interface", "")) is None
+            or item.get("flags") != inert_flags
+            or not isinstance(item.get("mtu"), int)
+            or isinstance(item.get("mtu"), bool)
+            or not 576 <= item["mtu"] <= 9000
+            or item.get("status") is not None
+            or item.get("ipv4_addresses") != []
+            or not isinstance(item.get("ipv6_link_local_addresses"), list)
+            or len(item["ipv6_link_local_addresses"]) != 1
+        ):
+            raise ValueError("air-gap inert-utun profile differs")
+        try:
+            address = ipaddress.ip_address(item["ipv6_link_local_addresses"][0])
+        except (TypeError, ValueError) as error:
+            raise ValueError("air-gap inert-utun profile differs") from error
+        if (
+            address.version != 6
+            or not address.is_link_local
+            or str(address) != item["ipv6_link_local_addresses"][0]
+        ):
+            raise ValueError("air-gap inert-utun profile differs")
+    inert_names = [item["interface"] for item in inert_utuns]
+    passive_names = [item["interface"] for item in passive]
+    if (
+        len(set(inert_names)) != len(inert_names)
+        or set(inert_names) & set(passive_names)
+        or set(inert_names) & {item["device"] for item in ports}
+    ):
+        raise ValueError("air-gap inert-utun profile overlaps")
     host_only = profile.get("host_only")
     if (
         not isinstance(host_only, dict)
         or host_only != {"interface": "bridge100", "ipv4_cidr": "192.168.106.1/24"}
+        or host_only["interface"] in inert_names
     ):
         raise ValueError("air-gap host-only profile differs")
     return profile

@@ -33,6 +33,16 @@ def _load():
 
 
 def _fixtures(module):
+    inert_utuns = [
+        {
+            "flags": ["MULTICAST", "POINTOPOINT", "RUNNING", "UP"],
+            "interface": "utun0",
+            "ipv4_addresses": [],
+            "ipv6_link_local_addresses": ["fe80::1234"],
+            "mtu": 1380,
+            "status": None,
+        }
+    ]
     hardware = """Hardware Port: Wi-Fi
 Device: en0
 Ethernet Address: aa:bb:cc:dd:ee:01
@@ -61,10 +71,17 @@ Internet6:
 Destination                             Gateway                         Flags         Netif Expire
 ::1                                     ::1                             UHL             lo0
 fe80::%lo0/64                           fe80::1%lo0                     UcI             lo0
+default                                 fe80::%utun0                    UGcIg           utun0
+fe80::%utun0/64                         fe80::1234%utun0                UcI             utun0
+ff00::/8                                fe80::1234%utun0                UmCI            utun0
+ff01::%utun0/32                         fe80::1234%utun0                UmCI            utun0
+ff02::%utun0/32                         fe80::1234%utun0                UmCI            utun0
 """
     nwi = "Network information\nNo network information\n"
     route4_hash, _ = module._canonical_routes(routes4)
-    route6_hash, _ = module._canonical_routes(routes6)
+    route6_hash, _ = module._canonical_routes(
+        routes6, inert_utun_interfaces=inert_utuns
+    )
     lock = {
         "schema_version": 1,
         "kind": "trading-desk.router-bootstrap.airgap-hardware",
@@ -89,6 +106,7 @@ fe80::%lo0/64                           fe80::1%lo0                     UcI     
                 "kind": "ethernet",
             },
         ],
+        "inert_utun_interfaces": inert_utuns,
         "network_services": [
             {"name": "Ethernet", "enabled": False},
             {"name": "Wi-Fi", "enabled": False},
@@ -119,6 +137,8 @@ en1: flags=8863<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST>
 \tstatus: inactive
 anpi0: flags=8863<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST>
 \tstatus: inactive
+utun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380
+\tinet6 fe80::1234%utun0 prefixlen 64 scopeid 0x14
 """,
         "routes4": routes4,
         "routes6": routes6,
@@ -126,6 +146,13 @@ anpi0: flags=8863<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST>
         "vpn": "Available network connection services in the current set (*=enabled):\n",
         "forward4": "0\n",
         "forward6": "0\n",
+        "global6": module._canonical_json(
+            {
+                "returncode": 1,
+                "stderr": "route: writing to routing socket: not in table\n",
+                "stdout": "",
+            }
+        ).decode("utf-8"),
         "processes": "  0 /sbin/launchd /sbin/launchd\n",
         "wifi:en0": "Wi-Fi Power (en0): Off\n",
         "service:Ethernet": "Disabled\n",
@@ -142,12 +169,14 @@ class AirgapWatchdogTests(unittest.TestCase):
             "REVIEW_PASSIVE_INTERFACE",
             template["passive_interfaces"][0]["interface"],
         )
+        self.assertEqual("utun0", template["inert_utun_interfaces"][0]["interface"])
         lock, _ = _fixtures(module)
         valid = {
             "schema_version": 1,
             "kind": "trading-desk.router-bootstrap.airgap-hardware-profile",
             "host": lock["host"],
             "hardware_ports": lock["hardware_ports"],
+            "inert_utun_interfaces": lock["inert_utun_interfaces"],
             "network_services": ["Ethernet", "Wi-Fi"],
             "passive_interfaces": lock["passive_interfaces"],
             "host_only": {
@@ -216,6 +245,103 @@ class AirgapWatchdogTests(unittest.TestCase):
         ):
             module._sample(lock, allow_host_only=False)
 
+    def test_inert_utun_contract_is_exact_and_never_global_reachable(self) -> None:
+        module = _load()
+        lock, outputs = _fixtures(module)
+        _, default_present = module._canonical_routes(
+            outputs["routes6"],
+            inert_utun_interfaces=lock["inert_utun_interfaces"],
+        )
+        self.assertFalse(default_present)
+
+        for old, new in (
+            ("UP,POINTOPOINT,RUNNING,MULTICAST", "UP,POINTOPOINT,MULTICAST"),
+            ("mtu 1380", "mtu 1400"),
+            ("fe80::1234%utun0", "fe80::1235%utun0"),
+        ):
+            with self.subTest(new=new):
+                changed = dict(outputs)
+                changed["ifconfig"] = outputs["ifconfig"].replace(old, new)
+                with (
+                    mock.patch.object(
+                        module, "_run_snapshot_commands", return_value=changed
+                    ),
+                    mock.patch.object(
+                        module, "NAT_PLIST", Path("/nonexistent/nat.plist")
+                    ),
+                    self.assertRaisesRegex(
+                        module.WatchdogError, "inert_utun_interface_drift"
+                    ),
+                ):
+                    module._sample(lock, allow_host_only=False)
+
+        for appended in (
+            "default fe80::%utun0 UGcIg utun0\n",
+            "2001:db8::/32 fe80::1234%utun0 UcI utun0\n",
+            "default fe80::%utun9 UGcIg utun9\n",
+        ):
+            with self.subTest(route=appended.strip()):
+                with self.assertRaises(module.WatchdogError):
+                    module._canonical_routes(
+                        outputs["routes6"] + appended,
+                        inert_utun_interfaces=lock["inert_utun_interfaces"],
+                    )
+
+        selected = module._canonical_json(
+            {
+                "returncode": 0,
+                "stderr": "",
+                "stdout": "   interface: utun0\n",
+            }
+        ).decode("utf-8")
+        with self.assertRaisesRegex(
+            module.WatchdogError, "global_ipv6_selects_utun"
+        ):
+            module._global_ipv6_unreachable(selected)
+
+        for safe_nwi in (
+            "Network information\nNo network information\n",
+            """Network information
+
+IPv4 network interface information
+  No network interfaces
+IPv6 network interface information
+  No network interfaces
+REACH : flags 0x00000000 (Not Reachable)
+Network interfaces:
+""",
+        ):
+            module._nwi_unreachable(safe_nwi)
+            module._nwi_unreachable(safe_nwi, allow_host_only=True)
+        host_only_nwi = """Network information
+IPv4 network interface information
+bridge100 : flags : 0x1 (IPv4)
+address : 192.168.106.1
+reach : 0x00000002 (Reachable)
+IPv6 network interface information
+No network interfaces
+REACH : flags 0x00000002 (Reachable)
+Network interfaces: bridge100
+"""
+        module._nwi_unreachable(host_only_nwi, allow_host_only=True)
+        with self.assertRaises(module.WatchdogError):
+            module._nwi_unreachable(host_only_nwi)
+        for unsafe_host_nwi in (
+            host_only_nwi.replace("bridge100", "utun0"),
+            host_only_nwi.replace("bridge100", "en0"),
+            host_only_nwi.replace("192.168.106.1", "2001:db8::1"),
+        ):
+            with self.assertRaises(module.WatchdogError):
+                module._nwi_unreachable(
+                    unsafe_host_nwi, allow_host_only=True
+                )
+        for reachable_nwi in (
+            "Network information\nNetwork interfaces: utun0\n",
+            "Network information\nREACH : flags 0x00000002 (Reachable)\n",
+        ):
+            with self.assertRaises(module.WatchdogError):
+                module._nwi_unreachable(reachable_nwi)
+
         link_local_peer = dict(outputs)
         link_local_peer["ifconfig"] += (
             "utun9: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST>\n"
@@ -229,7 +355,7 @@ class AirgapWatchdogTests(unittest.TestCase):
                 module, "NAT_PLIST", Path("/nonexistent/nat.plist")
             ),
             self.assertRaisesRegex(
-                module.WatchdogError, "unexpected_active_interface"
+                module.WatchdogError, "unexpected_utun_interface"
             ),
         ):
             module._sample(lock, allow_host_only=False)
@@ -366,6 +492,7 @@ class AirgapWatchdogTests(unittest.TestCase):
             "kind": "trading-desk.router-bootstrap.airgap-hardware-profile",
             "host": lock["host"],
             "hardware_ports": lock["hardware_ports"],
+            "inert_utun_interfaces": lock["inert_utun_interfaces"],
             "network_services": ["Ethernet", "Wi-Fi"],
             "passive_interfaces": lock["passive_interfaces"],
             "host_only": {
@@ -406,6 +533,16 @@ class AirgapWatchdogTests(unittest.TestCase):
             "\tstatus: active\n"
         )
         host_outputs["routes4"] += "192.168.106/24 link#20 UCS bridge100\n"
+        host_outputs["nwi"] = """Network information
+IPv4 network interface information
+bridge100 : flags : 0x1 (IPv4)
+address : 192.168.106.1
+reach : 0x00000002 (Reachable)
+IPv6 network interface information
+No network interfaces
+REACH : flags 0x00000002 (Reachable)
+Network interfaces: bridge100
+"""
         captured.clear()
         with (
             mock.patch.object(module, "_read_base_capture", return_value=base),

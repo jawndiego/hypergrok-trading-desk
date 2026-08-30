@@ -316,6 +316,16 @@ full-syncs and hashes the resulting disk, proves all UID-454/VM processes are
 gone, and quarantines the temporary sudoers/runtime paths. Any uncertainty is
 retained as `UNKNOWN` with no automatic retry.
 
+The gitignored hardware profile may bind machine-owned inert `utun` devices,
+but only by their complete exact name set, MTU, UP/point-to-point/running/
+multicast flags, absent status/IPv4 and one scoped link-local IPv6 address.
+Only the matching `default fe80::%utunN UGcIg utunN` IPv6 rows are treated as
+scoped defaults; they remain in the topology hash. IPv4 defaults, global utun
+routes, an unprofiled utun, any externally reachable `scutil --nwi` interface,
+or a global IPv6 route lookup selecting any interface still aborts the
+air-gap. Only exact local `bridge100` reachability at `192.168.106.1` is
+permitted during the host-only phase.
+
 The cycle's 13-tool ACL/network/process/privilege allowlist is bound to the
 current sealed System volume and checked by exact owner, special mode bits,
 link count, size and a stable `O_NOFOLLOW` descriptor hash. `/bin/ls` is
