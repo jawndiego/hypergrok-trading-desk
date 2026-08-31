@@ -29,19 +29,19 @@ class ProvenPrebootRecoveryTests(unittest.TestCase):
     def test_contract_pins_exact_observed_evidence_and_fresh_session(self):
         lock = json.loads(LOCK.read_text())
         recovery = lock["proven_preboot_recovery"]
-        self.assertEqual("6d7d93fc3f480f6ad02035a4def8d73d371c20d5ca5c9ae18ee0d27fd2a55345", recovery["source_session_id"])
-        self.assertEqual("002cbc693a6abaf119c1ade5be0bcedb84bb4989f9758527ceb017d28428cdba", recovery["fresh_session_id"])
-        self.assertEqual("d092f5e0226b011b29726e17c95d941ec21ae0281801cb39847fc6102b562aa1", recovery["failed_controller_manifest_sha256"])
+        self.assertEqual("002cbc693a6abaf119c1ade5be0bcedb84bb4989f9758527ceb017d28428cdba", recovery["source_session_id"])
+        self.assertEqual("91c455c4f6a2ebb670d9ea01b394158c0b48edbb92da55317b3c3e9ec7ffeda9", recovery["fresh_session_id"])
+        self.assertEqual("2be6c3afc48917183e3a9752ef6dc2f38ceec4fcf3622087b56a4f29e90a1e87", recovery["failed_controller_manifest_sha256"])
         self.assertEqual(
-            "f1c6a255a02a363b813adf879462a63e3855a327b01d17c22aef8f69d67120a6",
+            "RECOVERY_RECEIPT_REQUIRED",
             lock["pins"]["proven_preboot_recovery_receipt_sha256"],
         )
-        self.assertEqual([54164463, 478, "a85bfe136c6494f58a135d0a08e4cbf1de63efaa3cf5c2add590417d02bc9453"], recovery["files"]["start_stderr"])
+        self.assertEqual([54411931, 551, "3df15457ab4e82256a45459027e22976909e82c4f6ecd794d2e5e076cd518505"], recovery["files"]["start_stderr"])
         module = load_apply()
-        self.assertEqual(478, len(module.PROVEN_PREBOOT_START_STDERR))
+        self.assertEqual(551, len(module.PROVEN_PREBOOT_DAEMON_GROUP_STDERR))
         self.assertEqual(
-            "a85bfe136c6494f58a135d0a08e4cbf1de63efaa3cf5c2add590417d02bc9453",
-            module._sha256_bytes(module.PROVEN_PREBOOT_START_STDERR),
+            "3df15457ab4e82256a45459027e22976909e82c4f6ecd794d2e5e076cd518505",
+            module._sha256_bytes(module.PROVEN_PREBOOT_DAEMON_GROUP_STDERR),
         )
 
     def test_phase_is_public_but_contains_no_start_or_network_mutator(self):
@@ -63,7 +63,7 @@ class ProvenPrebootRecoveryTests(unittest.TestCase):
         module = load_apply()
         lock = json.loads(LOCK.read_text())
         self.assertEqual(
-            "83ce3977889b94afcc1c7b76f0b9a5ee097e9980d975500de474746efdc6e39e",
+            "f4b09842ecc252d89f44d6ddca279c2e216bd4edd925f059bd6124f6729cee06",
             module._sha256_bytes(module._canonical_json(lock["proven_preboot_recovery"])),
         )
         pending = json.loads(LOCK.read_text())
@@ -82,6 +82,11 @@ class ProvenPrebootRecoveryTests(unittest.TestCase):
     def test_lock_accepts_only_pending_source_or_pinned_fresh_state(self):
         renderer = load_renderer()
         successor = json.loads(LOCK.read_text())
+        successor["pins"]["proven_preboot_recovery_receipt_sha256"] = "a" * 64
+        successor["pins"]["airgap_session_id"] = successor[
+            "proven_preboot_recovery"
+        ]["fresh_session_id"]
+        successor["phases"]["proven_preboot_recovery_enabled"] = False
         renderer._load_lock(renderer._canonical_json(successor))
         recovery_profile = json.loads(
             (

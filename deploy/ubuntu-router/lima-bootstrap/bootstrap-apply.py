@@ -172,6 +172,12 @@ PROVEN_PREBOOT_START_STDERR = (
     'time="2026-08-31T10:35:29-04:00" level=info msg="Using the existing instance `trading-desk-router`"\n'
     'time="2026-08-31T10:35:29-04:00" level=fatal msg="can\'t read `/private/etc/sudoers.d/trading-desk-router-lima`: open /private/etc/sudoers.d/trading-desk-router-lima: permission denied: (Hint: run `/opt/trading-desk-router-tools/lima-2.2.0/bin/limactl sudoers >etc_sudoers.d_lima && sudo install -o root etc_sudoers.d_lima \\"/private/etc/sudoers.d/trading-desk-router-lima\\"`))"\n'
 ).encode()
+PROVEN_PREBOOT_DAEMON_GROUP_STDERR = (
+    'time="2026-08-31T11:36:48-04:00" level=info msg="Using the existing instance `trading-desk-router`"\n'
+    'time="2026-08-31T11:36:48-04:00" level=info msg="Starting socket_vmnet daemon for `td-router-ingress` network"\n'
+    'time="2026-08-31T11:36:48-04:00" level=info msg="Running: [sudo --user root --group wheel --non-interactive /bin/mkdir -m 775 -p /private/var/db/trading-desk-router-vmnet-runtime]"\n'
+    'time="2026-08-31T11:36:48-04:00" level=fatal msg="`/private/var/db/trading-desk-router-vmnet-runtime` doesn\'t seem to be writable by the daemon (gid:1) group"\n'
+).encode()
 AIRGAP_FIRST_BOOT_RECEIPT_KEYS = frozenset(
     {
         "airgap_base_capture_sha256",
@@ -677,6 +683,7 @@ def _load_prestart_recovery_profile(lock: dict[str, Any]) -> tuple[dict[str, Any
         or value.get("fresh_session_id") not in {
             lock["pins"]["airgap_session_id"],
             lock.get("proven_preboot_recovery", {}).get("source_session_id"),
+            lock.get("proven_preboot_recovery", {}).get("prior_proven_source_session_id"),
         }
         or any(
             not isinstance(value.get(key), str) or SHA256_RE.fullmatch(value[key]) is None
@@ -946,9 +953,9 @@ def _load_lock() -> dict[str, Any]:
     recovery_pin = lock.get("pins", {}).get("proven_preboot_recovery_receipt_sha256")
     if (
         not isinstance(recovery, dict)
-        or _sha256_bytes(_canonical_json(recovery)) != "83ce3977889b94afcc1c7b76f0b9a5ee097e9980d975500de474746efdc6e39e"
-        or recovery.get("fresh_session_id") != "002cbc693a6abaf119c1ade5be0bcedb84bb4989f9758527ceb017d28428cdba"
-        or recovery.get("failed_controller_manifest_sha256") != "d092f5e0226b011b29726e17c95d941ec21ae0281801cb39847fc6102b562aa1"
+        or _sha256_bytes(_canonical_json(recovery)) != "f4b09842ecc252d89f44d6ddca279c2e216bd4edd925f059bd6124f6729cee06"
+        or recovery.get("fresh_session_id") != "91c455c4f6a2ebb670d9ea01b394158c0b48edbb92da55317b3c3e9ec7ffeda9"
+        or recovery.get("failed_controller_manifest_sha256") != "2be6c3afc48917183e3a9752ef6dc2f38ceec4fcf3622087b56a4f29e90a1e87"
         or recovery.get("prior_receipt_sha256") != lock["pins"]["prestart_recovery_receipt_sha256"]
         or recovery.get("prior_profile_sha256") != "c00a92eb5096fb3237786a1cf818d3f23300e2066e82309a72b5be5c83121fc7"
         or set(recovery.get("files", {})) != {"base", "hardware_lock", "incident", "preparing", "starting", "start_stdout", "start_stderr", "socket_stdout", "socket_stderr", "sudoers", "watchdog"}
@@ -4380,8 +4387,14 @@ def _validate_preboot_fatal_semantics(
     watchdog = _load_json_bytes(watchdog_content, "proven-preboot watchdog")
     force = watchdog.get("force_stop")
     socket_stop = watchdog.get("socket_vmnet_stop")
+    expected_stderr = (
+        PROVEN_PREBOOT_DAEMON_GROUP_STDERR
+        if contract["source_session_id"]
+        == "002cbc693a6abaf119c1ade5be0bcedb84bb4989f9758527ceb017d28428cdba"
+        else PROVEN_PREBOOT_START_STDERR
+    )
     if (
-        start_stderr != PROVEN_PREBOOT_START_STDERR
+        start_stderr != expected_stderr
         or watchdog.get("disposition") != "ABORTED"
         or watchdog.get("reason") != "control_fd_closed"
         or watchdog.get("armed_message_sent") is not True
@@ -4411,6 +4424,24 @@ def _validate_proven_preboot_successor(
         raise BootstrapError("proven-preboot recovery receipt is required")
     source = contract["source_session_id"]
     fresh = contract["fresh_session_id"]
+    prior_source = contract["prior_proven_source_session_id"]
+    prior_path = state["receipts"] / f"11-proven-preboot-recovery-{prior_source}.json"
+    prior_content = _read_bound(prior_path, uid=0, gid=0, mode=0o400, maximum=128 * 1024)
+    prior = _load_json_bytes(prior_content, "prior proven-preboot receipt")
+    prior_transaction_path = state["quarantine"] / f"proven-preboot-transaction-{prior_source}.json"
+    prior_transaction = _read_bound(
+        prior_transaction_path, uid=0, gid=0, mode=0o400, maximum=128 * 1024
+    )
+    if (
+        _sha256_bytes(prior_content) != contract["prior_proven_receipt_sha256"]
+        or prior.get("source_session_id") != prior_source
+        or prior.get("fresh_session_id") != source
+        or prior.get("preboot_fatal_proven") is not True
+        or prior.get("transaction_path") != str(prior_transaction_path)
+        or prior.get("transaction_sha256") != contract["prior_proven_transaction_sha256"]
+        or _sha256_bytes(prior_transaction) != contract["prior_proven_transaction_sha256"]
+    ):
+        raise BootstrapError("prior proven-preboot lineage differs")
     receipt_path = state["receipts"] / f"11-proven-preboot-recovery-{source}.json"
     receipt_content = _read_bound(receipt_path, uid=0, gid=0, mode=0o400, maximum=128 * 1024)
     receipt = _load_json_bytes(receipt_content, "proven-preboot recovery receipt")
@@ -4434,7 +4465,7 @@ def _validate_proven_preboot_successor(
     if (
         str(transaction_path) != receipt["transaction_path"]
         or _sha256_bytes(transaction_content) != receipt["transaction_sha256"]
-        or set(transaction) != {"controller_manifest_sha256", "failed_controller_manifest_sha256", "fresh_session_id", "instance_identity", "kind", "moves", "prior_receipt_sha256", "schema_version", "source_session_id", "stationary_hashes"}
+        or set(transaction) != {"controller_manifest_sha256", "failed_controller_manifest_sha256", "fresh_session_id", "instance_identity", "kind", "moves", "prior_proven_receipt_sha256", "prior_proven_transaction_sha256", "prior_receipt_sha256", "schema_version", "source_session_id", "stationary_hashes"}
         or transaction.get("kind") != "trading-desk.router-bootstrap.proven-preboot-transaction"
         or transaction.get("schema_version") != 1
         or transaction.get("source_session_id") != source
@@ -4442,6 +4473,8 @@ def _validate_proven_preboot_successor(
         or transaction.get("controller_manifest_sha256") != receipt["controller_manifest_sha256"]
         or transaction.get("failed_controller_manifest_sha256") != contract["failed_controller_manifest_sha256"]
         or transaction.get("prior_receipt_sha256") != contract["prior_receipt_sha256"]
+        or transaction.get("prior_proven_receipt_sha256") != contract["prior_proven_receipt_sha256"]
+        or transaction.get("prior_proven_transaction_sha256") != contract["prior_proven_transaction_sha256"]
         or transaction.get("instance_identity") != receipt["instance_identity"]
     ):
         raise BootstrapError("proven-preboot transaction differs")
@@ -4556,7 +4589,7 @@ def _validate_prior_recovery_lineage(
         or profile_sha256 != lock["proven_preboot_recovery"]["prior_profile_sha256"]
         or recovery.get("kind") != "trading-desk.router-bootstrap.prestart-recovery"
         or recovery.get("old_session_id") != profile["old_session_id"]
-        or recovery.get("fresh_session_id") != lock["proven_preboot_recovery"]["source_session_id"]
+        or recovery.get("fresh_session_id") != lock["proven_preboot_recovery"]["prior_proven_source_session_id"]
         or recovery.get("prior_check_only_rotation") != lock["check_only_rotation"]
         or recovery.get("recovery_profile_sha256") != profile_sha256
         or recovery.get("schema_version") != 1
@@ -4597,13 +4630,36 @@ def _recover_proven_preboot(args: argparse.Namespace) -> int:
             profile_sha != contract["prior_profile_sha256"]
             or _sha256_bytes(prior_content) != contract["prior_receipt_sha256"]
             or prior.get("kind") != "trading-desk.router-bootstrap.prestart-recovery"
-            or prior.get("fresh_session_id") != source
+            or prior.get("fresh_session_id") != contract["prior_proven_source_session_id"]
             or prior.get("recovery_profile_sha256") != profile_sha
             or prior.get("postmove_processes_absent") is not True
             or prior.get("start_invoked") is not False
             or prior.get("vm_status") != "Stopped"
         ):
             raise BootstrapError("proven-preboot prior recovery differs")
+        prior_proven_source = contract["prior_proven_source_session_id"]
+        prior_proven_path = state["receipts"] / f"11-proven-preboot-recovery-{prior_proven_source}.json"
+        prior_proven_content = _read_bound(
+            prior_proven_path, uid=0, gid=0, mode=0o400, maximum=128 * 1024
+        )
+        prior_proven = _load_json_bytes(prior_proven_content, "prior proven-preboot receipt")
+        prior_transaction_path = state["quarantine"] / f"proven-preboot-transaction-{prior_proven_source}.json"
+        prior_transaction_content = _read_bound(
+            prior_transaction_path, uid=0, gid=0, mode=0o400, maximum=128 * 1024
+        )
+        if (
+            _sha256_bytes(prior_proven_content) != contract["prior_proven_receipt_sha256"]
+            or prior_proven.get("kind") != "trading-desk.router-bootstrap.proven-preboot-recovery"
+            or prior_proven.get("source_session_id") != prior_proven_source
+            or prior_proven.get("fresh_session_id") != source
+            or prior_proven.get("preboot_fatal_proven") is not True
+            or prior_proven.get("vm_boot_observed") is not False
+            or prior_proven.get("vm_status") != "Stopped"
+            or prior_proven.get("transaction_path") != str(prior_transaction_path)
+            or prior_proven.get("transaction_sha256") != contract["prior_proven_transaction_sha256"]
+            or _sha256_bytes(prior_transaction_content) != contract["prior_proven_transaction_sha256"]
+        ):
+            raise BootstrapError("proven-preboot prior proven lineage differs")
         fresh_paths = _fresh_recovery_artifacts(state, fresh) + [
             state["receipts"] / f"11-proven-preboot-recovery-{fresh}.json",
             state["receipts"] / f".11-proven-preboot-recovery-{fresh}.json.pending",
@@ -4752,6 +4808,8 @@ def _recover_proven_preboot(args: argparse.Namespace) -> int:
             "kind": "trading-desk.router-bootstrap.proven-preboot-transaction",
             "moves": [{"source": str(a), "destination": str(b)} for a, b in moves],
             "prior_receipt_sha256": contract["prior_receipt_sha256"],
+            "prior_proven_receipt_sha256": contract["prior_proven_receipt_sha256"],
+            "prior_proven_transaction_sha256": contract["prior_proven_transaction_sha256"],
             "schema_version": 1, "source_session_id": source,
             "stationary_hashes": stationary_hashes,
         }

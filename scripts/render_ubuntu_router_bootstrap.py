@@ -181,7 +181,7 @@ def _load_lock(content: bytes) -> dict[str, Any]:
     recovery = value.get("proven_preboot_recovery")
     if (
         not isinstance(recovery, dict)
-        or hashlib.sha256(_canonical_json(recovery)).hexdigest() != "83ce3977889b94afcc1c7b76f0b9a5ee097e9980d975500de474746efdc6e39e"
+        or hashlib.sha256(_canonical_json(recovery)).hexdigest() != "f4b09842ecc252d89f44d6ddca279c2e216bd4edd925f059bd6124f6729cee06"
         or recovery.get("prior_receipt_sha256") != value["pins"]["prestart_recovery_receipt_sha256"]
         or set(recovery.get("files", {})) != {"base", "hardware_lock", "incident", "preparing", "starting", "start_stdout", "start_stderr", "socket_stdout", "socket_stderr", "sudoers", "watchdog"}
         or any(not isinstance(item, list) or len(item) != 3 for item in recovery.get("files", {}).values())
