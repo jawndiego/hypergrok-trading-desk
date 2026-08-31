@@ -402,6 +402,10 @@ already-live socket_vmnet PID file only around `limactl start`. This lets Lima
 recognize and reuse the controller-validated daemon; the runtime directory
 remains root-owned and non-writable, and the PID ACL is removed before any
 later guest verification or retained-state qualification.
+The pinned socket_vmnet process must then exit cleanly under controller SIGTERM.
+Its expected success residue is an ACL-free inactive socket with the PID file
+removed; a socket-plus-stale-PID residue is accepted only for a contained
+watchdog-kill incident and never as successful completion evidence.
 
 Both capture passes run pinned macOS observers sequentially under one total
 deadline. The continuous watchdog retains concurrent sampling, but each child

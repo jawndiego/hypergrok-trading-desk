@@ -108,7 +108,10 @@ For the single guarded `limactl start`, UID 454 receives an exact read-only ACL
 on the already-live socket_vmnet PID file. A UID-454 probe must read that exact
 PID and observe the process before Lima runs, so Lima reuses the controller's
 validated daemon instead of attempting to create another. The ACL is removed
-immediately after start returns or during fail-stop cleanup.
+immediately after start returns or during fail-stop cleanup. On normal teardown
+the pinned daemon must exit cleanly, remove its PID file and leave only the
+inactive Unix socket for exact retention; watchdog SIGKILL incidents may retain
+the separately validated stale PID.
 
 This does not authorize another guest boot. A later stopped migration must
 remove bootstrap passwordless sudo and per-boot provisioning first.

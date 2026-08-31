@@ -2004,12 +2004,12 @@ def _quarantine_vmnet_after_success(
     _assert_real(runtime, kind="directory", uid=0, gid=0, mode=0o755)
     socket_path = runtime / "socket_vmnet.td-router-ingress"
     pid_path = runtime / "td-router-ingress_socket_vmnet.pid"
-    if {path.name for path in runtime.iterdir()} != {socket_path.name, pid_path.name}:
+    if pid_path.exists() or pid_path.is_symlink():
+        raise BootstrapError("success cleanup PID file remains after graceful stop")
+    if {path.name for path in runtime.iterdir()} != {socket_path.name}:
         raise BootstrapError("success cleanup residual set differs")
     socket_metadata = socket_path.lstat()
-    pid_content = _read_bound(pid_path, uid=0, gid=0, mode=0o600, maximum=32)
     _no_named_acl(socket_path)
-    _no_named_acl(pid_path)
     if (
         socket_path.is_symlink()
         or not stat.S_ISSOCK(socket_metadata.st_mode)
@@ -2018,7 +2018,6 @@ def _quarantine_vmnet_after_success(
         or stat.S_IMODE(socket_metadata.st_mode) != 0o770
         or socket_metadata.st_nlink != 1
         or socket_metadata.st_size != 0
-        or not pid_content.isdigit()
     ):
         raise BootstrapError("success cleanup inactive residual differs")
     _clear_router_sudoers_read_acl(target)
@@ -3701,6 +3700,32 @@ def _verify_stopped_after_airgap(args: argparse.Namespace) -> int:
         _assert_real(
             retained_runtime, kind="directory", uid=0, gid=0, mode=0o755
         )
+        retained_names = {path.name for path in retained_runtime.iterdir()}
+        if incident_state == "prestart":
+            if retained_names:
+                raise BootstrapError("retained prestart VMNet runtime is not empty")
+            retained_socket = None
+        else:
+            retained_socket = retained_runtime / "socket_vmnet.td-router-ingress"
+        retained_pid = retained_runtime / "td-router-ingress_socket_vmnet.pid"
+        if retained_socket is not None:
+            retained_socket_metadata = retained_socket.lstat()
+            _no_named_acl(retained_socket)
+            if (
+                retained_names != {retained_socket.name}
+                or retained_pid.exists()
+                or retained_pid.is_symlink()
+                or not stat.S_ISSOCK(retained_socket_metadata.st_mode)
+                or (
+                    retained_socket_metadata.st_uid,
+                    retained_socket_metadata.st_gid,
+                    stat.S_IMODE(retained_socket_metadata.st_mode),
+                    retained_socket_metadata.st_nlink,
+                    retained_socket_metadata.st_size,
+                )
+                != (0, 454, 0o770, 1, 0)
+            ):
+                raise BootstrapError("retained poststart VMNet residual differs")
 
     def inspect_inactive_residual() -> tuple[Any, ...] | None:
         prove_stopped()
@@ -3716,7 +3741,33 @@ def _verify_stopped_after_airgap(args: argparse.Namespace) -> int:
         _verify_recovery_xattrs(runtime, "runtime")
         socket_path = runtime / "socket_vmnet.td-router-ingress"
         pid_path = runtime / "td-router-ingress_socket_vmnet.pid"
-        if {path.name for path in runtime.iterdir()} != {socket_path.name, pid_path.name}:
+        residual_names = {path.name for path in runtime.iterdir()}
+        if incident_state == "poststart" and residual_names == {socket_path.name}:
+            if (
+                pid_path.exists()
+                or pid_path.is_symlink()
+            ):
+                raise BootstrapError("poststart VMNet residual set differs")
+            socket_metadata = socket_path.lstat()
+            _no_named_acl(socket_path)
+            if (
+                socket_path.is_symlink()
+                or not stat.S_ISSOCK(socket_metadata.st_mode)
+                or (socket_metadata.st_uid, socket_metadata.st_gid,
+                    stat.S_IMODE(socket_metadata.st_mode), socket_metadata.st_nlink,
+                    socket_metadata.st_size) != (0, 454, 0o770, 1, 0)
+            ):
+                raise BootstrapError("poststart VMNet residual differs")
+            return (
+                runtime_metadata.st_dev, runtime_metadata.st_ino,
+                runtime_metadata.st_uid, runtime_metadata.st_gid,
+                stat.S_IMODE(runtime_metadata.st_mode), runtime_metadata.st_nlink,
+                (socket_path.name,), socket_metadata.st_dev, socket_metadata.st_ino,
+                socket_metadata.st_uid, socket_metadata.st_gid,
+                stat.S_IMODE(socket_metadata.st_mode), socket_metadata.st_nlink,
+                socket_metadata.st_size,
+            )
+        if residual_names != {socket_path.name, pid_path.name}:
             raise BootstrapError("inactive VMNet residual set differs")
         socket_metadata = socket_path.lstat()
         _no_named_acl(socket_path)
@@ -3921,12 +3972,12 @@ def _adopt_completed_airgap_first_boot(args: argparse.Namespace) -> int | None:
     retained_socket = retained_runtime / "socket_vmnet.td-router-ingress"
     retained_pid = retained_runtime / "td-router-ingress_socket_vmnet.pid"
     retained_socket_metadata = retained_socket.lstat()
-    retained_pid_content = _read_bound(
-        retained_pid, uid=0, gid=0, mode=0o600, maximum=32
-    )
+    _no_named_acl(retained_socket)
     if (
         {path.name for path in retained_runtime.iterdir()}
-        != {retained_socket.name, retained_pid.name}
+        != {retained_socket.name}
+        or retained_pid.exists()
+        or retained_pid.is_symlink()
         or retained_socket.is_symlink()
         or not stat.S_ISSOCK(retained_socket_metadata.st_mode)
         or retained_socket_metadata.st_uid != 0
@@ -3934,7 +3985,6 @@ def _adopt_completed_airgap_first_boot(args: argparse.Namespace) -> int | None:
         or stat.S_IMODE(retained_socket_metadata.st_mode) != 0o770
         or retained_socket_metadata.st_nlink != 1
         or retained_socket_metadata.st_size != 0
-        or not retained_pid_content.isdigit()
     ):
         raise BootstrapError("completed retained VMNet runtime differs")
     for live in (
@@ -4157,6 +4207,8 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
         )
         failure_stage = "host_only_teardown"
         socket_stop = _stop_hostonly_daemon(socket_process, socket_streams)
+        if socket_stop != {"forced": False, "returncode": 0}:
+            raise BootstrapError("socket_vmnet graceful stop differs")
         socket_process = None
         socket_streams = None
         _wait_hostonly_teardown(watchdog, caffeinate)
@@ -4258,15 +4310,18 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
                 watchdog.communicate()
             except OSError:
                 pass
+        if pid_acl_path is not None:
+            try:
+                if pid_acl_path.exists() and not pid_acl_path.is_symlink():
+                    _clear_router_pid_read_acl(pid_acl_path)
+                elif pid_acl_path.is_symlink():
+                    raise BootstrapError("socket_vmnet PID path became a symlink")
+                pid_acl_path = None
+            except BaseException:
+                pass
         if socket_process is not None and socket_streams is not None:
             try:
                 _stop_hostonly_daemon(socket_process, socket_streams)
-            except BaseException:
-                pass
-        if pid_acl_path is not None:
-            try:
-                _clear_router_pid_read_acl(pid_acl_path)
-                pid_acl_path = None
             except BaseException:
                 pass
         if start_invoked:
