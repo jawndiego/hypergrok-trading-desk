@@ -1128,6 +1128,31 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         self.assertIn("_host_helpers_active", teardown_source)
         self.assertIn("bridge_active and not helpers_active", teardown_source)
 
+    def test_recovery_base_selector_is_incident_specific_and_fresh_checks_both(self) -> None:
+        controller = _load_module(HOST_APPLY, "bootstrap_recovery_base_v2_test")
+        state = {
+            "state": Path("/private/var/db/trading-desk-router-bootstrap-v1"),
+            "receipts": Path("/fixed/receipts"),
+            "quarantine": Path("/fixed/quarantine"),
+        }
+        legacy = "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1"
+        other = "c" * 64
+        self.assertTrue(
+            controller._recovery_base_capture_path(state, legacy).name.endswith(
+                "-v2.json"
+            )
+        )
+        self.assertEqual(
+            f"airgap-hardware-base-capture-{other}.json",
+            controller._recovery_base_capture_path(state, other).name,
+        )
+        fresh = {path.name for path in controller._fresh_recovery_artifacts(state, other)}
+        self.assertIn(f"airgap-hardware-base-capture-{other}.json", fresh)
+        self.assertIn(f"airgap-hardware-base-capture-{other}-v2.json", fresh)
+        self.assertIn(f".airgap-hardware-base-capture-{other}-v2.json.pending", fresh)
+        recovery_source = inspect.getsource(controller._recover_failed_prestart)
+        self.assertIn('base.parent / f".{base.name}.pending"', recovery_source)
+
     def test_airgapped_flow_starts_once_verifies_and_stops(self) -> None:
         controller = _load_module(HOST_APPLY, "bootstrap_apply_airgap_flow_test")
         guest_receipt = {

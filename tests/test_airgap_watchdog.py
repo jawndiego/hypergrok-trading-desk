@@ -729,7 +729,7 @@ Network interfaces: bridge100
             final_lock["host_only"]["route_topology_sha256"]["ipv4"],
         )
 
-    def test_incident_specific_legacy_base_adoption_is_exact(self) -> None:
+    def test_incident_specific_legacy_base_migration_is_exact(self) -> None:
         module = _load()
         self.assertEqual(
             "a39b3d2c7951696306b3279a9cc854fdcc281612d32544a59c3e3e7abd07b002",
@@ -746,49 +746,103 @@ Network interfaces: bridge100
             bootstrap_lock["pins"]["airgap_session_id"],
             module.LEGACY_BASE_ADOPTION_SESSION,
         )
-        candidate = {"exact": "freshly-observed"}
+        candidate = {
+            "exact": "freshly-observed",
+            "nwi_sha256": "2" * 64,
+            "route_topology_sha256": {"ipv4": "3" * 64, "ipv6": "4" * 64},
+        }
+        stored_candidate = {
+            **candidate,
+            "nwi_sha256": "5" * 64,
+            "route_topology_sha256": {"ipv4": "6" * 64, "ipv6": "7" * 64},
+        }
         stored = {
             "capture_session_id": module.LEGACY_BASE_ADOPTION_SESSION,
-            "hardware_lock_candidate": candidate,
+            "hardware_lock_candidate": stored_candidate,
             "hardware_profile_sha256": "b" * 64,
             "kind": "trading-desk.router-bootstrap.airgap-base-capture",
             "sample_sha256": "1" * 64,
             "schema_version": 1,
         }
-        current = {**stored, "sample_sha256": "2" * 64}
+        current = {
+            **stored,
+            "hardware_lock_candidate": candidate,
+            "sample_sha256": "2" * 64,
+        }
         content = module._canonical_json(stored)
         digest = module._sha256_bytes(content)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy-base.json"
             path.write_bytes(content)
-            pending = path.parent / f".{path.name}.pending"
             with (
                 mock.patch.object(module, "_base_capture_path", return_value=path),
                 mock.patch.object(module, "_safe_root_file", return_value=content),
                 mock.patch.object(module, "_assert_root_directory"),
                 mock.patch.object(module, "LEGACY_BASE_ADOPTION_SHA256", digest),
+                mock.patch.object(
+                    module,
+                    "_atomic_fixed_document",
+                    return_value=(path, "9" * 64),
+                ) as atomic,
             ):
                 self.assertEqual(
-                    (path, digest),
-                    module._adopt_exact_legacy_base_capture(path, current),
+                    (path, "9" * 64),
+                    module._migrate_exact_legacy_base_capture(path, current),
                 )
                 for changed in (
                     {**current, "capture_session_id": "c" * 64},
-                    {**current, "hardware_lock_candidate": {"exact": "drifted"}},
-                    {**current, "sample_sha256": stored["sample_sha256"]},
+                    {
+                        **current,
+                        "hardware_lock_candidate": {
+                            **candidate,
+                            "exact": "drifted",
+                        },
+                    },
                 ):
                     if (
                         changed["capture_session_id"]
                         != module.LEGACY_BASE_ADOPTION_SESSION
                     ):
                         self.assertIsNone(
-                            module._adopt_exact_legacy_base_capture(path, changed)
+                            module._migrate_exact_legacy_base_capture(path, changed)
                         )
                     else:
                         with self.assertRaisesRegex(
-                            module.WatchdogError, "legacy_base_capture_binding"
+                            module.WatchdogError, "legacy_base_capture_candidate"
                         ):
-                            module._adopt_exact_legacy_base_capture(path, changed)
+                            module._migrate_exact_legacy_base_capture(path, changed)
+                atomic.assert_called_with(path, current)
+            with (
+                mock.patch.object(module, "_base_capture_path", return_value=path),
+                mock.patch.object(module, "_safe_root_file", return_value=content),
+                mock.patch.object(module, "_assert_root_directory"),
+                mock.patch.object(module, "LEGACY_BASE_ADOPTION_SHA256", digest),
+                mock.patch.object(
+                    module,
+                    "_atomic_fixed_document",
+                    side_effect=module.WatchdogError(
+                        "fixed_document_pending_differs"
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    module.WatchdogError, "fixed_document_pending_differs"
+                ),
+            ):
+                module._migrate_exact_legacy_base_capture(path, current)
+
+            with (
+                mock.patch.object(module, "_base_capture_path", return_value=path),
+                mock.patch.object(
+                    module,
+                    "_safe_root_file",
+                    return_value=module._canonical_json(current),
+                ) as read_v2,
+            ):
+                self.assertEqual(
+                    current,
+                    module._read_base_capture(module.LEGACY_BASE_ADOPTION_SESSION),
+                )
+            read_v2.assert_called_once_with(path, 0o400)
             with (
                 mock.patch.object(module, "_base_capture_path", return_value=path),
                 mock.patch.object(module, "_safe_root_file", return_value=content),
@@ -797,17 +851,7 @@ Network interfaces: bridge100
                     module.WatchdogError, "legacy_base_capture_digest"
                 ),
             ):
-                module._adopt_exact_legacy_base_capture(path, current)
-
-            pending.write_bytes(b"ambiguous")
-            with (
-                mock.patch.object(module, "_base_capture_path", return_value=path),
-                mock.patch.object(module, "_assert_root_directory"),
-                self.assertRaisesRegex(
-                    module.WatchdogError, "legacy_base_capture_pending"
-                ),
-            ):
-                module._adopt_exact_legacy_base_capture(path, current)
+                module._migrate_exact_legacy_base_capture(path, current)
 
         with (
             mock.patch.object(
@@ -823,11 +867,11 @@ Network interfaces: bridge100
                 "_sample",
                 side_effect=module.WatchdogError("current_sample_failed"),
             ),
-            mock.patch.object(module, "_adopt_exact_legacy_base_capture") as adopt,
+            mock.patch.object(module, "_migrate_exact_legacy_base_capture") as migrate,
             self.assertRaisesRegex(module.WatchdogError, "current_sample_failed"),
         ):
             module._capture_base(module.LEGACY_BASE_ADOPTION_SESSION)
-        adopt.assert_not_called()
+        migrate.assert_not_called()
 
     def test_host_helpers_are_exact_root_singletons_only_in_host_phase(self) -> None:
         module = _load()

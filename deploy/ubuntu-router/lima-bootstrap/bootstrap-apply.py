@@ -835,11 +835,23 @@ def _fresh_recovery_artifacts(state: dict[str, Path], session: str) -> list[Path
         state["state"] / f"limactl-start-{session}.stderr",
         state["state"] / f"airgap-hardware-base-capture-{session}.json",
         state["state"] / f".airgap-hardware-base-capture-{session}.json.pending",
+        state["state"] / f"airgap-hardware-base-capture-{session}-v2.json",
+        state["state"] / f".airgap-hardware-base-capture-{session}-v2.json.pending",
         state["state"] / "airgap-watchdog-results" / f"{session}-watch.json",
         state["state"] / "airgap-watchdog-results" / f".{session}-watch.json.pending",
         state["state"] / "airgap-watchdog-results" / f"{session}-check.json",
         state["state"] / "airgap-watchdog-results" / f".{session}-check.json.pending",
     ]
+
+
+def _recovery_base_capture_path(state: dict[str, Path], session: str) -> Path:
+    suffix = (
+        "-v2"
+        if session
+        == "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1"
+        else ""
+    )
+    return state["state"] / f"airgap-hardware-base-capture-{session}{suffix}.json"
 
 
 def _assert_recovery_stopped_instance(
@@ -4004,10 +4016,7 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
         if any(path.exists() or path.is_symlink() for path in fresh_absent):
             raise BootstrapError("fresh recovery session already has artifacts")
         runtime = Path(lock["paths"]["vmnet_runtime"])
-        base = Path(
-            "/private/var/db/trading-desk-router-bootstrap-v1/"
-            f"airgap-hardware-base-capture-{old_session}.json"
-        )
+        base = _recovery_base_capture_path(state, old_session)
         preparing = state["state"] / ".airgap-first-boot.PREPARING.json"
         moves = (
             (runtime, state["quarantine"] / f"prestart-vmnet-runtime-{old_session}-{profile['runtime']['inode']}"),
@@ -4078,8 +4087,7 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             Path(lock["paths"]["vmnet_sudoers"]),
             Path("/private/var/db/trading-desk-router-bootstrap-v1/airgap-hardware-lock.json"),
             Path("/private/var/db/trading-desk-router-bootstrap-v1/.airgap-hardware-lock.json.pending"),
-            Path("/private/var/db/trading-desk-router-bootstrap-v1")
-            / f".airgap-hardware-base-capture-{old_session}.json.pending",
+            base.parent / f".{base.name}.pending",
             Path("/private/var/db/trading-desk-router-bootstrap-v1")
             / f"airgap-hardware-base-capture-{fresh_session}.json",
             Path("/private/var/db/trading-desk-router-bootstrap-v1")

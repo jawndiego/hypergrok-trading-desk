@@ -182,7 +182,14 @@ def _sha256_file(path: Path) -> str:
 def _base_capture_path(session_id: str) -> Path:
     if SESSION_RE.fullmatch(session_id) is None:
         raise WatchdogError("base_capture_session")
-    return STATE_ROOT / f"airgap-hardware-base-capture-{session_id}.json"
+    suffix = "-v2" if session_id == LEGACY_BASE_ADOPTION_SESSION else ""
+    return STATE_ROOT / f"airgap-hardware-base-capture-{session_id}{suffix}.json"
+
+
+def _legacy_base_capture_path() -> Path:
+    return STATE_ROOT / (
+        f"airgap-hardware-base-capture-{LEGACY_BASE_ADOPTION_SESSION}.json"
+    )
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -424,20 +431,16 @@ def _atomic_fixed_document(path: Path, value: dict[str, Any]) -> tuple[Path, str
     return path, digest
 
 
-def _adopt_exact_legacy_base_capture(
-    path: Path, current: dict[str, Any]
+def _migrate_exact_legacy_base_capture(
+    current_path: Path, current: dict[str, Any]
 ) -> tuple[Path, str] | None:
     if current.get("capture_session_id") != LEGACY_BASE_ADOPTION_SESSION:
         return None
-    if path != _base_capture_path(LEGACY_BASE_ADOPTION_SESSION):
+    if current_path != _base_capture_path(LEGACY_BASE_ADOPTION_SESSION):
         raise WatchdogError("legacy_base_capture_path")
     _assert_root_directory(STATE_ROOT)
-    if not path.exists() and not path.is_symlink():
-        return None
-    pending = path.parent / f".{path.name}.pending"
-    if pending.exists() or pending.is_symlink():
-        raise WatchdogError("legacy_base_capture_pending")
-    content = _safe_root_file(path, 0o400)
+    legacy_path = _legacy_base_capture_path()
+    content = _safe_root_file(legacy_path, 0o400)
     if _sha256_bytes(content) != LEGACY_BASE_ADOPTION_SHA256:
         raise WatchdogError("legacy_base_capture_digest")
     try:
@@ -465,16 +468,35 @@ def _adopt_exact_legacy_base_capture(
         or current.get("capture_session_id") != stored.get("capture_session_id")
         or stored.get("hardware_profile_sha256")
         != current.get("hardware_profile_sha256")
-        or stored.get("hardware_lock_candidate")
-        != current.get("hardware_lock_candidate")
         or not isinstance(stored.get("sample_sha256"), str)
         or SHA256_RE.fullmatch(stored["sample_sha256"]) is None
         or not isinstance(current.get("sample_sha256"), str)
         or SHA256_RE.fullmatch(current["sample_sha256"]) is None
-        or stored["sample_sha256"] == current["sample_sha256"]
     ):
         raise WatchdogError("legacy_base_capture_binding")
-    return path, LEGACY_BASE_ADOPTION_SHA256
+    stored_candidate = stored["hardware_lock_candidate"]
+    current_candidate = current["hardware_lock_candidate"]
+    if not isinstance(stored_candidate, dict) or not isinstance(
+        current_candidate, dict
+    ):
+        raise WatchdogError("legacy_base_capture_candidate")
+    permitted_drift = {"nwi_sha256", "route_topology_sha256"}
+    if (
+        set(stored_candidate) != set(current_candidate)
+        or not permitted_drift.issubset(stored_candidate)
+        or {
+            key: value
+            for key, value in stored_candidate.items()
+            if key not in permitted_drift
+        }
+        != {
+            key: value
+            for key, value in current_candidate.items()
+            if key not in permitted_drift
+        }
+    ):
+        raise WatchdogError("legacy_base_capture_candidate")
+    return _atomic_fixed_document(current_path, current)
 
 
 def _parse_hardware_ports(content: str) -> list[dict[str, str]]:
@@ -2026,9 +2048,9 @@ def _capture_base(session_id: str) -> tuple[Path, str]:
         "schema_version": 1,
     }
     path = _base_capture_path(session_id)
-    adopted = _adopt_exact_legacy_base_capture(path, value)
-    if adopted is not None:
-        return adopted
+    migrated = _migrate_exact_legacy_base_capture(path, value)
+    if migrated is not None:
+        return migrated
     return _atomic_fixed_document(path, value)
 
 

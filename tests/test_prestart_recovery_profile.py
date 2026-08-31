@@ -198,8 +198,8 @@ class PrestartRecoveryProfileTests(unittest.TestCase):
                 "state": root / "state",
             }
             paths = controller._fresh_recovery_artifacts(state, "a" * 64)
-        self.assertEqual(16, len(paths))
-        self.assertEqual(16, len(set(paths)))
+        self.assertEqual(18, len(paths))
+        self.assertEqual(18, len(set(paths)))
         combined = "\n".join(str(path) for path in paths)
         for required in (
             "incident", "prestart-recovery", "transaction", "socket-vmnet",
