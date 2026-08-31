@@ -80,6 +80,12 @@ ROUTER_HOME_MIGRATION = {
     "prior_birth_marker_sha256": "46b42f2b276acf5b15559cb02ce4fa5aef537493acda1f53254674e7560aa231",
     "prior_identity_receipt_sha256": "3fa28e27769770f925615862783edf65f2b748ef8444ed8c83787c21d35b0de6",
     "prior_library_retained_path": "/private/var/db/trading-desk-router-bootstrap-v1/quarantine/router-operator-pre-home-migration-Library",
+    "prior_runtime_retained_path": "/private/var/db/trading-desk-router-bootstrap-v1/quarantine/router-operator-pre-home-migration-vmnet-runtime",
+    "post_recreate_runtime": {
+        "pid_inode": 55457432,
+        "pid_size": 5,
+        "socket_inode": 55457433,
+    },
     "source_controller_manifest_sha256": "7e4a16f2622abc4a259c7c0eb117f9ea7d4de1b4cb121297c4fef9af952f3845",
     "source_home": "/private/var/db/trading-desk-lima",
     "target_home": "/private/var/db/trading-desk-router-process-home",

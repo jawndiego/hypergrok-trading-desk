@@ -37,6 +37,14 @@ class RouterOperatorHomeMigrationTests(unittest.TestCase):
         self.assertEqual("attended_router_home_migration_only", lock["review_status"])
         self.assertTrue(lock["phases"]["router_operator_home_migration_enabled"])
         self.assertFalse(lock["phases"]["airgapped_start_apply_enabled"])
+        self.assertEqual(
+            {
+                "pid_inode": 55457432,
+                "pid_size": 5,
+                "socket_inode": 55457433,
+            },
+            lock["router_operator_home_migration"]["post_recreate_runtime"],
+        )
         action = next(
             action
             for action in controller._parser()._actions
@@ -75,6 +83,12 @@ class RouterOperatorHomeMigrationTests(unittest.TestCase):
                 '_rename_exclusive(paths["library"], paths["retained_library"])'
             ),
         )
+        self.assertEqual(
+            1,
+            source.count(
+                '_rename_exclusive(paths["runtime"], paths["retained_runtime"])'
+            ),
+        )
         self.assertIn('paths["library"], paths["retained_library"]', source)
         self.assertNotIn('_rename_exclusive(paths["identity"]', source)
         self.assertNotIn('_rename_exclusive(paths["birth"]', source)
@@ -107,6 +121,10 @@ class RouterOperatorHomeMigrationTests(unittest.TestCase):
             "hardened_vm_receipt_sha256",
             "interrupted_quarantine_receipt_sha256",
             "instance_identity",
+            "allow_current_runtime=True",
+            "_router_post_recreate_runtime_identity",
+            "prior_runtime_identity",
+            "prior_runtime_retained_path",
             "network_snapshot_sha256",
             "target_process_home_identity",
             "network changed before router home migration resume",
@@ -131,6 +149,8 @@ class RouterOperatorHomeMigrationTests(unittest.TestCase):
         self.assertIn("source_present == retained_present", loader)
         self.assertIn("_process_home_identity(lock)", loader)
         self.assertIn("network_snapshot_sha256", loader)
+        self.assertIn('for key in ("library", "runtime")', loader)
+        self.assertIn("_router_post_recreate_runtime_identity", loader)
         self.assertIn("transaction_path: Path | None = None", loader)
         self.assertIn("transaction_path=transaction_pending", source)
         self.assertIn("receipt_path=receipt_pending", source)
@@ -262,6 +282,60 @@ class RouterOperatorHomeMigrationTests(unittest.TestCase):
             [["/bin/launchctl", "bootout", "user/454"]] * 2,
             [call.args[0] for call in run.call_args_list],
         )
+
+    def test_watchdog_detector_ignores_parent_text_but_catches_old_bundle(self) -> None:
+        controller = load(APPLY, "router_watchdog_process_detector_test")
+        parent = (
+            "100 0 sudo /usr/bin/sudo /bin/sh -c "
+            "for f in airgap-watchdog.py bootstrap-apply.py; do :; done\n"
+        )
+        actual = (
+            "200 0 Python /opt/trading-desk/runtime/python-3.11.16/bin/python3.11 "
+            "-I -B /private/var/root/hypergrok-router-airgap-old/airgap-watchdog.py "
+            "watch --session-id " + "a" * 64 + "\n"
+        )
+        clean = SimpleNamespace(returncode=0, stderr="", stdout=parent)
+        with (
+            mock.patch.object(controller.subprocess, "run", return_value=clean),
+            mock.patch.object(controller, "_proc_pid_path", return_value="/usr/bin/sudo"),
+        ):
+            controller._assert_no_airgap_watchdog_process()
+
+        pinned_python_text = SimpleNamespace(
+            returncode=0,
+            stderr="",
+            stdout=(
+                "150 0 Python /opt/trading-desk/runtime/python-3.11.16/bin/python3.11 "
+                "-I -B -c 'print(\"/tmp/airgap-watchdog.py watch\")'\n"
+            ),
+        )
+        with (
+            mock.patch.object(
+                controller.subprocess, "run", return_value=pinned_python_text
+            ),
+            mock.patch.object(
+                controller,
+                "_proc_pid_path",
+                return_value="/opt/trading-desk/runtime/python-3.11.16/bin/python3.11",
+            ),
+        ):
+            controller._assert_no_airgap_watchdog_process()
+
+        live = SimpleNamespace(returncode=0, stderr="", stdout=parent + actual)
+        paths = {
+            100: "/usr/bin/sudo",
+            200: "/opt/trading-desk/runtime/python-3.11.16/bin/python3.11",
+        }
+        with (
+            mock.patch.object(controller.subprocess, "run", return_value=live),
+            mock.patch.object(
+                controller, "_proc_pid_path", side_effect=lambda pid: paths[pid]
+            ),
+            self.assertRaisesRegex(
+                controller.BootstrapError, "airgap watchdog process proof differs"
+            ),
+        ):
+            controller._assert_no_airgap_watchdog_process()
 
 
 if __name__ == "__main__":

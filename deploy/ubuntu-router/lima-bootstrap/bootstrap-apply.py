@@ -24,6 +24,7 @@ import plistlib
 import pwd
 import re
 import resource
+import shlex
 import shutil
 import signal
 import stat
@@ -194,6 +195,12 @@ ROUTER_HOME_MIGRATION = {
     "prior_birth_marker_sha256": "46b42f2b276acf5b15559cb02ce4fa5aef537493acda1f53254674e7560aa231",
     "prior_identity_receipt_sha256": "3fa28e27769770f925615862783edf65f2b748ef8444ed8c83787c21d35b0de6",
     "prior_library_retained_path": "/private/var/db/trading-desk-router-bootstrap-v1/quarantine/router-operator-pre-home-migration-Library",
+    "prior_runtime_retained_path": "/private/var/db/trading-desk-router-bootstrap-v1/quarantine/router-operator-pre-home-migration-vmnet-runtime",
+    "post_recreate_runtime": {
+        "pid_inode": 55457432,
+        "pid_size": 5,
+        "socket_inode": 55457433,
+    },
     "source_controller_manifest_sha256": "7e4a16f2622abc4a259c7c0eb117f9ea7d4de1b4cb121297c4fef9af952f3845",
     "source_home": "/private/var/db/trading-desk-lima",
     "target_home": "/private/var/db/trading-desk-router-process-home",
@@ -1739,13 +1746,40 @@ def _assert_no_airgap_watchdog_process() -> None:
         timeout=10,
         check=False,
     )
-    if (
-        result.returncode != 0
-        or result.stderr
-        or len(result.stdout) > 4 * 1024 * 1024
-        or any("airgap-watchdog.py" in line for line in result.stdout.splitlines())
-    ):
+    if result.returncode != 0 or result.stderr or len(result.stdout) > 4 * 1024 * 1024:
         raise BootstrapError("airgap watchdog process proof differs")
+    expected_python = "/opt/trading-desk/runtime/python-3.11.16/bin/python3.11"
+    modes = {"probe-base", "capture-base", "capture-host-only", "check", "watch"}
+    for line in result.stdout.splitlines():
+        fields = line.split(None, 3)
+        if (
+            len(fields) != 4
+            or not fields[0].isdigit()
+            or not _valid_ps_uid(fields[1])
+            or not fields[2]
+            or not fields[3]
+        ):
+            raise BootstrapError("airgap watchdog process inventory is malformed")
+        if "airgap-watchdog.py" not in fields[3]:
+            continue
+        pid = int(fields[0], 10)
+        if pid <= 1:
+            raise BootstrapError("airgap watchdog process PID is unsafe")
+        if _proc_pid_path(pid) != expected_python:
+            continue
+        try:
+            argv = shlex.split(fields[3], posix=True)
+        except ValueError as error:
+            raise BootstrapError("airgap watchdog argv is malformed") from error
+        if (
+            len(argv) >= 5
+            and argv[0] == expected_python
+            and argv[1:3] == ["-I", "-B"]
+            and argv[3].startswith("/")
+            and Path(argv[3]).name == "airgap-watchdog.py"
+            and argv[4] in modes
+        ):
+            raise BootstrapError("airgap watchdog process proof differs")
 
 
 def _network_snapshot() -> dict[str, str]:
@@ -1972,6 +2006,7 @@ def _validate_interrupted_first_boot_successor(
     hardened_receipt: dict[str, Any],
     *,
     allow_current_library: bool = False,
+    allow_current_runtime: bool = False,
 ) -> dict[str, Any]:
     contract = lock["interrupted_first_boot_recovery"]
     source = contract["source_session_id"]
@@ -2262,7 +2297,6 @@ def _validate_interrupted_first_boot_successor(
         if (current.st_dev, current.st_ino) == (retained.st_dev, retained.st_ino):
             raise BootstrapError("interrupted source and destination alias")
     old_source_absent = [
-        live["runtime"],
         live["sudoers"],
         live["base"],
         live["base"].parent / f".{live['base'].name}.pending",
@@ -2273,6 +2307,8 @@ def _validate_interrupted_first_boot_successor(
     ]
     if not allow_current_library:
         old_source_absent.append(live["library"])
+    if not allow_current_runtime:
+        old_source_absent.append(live["runtime"])
     if any(path.exists() or path.is_symlink() for path in old_source_absent):
         raise BootstrapError("interrupted source evidence reappeared")
 
@@ -2418,9 +2454,10 @@ def _validate_interrupted_first_boot_successor(
         state["quarantine"] / f"first-boot-vmnet-runtime-{fresh}",
         state["quarantine"] / f"prestart-base-capture-{fresh}",
         state["quarantine"] / f"prestart-preparing-{fresh}",
-        Path(lock["paths"]["vmnet_runtime"]),
         Path(lock["paths"]["vmnet_sudoers"]),
     ]
+    if not allow_current_runtime:
+        unused.append(Path(lock["paths"]["vmnet_runtime"]))
     interrupted_fresh_finals = [
         state["receipts"]
         / f"12-interrupted-first-boot-quarantine-{fresh}.json",
@@ -2463,6 +2500,8 @@ def _router_home_migration_paths(
         "library": Path(migration["source_home"]) / "Library",
         "receipt": Path(migration["migration_receipt_path"]),
         "retained_library": Path(migration["prior_library_retained_path"]),
+        "retained_runtime": Path(migration["prior_runtime_retained_path"]),
+        "runtime": Path(lock["paths"]["vmnet_runtime"]),
         "transaction": Path(migration["migration_transaction_path"]),
     }
 
@@ -2484,6 +2523,64 @@ def _router_library_identity(path: Path) -> dict[str, int]:
         "device": metadata.st_dev,
         "inode": metadata.st_ino,
         "mode": mode,
+    }
+
+
+def _router_post_recreate_runtime_identity(
+    lock: dict[str, Any], path: Path
+) -> dict[str, Any]:
+    contract = lock["router_operator_home_migration"]["post_recreate_runtime"]
+    root = _assert_real(path, kind="directory", uid=0, gid=0, mode=0o755)
+    _verify_recovery_xattrs(path, "runtime")
+    socket_path = path / "socket_vmnet.td-router-ingress"
+    pid_path = path / "td-router-ingress_socket_vmnet.pid"
+    if {item.name for item in path.iterdir()} != {socket_path.name, pid_path.name}:
+        raise BootstrapError("post-recreate VMNet runtime inventory differs")
+    socket_metadata = socket_path.lstat()
+    pid_content = _read_bound(
+        pid_path,
+        uid=0,
+        gid=0,
+        mode=0o600,
+        maximum=contract["pid_size"],
+    )
+    pid_metadata = pid_path.stat()
+    _no_named_acl(socket_path)
+    _no_named_acl(pid_path)
+    _verify_recovery_xattrs(pid_path, "pidfile")
+    if (
+        socket_path.is_symlink()
+        or not stat.S_ISSOCK(socket_metadata.st_mode)
+        or (
+            socket_metadata.st_uid,
+            socket_metadata.st_gid,
+            stat.S_IMODE(socket_metadata.st_mode),
+            socket_metadata.st_nlink,
+            socket_metadata.st_size,
+            socket_metadata.st_ino,
+        )
+        != (0, 454, 0o770, 1, 0, contract["socket_inode"])
+        or pid_metadata.st_ino != contract["pid_inode"]
+        or pid_metadata.st_size != contract["pid_size"]
+        or not pid_content.isdigit()
+        or int(pid_content) <= 1
+    ):
+        raise BootstrapError("post-recreate VMNet runtime differs")
+    try:
+        os.kill(int(pid_content), 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise BootstrapError("post-recreate VMNet PID is live or reused")
+    return {
+        "device": root.st_dev,
+        "inode": root.st_ino,
+        "mode": stat.S_IMODE(root.st_mode),
+        "pid": pid_content.decode("ascii"),
+        "pid_inode": pid_metadata.st_ino,
+        "pid_sha256": _sha256_bytes(pid_content),
+        "pid_size": pid_metadata.st_size,
+        "socket_inode": socket_metadata.st_ino,
     }
 
 
@@ -2651,6 +2748,7 @@ def _load_router_home_transaction(
         "network_snapshot_sha256",
         "per_user_agents",
         "phase",
+        "runtime",
         "schema_version",
         "source_controller_manifest_sha256",
         "source_home",
@@ -2665,7 +2763,11 @@ def _load_router_home_transaction(
         {
             "destination": str(paths["retained_library"]),
             "source": str(paths["library"]),
-        }
+        },
+        {
+            "destination": str(paths["retained_runtime"]),
+            "source": str(paths["runtime"]),
+        },
     ]
     if (
         set(value) != expected_keys
@@ -2731,14 +2833,15 @@ def _load_router_home_transaction(
     bug_content, bug_evidence = _bound_migration_file(
         paths["birth_bug"], migration["birth_bug_quarantine_sha256"]
     )
-    source_present = paths["library"].exists() or paths["library"].is_symlink()
-    retained_present = (
-        paths["retained_library"].exists()
-        or paths["retained_library"].is_symlink()
-    )
-    if source_present == retained_present:
-        raise BootstrapError("router home migration Library frontier differs")
-    library_path = paths["library"] if source_present else paths["retained_library"]
+    current_paths: dict[str, Path] = {}
+    for key in ("library", "runtime"):
+        source = paths[key]
+        retained = paths[f"retained_{key}"]
+        source_present = source.exists() or source.is_symlink()
+        retained_present = retained.exists() or retained.is_symlink()
+        if source_present == retained_present:
+            raise BootstrapError(f"router home migration {key} frontier differs")
+        current_paths[key] = source if source_present else retained
     if (
         identity_content
         != _identity_receipt_content(lock, migration["source_home"])
@@ -2750,7 +2853,12 @@ def _load_router_home_transaction(
         or value.get("identity_receipt") != identity_evidence
         or value.get("birth_marker") != birth_evidence
         or value.get("birth_bug") != bug_evidence
-        or _router_library_identity(library_path) != value.get("library")
+        or _router_library_identity(current_paths["library"])
+        != value.get("library")
+        or _router_post_recreate_runtime_identity(
+            lock, current_paths["runtime"]
+        )
+        != value.get("runtime")
     ):
         raise BootstrapError("router home migration transaction lineage differs")
     return value, content
@@ -2765,6 +2873,8 @@ def _validate_router_home_migration(
 ) -> dict[str, Any]:
     migration = lock["router_operator_home_migration"]
     paths = _router_home_migration_paths(lock)
+    _assert_no_airgap_watchdog_process()
+    _assert_no_vm_process()
     receipt_pending = paths["receipt"].parent / f".{paths['receipt'].name}.pending"
     if receipt_path is None and (receipt_pending.exists() or receipt_pending.is_symlink()):
         raise BootstrapError("router home migration receipt is pending")
@@ -2798,6 +2908,8 @@ def _validate_router_home_migration(
         "prior_identity_receipt_sha256",
         "prior_library_identity",
         "prior_library_retained_path",
+        "prior_runtime_identity",
+        "prior_runtime_retained_path",
         "raw_uid454_processes_absent",
         "schema_version",
         "source_controller_manifest_sha256",
@@ -2840,6 +2952,9 @@ def _validate_router_home_migration(
         or receipt.get("prior_library_retained_path")
         != str(paths["retained_library"])
         or receipt.get("prior_library_identity") != transaction["library"]
+        or receipt.get("prior_runtime_retained_path")
+        != str(paths["retained_runtime"])
+        or receipt.get("prior_runtime_identity") != transaction["runtime"]
         or not isinstance(receipt.get("pre_change_bootout"), dict)
         or receipt["pre_change_bootout"].get("initial_processes")
         != transaction["per_user_agents"]
@@ -2887,8 +3002,14 @@ def _validate_router_home_migration(
         or transaction.get("birth_bug") != bug_evidence
         or _router_library_identity(paths["retained_library"])
         != transaction.get("library")
+        or _router_post_recreate_runtime_identity(
+            lock, paths["retained_runtime"]
+        )
+        != transaction.get("runtime")
         or paths["library"].exists()
         or paths["library"].is_symlink()
+        or paths["runtime"].exists()
+        or paths["runtime"].is_symlink()
     ):
         raise BootstrapError("router home migration retained lineage differs")
     _assert_host_identity(lock)
@@ -5114,11 +5235,18 @@ def _migrate_router_operator_home(args: argparse.Namespace) -> int:
     transaction_exists = paths["transaction"].exists() or paths["transaction"].is_symlink()
     if not transaction_exists:
         _assert_host_identity(lock, legacy_home=True)
-        if paths["retained_library"].exists() or paths["retained_library"].is_symlink():
+        if any(
+            path.exists() or path.is_symlink()
+            for path in (paths["retained_library"], paths["retained_runtime"])
+        ):
             raise BootstrapError("router home migration destination predates transaction")
         receipt08 = _hardened_vm_receipt(lock)
         _validate_interrupted_first_boot_successor(
-            lock, state, receipt08, allow_current_library=True
+            lock,
+            state,
+            receipt08,
+            allow_current_library=True,
+            allow_current_runtime=True,
         )
         instance = _hardened_instance_evidence(
             lock, receipt08, allow_runtime_files=False
@@ -5148,6 +5276,7 @@ def _migrate_router_operator_home(args: argparse.Namespace) -> int:
         ):
             raise BootstrapError("router home migration birth lineage differs")
         library = _router_library_identity(paths["library"])
+        runtime = _router_post_recreate_runtime_identity(lock, paths["runtime"])
         transaction = {
             "active_controller_manifest_sha256": args.expected_controller_manifest_sha256,
             "birth_bug": bug_evidence,
@@ -5170,7 +5299,11 @@ def _migrate_router_operator_home(args: argparse.Namespace) -> int:
                 {
                     "destination": str(paths["retained_library"]),
                     "source": str(paths["library"]),
-                }
+                },
+                {
+                    "destination": str(paths["retained_runtime"]),
+                    "source": str(paths["runtime"]),
+                },
             ],
             "network_changes_authorized": False,
             "network_snapshot_sha256": _sha256_bytes(
@@ -5178,6 +5311,7 @@ def _migrate_router_operator_home(args: argparse.Namespace) -> int:
             ),
             "per_user_agents": agents,
             "phase": "router-operator-home-migration",
+            "runtime": runtime,
             "schema_version": 1,
             "source_controller_manifest_sha256": migration[
                 "source_controller_manifest_sha256"
@@ -5223,6 +5357,9 @@ def _migrate_router_operator_home(args: argparse.Namespace) -> int:
         allow_current_library=(
             paths["library"].exists() or paths["library"].is_symlink()
         ),
+        allow_current_runtime=(
+            paths["runtime"].exists() or paths["runtime"].is_symlink()
+        ),
     )
     resumed_instance = _hardened_instance_evidence(
         lock, receipt08, allow_runtime_files=False
@@ -5251,6 +5388,8 @@ def _migrate_router_operator_home(args: argparse.Namespace) -> int:
     if current_home == migration["source_home"] and (
         paths["retained_library"].exists()
         or paths["retained_library"].is_symlink()
+        or paths["retained_runtime"].exists()
+        or paths["retained_runtime"].is_symlink()
     ):
         raise BootstrapError("router home migration mutation order differs")
     if current_home == migration["source_home"]:
@@ -5320,6 +5459,32 @@ def _migrate_router_operator_home(args: argparse.Namespace) -> int:
             raise BootstrapError("retained router per-user Library differs")
     if paths["library"].exists() or paths["library"].is_symlink():
         raise BootstrapError("router per-user Library remains live")
+    if paths["retained_runtime"].exists() or paths["retained_runtime"].is_symlink():
+        if (
+            _router_post_recreate_runtime_identity(
+                lock, paths["retained_runtime"]
+            )
+            != transaction["runtime"]
+        ):
+            raise BootstrapError("retained post-recreate VMNet runtime differs")
+        if paths["runtime"].exists() or paths["runtime"].is_symlink():
+            raise BootstrapError("post-recreate VMNet runtime source reappeared")
+    else:
+        if (
+            _router_post_recreate_runtime_identity(lock, paths["runtime"])
+            != transaction["runtime"]
+        ):
+            raise BootstrapError("post-recreate VMNet runtime changed before retention")
+        _rename_exclusive(paths["runtime"], paths["retained_runtime"])
+        if (
+            _router_post_recreate_runtime_identity(
+                lock, paths["retained_runtime"]
+            )
+            != transaction["runtime"]
+        ):
+            raise BootstrapError("retained post-recreate VMNet runtime differs")
+    if paths["runtime"].exists() or paths["runtime"].is_symlink():
+        raise BootstrapError("post-recreate VMNet runtime remains live")
     receipt08 = _hardened_vm_receipt(lock)
     _validate_interrupted_first_boot_successor(lock, state, receipt08)
     instance = _hardened_instance_evidence(
@@ -5370,6 +5535,8 @@ def _migrate_router_operator_home(args: argparse.Namespace) -> int:
         ],
         "prior_library_identity": transaction["library"],
         "prior_library_retained_path": str(paths["retained_library"]),
+        "prior_runtime_identity": transaction["runtime"],
+        "prior_runtime_retained_path": str(paths["retained_runtime"]),
         "raw_uid454_processes_absent": True,
         "schema_version": 1,
         "source_controller_manifest_sha256": migration[
