@@ -59,7 +59,7 @@
     "predecessor_networks_sha256": "835de583b196bc448a639cda181daa6670b0430ce84d2478503ff408650ab25e",
     "predecessor_plan_sha256": "00228f7b613418647ae9718989f7d9a2a9bb1493692ed832977294171b324150",
     "predecessor_vm_receipt_sha256": "1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601",
-    "prestart_recovery_receipt_sha256": "RECOVERY_RECEIPT_REQUIRED",
+    "prestart_recovery_receipt_sha256": "13bc644f5c99e38ffedce3b2e3ce75c70c4a7f2bd8e198f36403dbd0ab86cd78",
     "socket_vmnet_sha256": "b8a72a62237312f2f756027dea504a844edeb40014702d4a320292c026d282b0"
   },
   "review_status": "attended_airgap_hardened_recreate_and_one_boot_enabled",
