@@ -45,7 +45,7 @@
     "router_activation_apply_enabled": false
   },
   "pins": {
-    "airgap_session_id": "5eb146dc1a6d119cd01a7b1afb0aaefa38ab91e36aa8fa8b6a08cfdb59f45f9d",
+    "airgap_session_id": "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1",
     "hardened_cloud_template_sha256": "ee4d159bae33ba541ef1b32c0f15e96e39c8b251e28b1cebc15738dace2de225",
     "hardened_plan_sha256": "aea50ab9aeaf1022f1cf1fbd7055cb9d249e6c94cb5bbae96ff04944a67a9874",
     "hardened_vm_receipt_sha256": "8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6",
@@ -59,7 +59,7 @@
     "predecessor_networks_sha256": "835de583b196bc448a639cda181daa6670b0430ce84d2478503ff408650ab25e",
     "predecessor_plan_sha256": "00228f7b613418647ae9718989f7d9a2a9bb1493692ed832977294171b324150",
     "predecessor_vm_receipt_sha256": "1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601",
-    "prestart_recovery_receipt_sha256": "4ab34840fff16c3a9594f96516d13601d0d8b510d5c5dd29528e4b3dd0ced042",
+    "prestart_recovery_receipt_sha256": "RECOVERY_RECEIPT_REQUIRED",
     "socket_vmnet_sha256": "b8a72a62237312f2f756027dea504a844edeb40014702d4a320292c026d282b0"
   },
   "review_status": "attended_airgap_hardened_recreate_and_one_boot_enabled",
