@@ -146,6 +146,8 @@ def _load_lock(content: bytes) -> dict[str, Any]:
         or value.get("host", {}).get("router_operator_uid") != 454
         or value.get("host", {}).get("router_operator_gid") != 454
         or value.get("guest", {}).get("instance_name") != "trading-desk-router"
+        or value.get("paths", {}).get("lima_process_home")
+        != "/private/var/db/trading-desk-router-process-home"
         or value.get("pins", {}).get("predecessor_vm_receipt_sha256")
         != "1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601"
         or value.get("check_only_rotation")

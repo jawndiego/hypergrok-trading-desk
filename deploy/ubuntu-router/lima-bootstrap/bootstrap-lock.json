@@ -29,6 +29,7 @@
     "airgap_state": "/private/var/db/trading-desk-router-bootstrap-v1/airgap",
     "hardened_vm_receipt": "/private/var/db/trading-desk-router-bootstrap-v1/receipts/08-hardened-vm.json",
     "lima_home": "/private/var/db/trading-desk-lima",
+    "lima_process_home": "/private/var/db/trading-desk-router-process-home",
     "lima_install": "/opt/trading-desk-router-tools/lima-2.2.0",
     "local_image": "/opt/trading-desk-router-images/ubuntu-24.04-server-cloudimg-arm64-20260814.img",
     "predecessor_receipt": "/private/var/db/trading-desk-router-commission-v1/receipts/07-vm-create.json",

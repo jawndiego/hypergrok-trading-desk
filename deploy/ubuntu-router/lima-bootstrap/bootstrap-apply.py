@@ -907,6 +907,8 @@ def _load_lock() -> dict[str, Any]:
         lock.get("schema_version") != 1
         or lock.get("review_status")
         != "attended_airgap_hardened_recreate_and_one_boot_enabled"
+        or lock.get("paths", {}).get("lima_process_home")
+        != "/private/var/db/trading-desk-router-process-home"
         or lock.get("check_only_rotation")
         != {
             "source_base_capture_sha256": "a39b3d2c7951696306b3279a9cc854fdcc281612d32544a59c3e3e7abd07b002",
@@ -1405,8 +1407,12 @@ def _drop_preexec(uid: int, gid: int):
 
 
 def _environment(lock: dict[str, Any]) -> dict[str, str]:
+    process_home = Path(lock["paths"]["lima_process_home"])
+    if process_home != Path("/private/var/db/trading-desk-router-process-home"):
+        raise BootstrapError("Lima process HOME path differs")
+    _assert_real(process_home, kind="directory", uid=454, gid=454, mode=0o700)
     return {
-        "HOME": lock["paths"]["lima_home"],
+        "HOME": str(process_home),
         "LIMA_HOME": lock["paths"]["lima_home"],
         "LANG": "C",
         "LC_ALL": "C",
@@ -2530,7 +2536,7 @@ def _emergency_contain_until_stopped(lock: dict[str, Any], limactl: Path) -> Non
         "--",
         "/usr/bin/env",
         "-i",
-        f"HOME={lock['paths']['lima_home']}",
+        f"HOME={lock['paths']['lima_process_home']}",
         f"LIMA_HOME={lock['paths']['lima_home']}",
         "LANG=C",
         "LC_ALL=C",
@@ -2571,6 +2577,40 @@ def _emergency_contain_until_stopped(lock: dict[str, Any], limactl: Path) -> Non
         except BaseException:
             pass
         time.sleep(0.2)
+
+
+def _reap_watchdog_after_stopped(
+    process: subprocess.Popen[bytes], lock: dict[str, Any], limactl: Path
+) -> None:
+    def prove() -> None:
+        _status(lock, limactl)
+        if _router_uid_processes():
+            raise BootstrapError("router process remains before watchdog reap")
+        _assert_no_vm_process()
+
+    try:
+        stdout, stderr = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        prove()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            prove()
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                stdout, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired as error:
+                raise BootstrapError("orphan watchdog reap timed out") from error
+    if len(stdout) + len(stderr) > 128 * 1024:
+        raise BootstrapError("orphan watchdog output exceeds bound")
+    prove()
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
@@ -4312,11 +4352,6 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
             except OSError:
                 pass
             watchdog_write_fd = None
-        if watchdog is not None:
-            try:
-                watchdog.communicate()
-            except OSError:
-                pass
         if pid_acl_path is not None:
             try:
                 if pid_acl_path.exists() and not pid_acl_path.is_symlink():
@@ -4331,7 +4366,11 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
                 _stop_hostonly_daemon(socket_process, socket_streams)
             except BaseException:
                 pass
-        if start_invoked:
+        if watchdog is not None:
+            _emergency_contain_until_stopped(lock, limactl)
+            _reap_watchdog_after_stopped(watchdog, lock, limactl)
+            watchdog = None
+        elif start_invoked:
             _emergency_contain_until_stopped(lock, limactl)
         if vmnet_cleanup is None:
             try:

@@ -113,5 +113,10 @@ the pinned daemon must exit cleanly, remove its PID file and leave only the
 inactive Unix socket for exact retention; watchdog SIGKILL incidents may retain
 the separately validated stale PID.
 
+All Lima subprocesses use the dedicated UID-454 mode-0700
+`/private/var/db/trading-desk-router-process-home` as `HOME`; `LIMA_HOME`
+remains the separate instance namespace. Failure cleanup contains the VM first,
+then reaps the watchdog process group with bounded TERM/KILL waits.
+
 This does not authorize another guest boot. A later stopped migration must
 remove bootstrap passwordless sudo and per-boot provisioning first.

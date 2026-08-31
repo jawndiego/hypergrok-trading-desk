@@ -406,6 +406,10 @@ The pinned socket_vmnet process must then exit cleanly under controller SIGTERM.
 Its expected success residue is an ACL-free inactive socket with the PID file
 removed; a socket-plus-stale-PID residue is accepted only for a contained
 watchdog-kill incident and never as successful completion evidence.
+Lima's writable per-user `HOME` is a separate UID-454 mode-0700 directory
+outside `LIMA_HOME`; this prevents macOS `Library` state from being enumerated
+as a VM. On failure, independent stopped/no-process containment precedes every
+bounded watchdog process-group reap or escalation.
 
 Both capture passes run pinned macOS observers sequentially under one total
 deadline. The continuous watchdog retains concurrent sampling, but each child

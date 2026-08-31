@@ -87,6 +87,7 @@ HARDWARE_PROFILE = SCRIPT_DIR / "airgap-hardware-profile.json"
 HARDWARE_LOCK = STATE_ROOT / "airgap-hardware-lock.json"
 RESULT_ROOT = STATE_ROOT / "airgap-watchdog-results"
 LIMA_HOME = Path("/private/var/db/trading-desk-lima")
+LIMA_PROCESS_HOME = Path("/private/var/db/trading-desk-router-process-home")
 LIMACTL = Path("/opt/trading-desk-router-tools/lima-2.2.0/bin/limactl")
 LIMACTL_SHA256 = "f19a4fca3875e1017a5285672be4a62699c1e55918fb6a7afce86a14199e10d9"
 SOCKET_VMNET = Path("/opt/socket_vmnet/bin/socket_vmnet")
@@ -2745,7 +2746,7 @@ def _force_stop() -> dict[str, Any]:
                 "--",
                 "/usr/bin/env",
                 "-i",
-                f"HOME={LIMA_HOME}",
+                f"HOME={LIMA_PROCESS_HOME}",
                 f"LIMA_HOME={LIMA_HOME}",
                 "LANG=C",
                 "LC_ALL=C",

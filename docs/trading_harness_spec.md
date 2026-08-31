@@ -317,6 +317,10 @@ read-only access to the exact live PID file, verify the process identity, reuse
 that daemon, and lose the ACL immediately after the guarded start boundary.
 The VMNet runtime directory MUST NOT be made generally daemon-writable merely
 to bypass Lima's managed-daemon fallback.
+Lima's writable process `HOME` MUST be distinct from `LIMA_HOME`, exact-owned by
+the router UID, and absent from instance discovery. Failure handling MUST prove
+the VM stopped before bounded watchdog process-group termination; it MUST NOT
+block indefinitely waiting for watchdog output before containment.
 
 WireGuard private keys MUST be generated and retained on their owning machines
 outside repo, chat, cloud-init, argv and environment variables. Router-only key
