@@ -54,6 +54,24 @@ DORMANT_APPLE_PROFILES = [
     {"flags": ["BROADCAST", "MULTICAST", "SIMPLEX", "SMART"], "interface": "llw0", "mtu": 1500, "route_class": "multicast_link", "status": None},
 ]
 PLACEHOLDER_RE = re.compile(r"__[A-Z0-9_]+__")
+FINAL_AIRGAP_REVIEW_STATUS = "attended_airgap_final_one_boot_enabled"
+INTERRUPTED_FIRST_BOOT_RECOVERY = {
+    "completing_recovery_controller_manifest_sha256": "a1c5f9b303eec36ff4ba4e607d762bb44dc794c56a3d3ffb0093b2911d17a7fd",
+    "failed_controller_manifest_sha256": "b8e7fd49e23fa4b988834764f97ffbb1c1e179c26f491b2f098ba04e887d0f4d",
+    "fresh_session_id": "e33dbb26c0b91014f0748dd121d78d66627dd11c1fe8db4af0931d2254865999",
+    "initiating_recovery_controller_manifest_sha256": "51b0ac392c5588a41512cde239f096de8293d532f7c13bcccf45c38bea171e00",
+    "prior_hardened_vm_receipt_sha256": "8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6",
+    "resume_authorization_sha256": "dd4d1c963ff88abd82b12de743c2b181def94c100ebfa23f398abf98916fe3d7",
+    "source_session_id": "91c455c4f6a2ebb670d9ea01b394158c0b48edbb92da55317b3c3e9ec7ffeda9",
+    "stopped_proof_sha256": "62676d50371deab1de5ef8fbb58f4e87676a8ec9c550d2a3be1da9d4dc822f36",
+    "transaction_sha256": "e76da7a511d625dc4114cb0696a1ddc2e48029d351a3f8809c266fc7788eb2ef",
+}
+FINAL_HARDENED_VM_RECEIPT_SHA256 = (
+    "e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c"
+)
+INTERRUPTED_QUARANTINE_RECEIPT_SHA256 = (
+    "2ae8f48d9363ebbc9605f604c4b6bbcd7ac54161b77a819731a0abe27525dbf5"
+)
 
 SOURCE_FILES: dict[str, int] = {
     "README.md": 0o600,
@@ -65,13 +83,11 @@ SOURCE_FILES: dict[str, int] = {
     "cloud-config-first-boot.yaml.example": 0o600,
     "finalize-first-boot.sh": 0o700,
     "first-boot-hardening.sh": 0o700,
-    "interrupted-recovery.py": 0o700,
     "lima-first-boot.yaml.example": 0o600,
     "lima-first-boot.sudoers": 0o600,
     "networks-first-boot.yaml": 0o600,
     "predecessor-cloud-config.template": 0o600,
     "predecessor-lima-create-local.yaml": 0o600,
-    "prestart-recovery-profile.json.example": 0o600,
     "verify-first-boot.py": 0o700,
 }
 
@@ -142,8 +158,7 @@ def _load_lock(content: bytes) -> dict[str, Any]:
         raise ValueError("bootstrap lock must be an object")
     if (
         value.get("schema_version") != 1
-        or value.get("review_status")
-        != "attended_airgap_hardened_recreate_and_one_boot_enabled"
+        or value.get("review_status") != FINAL_AIRGAP_REVIEW_STATUS
         or value.get("host", {}).get("router_operator_uid") != 454
         or value.get("host", {}).get("router_operator_gid") != 454
         or value.get("guest", {}).get("instance_name") != "trading-desk-router"
@@ -157,11 +172,13 @@ def _load_lock(content: bytes) -> dict[str, Any]:
             "source_session_id": "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1",
             "target_session_id": "0fbd65f00cd16cd949c15df3147249a35d8034ef3f052a441ba0246ccb8183d1",
         }
-        or {key: item for key, item in value.get("phases", {}).items() if key != "proven_preboot_recovery_enabled"}
+        or value.get("phases")
         != {
             "airgapped_start_apply_enabled": True,
             "guest_package_apply_enabled": False,
-            "hardened_recreate_apply_enabled": True,
+            "hardened_recreate_apply_enabled": False,
+            "interrupted_first_boot_recovery_enabled": False,
+            "proven_preboot_recovery_enabled": False,
             "router_activation_apply_enabled": False,
         }
         or value.get("storage")
@@ -181,6 +198,17 @@ def _load_lock(content: bytes) -> dict[str, Any]:
         }
     ):
         raise ValueError("bootstrap lock authorization boundary differs")
+    interrupted = value.get("interrupted_first_boot_recovery")
+    if (
+        interrupted != INTERRUPTED_FIRST_BOOT_RECOVERY
+        or value.get("pins", {}).get("airgap_session_id")
+        != interrupted["fresh_session_id"]
+        or value["pins"].get("hardened_vm_receipt_sha256")
+        != FINAL_HARDENED_VM_RECEIPT_SHA256
+        or value["pins"].get("interrupted_first_boot_quarantine_receipt_sha256")
+        != INTERRUPTED_QUARANTINE_RECEIPT_SHA256
+    ):
+        raise ValueError("bootstrap interrupted first-boot successor differs")
     recovery = value.get("proven_preboot_recovery")
     if (
         not isinstance(recovery, dict)
@@ -191,10 +219,11 @@ def _load_lock(content: bytes) -> dict[str, Any]:
     ):
         raise ValueError("bootstrap proven-preboot recovery differs")
     recovery_pin = value["pins"].get("proven_preboot_recovery_receipt_sha256")
-    pending = recovery_pin == "RECOVERY_RECEIPT_REQUIRED"
     if (
-        (pending and (value["pins"]["airgap_session_id"] != recovery["source_session_id"] or value["phases"]["proven_preboot_recovery_enabled"] is not True))
-        or (not pending and (not isinstance(recovery_pin, str) or SHA256_RE.fullmatch(recovery_pin) is None or value["pins"]["airgap_session_id"] != recovery["fresh_session_id"] or value["phases"]["proven_preboot_recovery_enabled"] is not False))
+        not isinstance(recovery_pin, str)
+        or SHA256_RE.fullmatch(recovery_pin) is None
+        or value["phases"]["proven_preboot_recovery_enabled"] is not False
+        or recovery["fresh_session_id"] != interrupted["source_session_id"]
     ):
         raise ValueError("bootstrap proven-preboot controller state differs")
     _validate_system_tool_contract(value)
@@ -522,7 +551,6 @@ def _validate_recovery_profile(
 
 def _rendered_files(
     hardware_profile_path: Path,
-    recovery_profile_path: Path | None = None,
 ) -> tuple[dict[str, tuple[bytes, int]], dict[str, Any]]:
     source_bytes = {
         name: _read(SOURCE / name, name)
@@ -533,14 +561,6 @@ def _rendered_files(
         hardware_profile_path.resolve(strict=True), "local air-gap hardware profile"
     )
     profile = _validate_hardware_profile(hardware_profile)
-    recovery_profile = (
-        source_bytes["prestart-recovery-profile.json.example"]
-        if recovery_profile_path is None
-        else _read(recovery_profile_path.resolve(strict=True), "local prestart recovery profile")
-    )
-    _validate_recovery_profile(
-        recovery_profile, lock, allow_placeholder=recovery_profile_path is None
-    )
     if profile["host"] != {
         "build_version": lock["host"]["build_version"],
         "machine": lock["host"]["architecture"],
@@ -585,7 +605,6 @@ def _rendered_files(
         name: (content, SOURCE_FILES[name]) for name, content in source_bytes.items()
     }
     files["airgap-hardware-profile.json"] = (hardware_profile, 0o600)
-    files["prestart-recovery-profile.json"] = (recovery_profile, 0o600)
     files["lima-first-boot.yaml"] = (plan, 0o600)
     return files, lock
 
@@ -608,13 +627,12 @@ def _write(path: Path, content: bytes, mode: int) -> None:
 def render(
     output: Path,
     hardware_profile_path: Path,
-    recovery_profile_path: Path | None = None,
 ) -> dict[str, Any]:
     if not output.is_absolute() or output.exists() or output.is_symlink():
         raise ValueError("output must be a new absolute path")
     if not output.parent.is_dir() or output.parent.is_symlink():
         raise ValueError("output parent must be a real directory")
-    files, lock = _rendered_files(hardware_profile_path, recovery_profile_path)
+    files, lock = _rendered_files(hardware_profile_path)
     output.mkdir(mode=0o700)
     try:
         hashes: dict[str, str] = {}
@@ -623,10 +641,19 @@ def render(
             hashes[name] = _sha256(content)
         manifest = {
             "apply_enabled": False,
+            "airgap_session_id": lock["pins"]["airgap_session_id"],
             "attended_airgapped_start_apply_enabled": True,
             "bundle_kind": "trading-desk.ubuntu-router-airgap-bootstrap",
             "files": hashes,
+            "hardened_recreate_apply_enabled": False,
             "hardened_plan_sha256": hashes["lima-first-boot.yaml"],
+            "hardened_vm_receipt_sha256": lock["pins"][
+                "hardened_vm_receipt_sha256"
+            ],
+            "interrupted_first_boot_quarantine_receipt_sha256": lock["pins"][
+                "interrupted_first_boot_quarantine_receipt_sha256"
+            ],
+            "interrupted_first_boot_recovery_enabled": False,
             "mainnet_authorized": False,
             "network_changes_performed": False,
             "predecessor_vm_receipt_sha256": lock["pins"][
@@ -648,7 +675,6 @@ def verify(
     expected_manifest_sha256: str,
     owner_uid: int | None,
     hardware_profile_path: Path,
-    recovery_profile_path: Path | None = None,
 ) -> dict[str, Any]:
     if SHA256_RE.fullmatch(expected_manifest_sha256) is None:
         raise ValueError("expected manifest digest is invalid")
@@ -666,16 +692,42 @@ def verify(
         manifest = json.loads(manifest_raw, object_pairs_hook=_unique_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("bundle manifest is invalid") from error
-    expected_files, lock = _rendered_files(hardware_profile_path, recovery_profile_path)
+    expected_files, lock = _rendered_files(hardware_profile_path)
     expected_names = set(expected_files) | {"bundle-manifest.json"}
     if {path.name for path in bundle.iterdir()} != expected_names:
         raise ValueError("bundle file inventory differs")
     if (
         not isinstance(manifest, dict)
+        or set(manifest)
+        != {
+            "airgap_session_id",
+            "apply_enabled",
+            "attended_airgapped_start_apply_enabled",
+            "bundle_kind",
+            "files",
+            "hardened_plan_sha256",
+            "hardened_recreate_apply_enabled",
+            "hardened_vm_receipt_sha256",
+            "interrupted_first_boot_quarantine_receipt_sha256",
+            "interrupted_first_boot_recovery_enabled",
+            "mainnet_authorized",
+            "network_changes_performed",
+            "predecessor_vm_receipt_sha256",
+            "schema_version",
+            "venue_writes_authorized",
+            "vm_started",
+        }
         or manifest.get("bundle_kind")
         != "trading-desk.ubuntu-router-airgap-bootstrap"
         or manifest.get("apply_enabled") is not False
         or manifest.get("attended_airgapped_start_apply_enabled") is not True
+        or manifest.get("hardened_recreate_apply_enabled") is not False
+        or manifest.get("interrupted_first_boot_recovery_enabled") is not False
+        or manifest.get("airgap_session_id") != lock["pins"]["airgap_session_id"]
+        or manifest.get("hardened_vm_receipt_sha256")
+        != lock["pins"]["hardened_vm_receipt_sha256"]
+        or manifest.get("interrupted_first_boot_quarantine_receipt_sha256")
+        != lock["pins"]["interrupted_first_boot_quarantine_receipt_sha256"]
         or manifest.get("network_changes_performed") is not False
         or manifest.get("vm_started") is not False
         or manifest.get("venue_writes_authorized") is not False
@@ -704,7 +756,6 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--hardware-profile", type=Path)
-    parser.add_argument("--prestart-recovery-profile", type=Path)
     parser.add_argument("--check-bundle", type=Path)
     parser.add_argument("--expected-manifest-sha256")
     parser.add_argument("--require-owner-uid", type=int)
@@ -722,7 +773,6 @@ def main() -> int:
             manifest = render(
                 args.output_dir,
                 args.hardware_profile,
-                args.prestart_recovery_profile,
             )
             print(json.dumps(manifest, indent=2, sort_keys=True))
             return 0
@@ -737,7 +787,6 @@ def main() -> int:
                 args.expected_manifest_sha256,
                 args.require_owner_uid,
                 args.hardware_profile,
-                args.prestart_recovery_profile,
             )
             print(json.dumps(manifest, indent=2, sort_keys=True))
             return 0

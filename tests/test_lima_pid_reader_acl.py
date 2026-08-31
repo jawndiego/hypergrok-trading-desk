@@ -42,8 +42,10 @@ class LimaPidReaderAclTests(unittest.TestCase):
             Path, "lstat", return_value=metadata
         ), mock.patch.object(module.subprocess, "run", side_effect=run), mock.patch.object(
             module.os, "kill"
-        ) as kill:
-            module._set_router_pid_read_acl(path, 8095)
+        ) as kill, mock.patch.object(
+            module, "_process_home", return_value=Path("/")
+        ):
+            module._set_router_pid_read_acl({}, path, 8095)
         self.assertEqual(
             ["/bin/chmod", "+a", "user:trading-router-operator allow read,readattr", str(path)], calls[0][0]
         )

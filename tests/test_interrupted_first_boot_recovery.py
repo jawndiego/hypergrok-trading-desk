@@ -90,6 +90,7 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
         success = subprocess.CompletedProcess([], 0, b"", b"")
         with (
             mock.patch.object(module.C, "_environment", return_value={}),
+            mock.patch.object(module.C, "_process_home", return_value=Path("/")),
             mock.patch.object(module.C, "_drop_preexec", return_value=None),
             mock.patch.object(module.subprocess, "run", return_value=success) as run,
         ):
@@ -105,6 +106,7 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
         ):
             with (
                 mock.patch.object(module.C, "_environment", return_value={}),
+                mock.patch.object(module.C, "_process_home", return_value=Path("/")),
                 mock.patch.object(module.C, "_drop_preexec", return_value=None),
                 mock.patch.object(module.subprocess, "run", return_value=result),
             ):
@@ -585,18 +587,58 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
             recover[recover.index("_interrupted_authorization_validator") :],
         )
 
-    def test_launcher_renderer_and_new_receipt_are_bound(self):
+    def test_final_launcher_renderer_retire_interrupted_recovery(self):
         launcher = LAUNCHER.read_text()
         renderer = RENDERER.read_text()
         apply = APPLY.read_text()
-        self.assertIn(
-            "recover-interrupted-first-boot) script=$controller/interrupted-recovery.py",
-            launcher,
-        )
-        self.assertIn('"interrupted-recovery.py": 0o700', renderer)
-        self.assertIn('"interrupted-recovery.py",', apply)
+        self.assertNotIn("recover-interrupted-first-boot", launcher)
+        self.assertNotIn('"interrupted-recovery.py": 0o700', renderer)
+        self.assertNotIn('"interrupted-recovery.py",', apply)
         self.assertIn("interrupted_first_boot_quarantine_receipt_sha256", apply)
-        self.assertIn("_interrupted_quarantine_receipt_sha256", apply)
+        self.assertIn("_validate_interrupted_first_boot_successor", apply)
+        successor = apply.split(
+            "def _validate_interrupted_first_boot_successor(", 1
+        )[1].split("\ndef _assert_attended_root_tty", 1)[0]
+        for required in (
+            "resume_authorization_sha256",
+            "transaction_sha256",
+            "stopped_proof_sha256",
+            "prior_hardened_vm_receipt_sha256",
+            ".hardened-vm.INSTALLING.json",
+            "11-proven-preboot-recovery-",
+            "12-interrupted-first-boot-quarantine-",
+            "interrupted-first-boot-stopped-proof-",
+            "interrupted-first-boot-{key}-{fresh}",
+            "first-boot-sudoers-{fresh}",
+            "first-boot-vmnet-runtime-{fresh}",
+            "prestart-base-capture-{fresh}",
+            "prestart-preparing-{fresh}",
+            "final air-gap session is not unused",
+        ):
+            self.assertIn(required, successor)
+
+    def test_retired_mutators_fail_before_state_acquisition(self):
+        apply = load(APPLY, "final_disabled_mutators_test")
+        recreate = inspect.getsource(apply._apply_hardened_vm)
+        self.assertLess(
+            recreate.index("hardened_recreate_apply_enabled"),
+            recreate.index("_initialize(lock)"),
+        )
+        proven = inspect.getsource(apply._recover_proven_preboot)
+        self.assertLess(
+            proven.index("proven_preboot_recovery_enabled"),
+            proven.index("_require_existing_state(lock)"),
+        )
+        prestart = inspect.getsource(apply._recover_failed_prestart)
+        self.assertLess(
+            prestart.index("RECOVERY_RECEIPT_REQUIRED"),
+            prestart.index("_require_existing_state(lock)"),
+        )
+        interrupted = inspect.getsource(self.recovery.recover)
+        self.assertLess(
+            interrupted.index("interrupted_first_boot_recovery_enabled"),
+            interrupted.index("_require_existing_state(lock)"),
+        )
 
     def test_quarantine_is_attended_lock_safe_and_nonbooting(self):
         source = inspect.getsource(self.recovery.recover)

@@ -79,9 +79,12 @@ class LimaSudoersReaderAclTests(unittest.TestCase):
         self.assertLess(prepare.index("_probe_router_sudoers_read("), prepare.index("visudo"))
         self.assertLess(prepare.index("_probe_router_sudoers_read("), prepare.index("runtime.mkdir"))
         failed = subprocess.CompletedProcess(["python"], 13, b"", b"denied")
-        with mock.patch.object(module.subprocess, "run", return_value=failed):
+        with (
+            mock.patch.object(module.subprocess, "run", return_value=failed),
+            mock.patch.object(module, "_process_home", return_value=Path("/")),
+        ):
             with self.assertRaisesRegex(module.BootstrapError, "UID454 read probe failed"):
-                module._probe_router_sudoers_read(Path("/fixed/sudoers"), "a" * 64)
+                module._probe_router_sudoers_read({}, Path("/fixed/sudoers"), "a" * 64)
 
 
 if __name__ == "__main__":

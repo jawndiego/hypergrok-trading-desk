@@ -30,9 +30,8 @@ launcher=$(/bin/realpath "$0")
 [ "$launcher" = "$0" ] || die 'launcher path is noncanonical'
 controller=$(/usr/bin/dirname "$launcher")
 case "${1-}" in
-    recover-interrupted-first-boot) script=$controller/interrupted-recovery.py ;;
-    apply-hardened-vm|check-airgap|apply-airgapped-first-boot|verify-stopped-after-airgap|recover-failed-prestart|recover-proven-preboot) script=$controller/bootstrap-apply.py ;;
-    *) die 'launcher accepts only reviewed stopped-create/airgap phases' ;;
+    check-airgap|apply-airgapped-first-boot|verify-stopped-after-airgap) script=$controller/bootstrap-apply.py ;;
+    *) die 'launcher accepts only reviewed final-airgap phases' ;;
 esac
 runtime=/opt/trading-desk/runtime/python-3.11.16
 python=$runtime/bin/python3.11

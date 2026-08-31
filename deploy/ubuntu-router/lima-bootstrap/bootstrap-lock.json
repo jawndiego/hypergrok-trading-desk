@@ -44,10 +44,22 @@
     "source_session_id": "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1",
     "target_session_id": "0fbd65f00cd16cd949c15df3147249a35d8034ef3f052a441ba0246ccb8183d1"
   },
+  "interrupted_first_boot_recovery": {
+    "completing_recovery_controller_manifest_sha256": "a1c5f9b303eec36ff4ba4e607d762bb44dc794c56a3d3ffb0093b2911d17a7fd",
+    "failed_controller_manifest_sha256": "b8e7fd49e23fa4b988834764f97ffbb1c1e179c26f491b2f098ba04e887d0f4d",
+    "fresh_session_id": "e33dbb26c0b91014f0748dd121d78d66627dd11c1fe8db4af0931d2254865999",
+    "initiating_recovery_controller_manifest_sha256": "51b0ac392c5588a41512cde239f096de8293d532f7c13bcccf45c38bea171e00",
+    "prior_hardened_vm_receipt_sha256": "8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6",
+    "resume_authorization_sha256": "dd4d1c963ff88abd82b12de743c2b181def94c100ebfa23f398abf98916fe3d7",
+    "source_session_id": "91c455c4f6a2ebb670d9ea01b394158c0b48edbb92da55317b3c3e9ec7ffeda9",
+    "stopped_proof_sha256": "62676d50371deab1de5ef8fbb58f4e87676a8ec9c550d2a3be1da9d4dc822f36",
+    "transaction_sha256": "e76da7a511d625dc4114cb0696a1ddc2e48029d351a3f8809c266fc7788eb2ef"
+  },
   "phases": {
     "airgapped_start_apply_enabled": true,
     "guest_package_apply_enabled": false,
-    "hardened_recreate_apply_enabled": true,
+    "hardened_recreate_apply_enabled": false,
+    "interrupted_first_boot_recovery_enabled": false,
     "router_activation_apply_enabled": false,
     "proven_preboot_recovery_enabled": false
   },
@@ -76,10 +88,11 @@
     "runtime": {"inode": 54411818, "pid": "26009", "pid_inode": 54411821, "pid_sha256": "8d65dfd431c8372588510f701bd6e7449020bc8c6f3af9735253b201b15764fd", "socket_inode": 54411822}
   },
   "pins": {
-    "airgap_session_id": "91c455c4f6a2ebb670d9ea01b394158c0b48edbb92da55317b3c3e9ec7ffeda9",
+    "airgap_session_id": "e33dbb26c0b91014f0748dd121d78d66627dd11c1fe8db4af0931d2254865999",
     "hardened_cloud_template_sha256": "ee4d159bae33ba541ef1b32c0f15e96e39c8b251e28b1cebc15738dace2de225",
     "hardened_plan_sha256": "aea50ab9aeaf1022f1cf1fbd7055cb9d249e6c94cb5bbae96ff04944a67a9874",
-    "hardened_vm_receipt_sha256": "8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6",
+    "hardened_vm_receipt_sha256": "e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c",
+    "interrupted_first_boot_quarantine_receipt_sha256": "2ae8f48d9363ebbc9605f604c4b6bbcd7ac54161b77a819731a0abe27525dbf5",
     "limactl_sha256": "f19a4fca3875e1017a5285672be4a62699c1e55918fb6a7afce86a14199e10d9",
     "lima_first_boot_sudoers_sha256": "fb36f1a319cc6bff643c11582ff08afe7564e7c47c309a4a702cf6f4e5b50e35",
     "local_image_sha256": "4a281a921b8d7db952895ab619736f10efe9f63e111fa5b5779ed18f023818aa",
@@ -94,7 +107,7 @@
     "proven_preboot_recovery_receipt_sha256": "60ccd31bee112bec55f133c9231da14878223e88e1be0ed8f30037f241fa1990",
     "socket_vmnet_sha256": "b8a72a62237312f2f756027dea504a844edeb40014702d4a320292c026d282b0"
   },
-  "review_status": "attended_airgap_hardened_recreate_and_one_boot_enabled",
+  "review_status": "attended_airgap_final_one_boot_enabled",
   "schema_version": 1,
   "storage": {
     "minimum_free_after_bytes": 5368709120,

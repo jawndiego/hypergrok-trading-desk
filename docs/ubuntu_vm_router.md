@@ -408,7 +408,10 @@ removed; a socket-plus-stale-PID residue is accepted only for a contained
 watchdog-kill incident and never as successful completion evidence.
 Lima's writable per-user `HOME` is a separate UID-454 mode-0700 directory
 outside `LIMA_HOME`; this prevents macOS `Library` state from being enumerated
-as a VM. On failure, independent stopped/no-process containment precedes every
+as a VM. Every UID-454 subprocess also uses that verified directory as its
+working directory, so an inaccessible invoking directory cannot alter Lima
+behavior. Create/start output evidence is durable and bounded. On failure,
+independent stopped/no-process containment precedes every
 bounded watchdog process-group reap or escalation.
 For the exact interrupted session `91c455...`, the retained Lima log proves VZ
 entered `running` and the receipt-08 disk changed. Its one-off attended recovery
@@ -422,6 +425,16 @@ session before any air-gap check or start can be admitted.
 Cross-controller resume additionally requires an attended root-owned immutable
 authorization binding the exact predecessor transaction and the sole completing
 controller; both identities are carried into the quarantine/new-receipt chain.
+The final successor pins fresh stopped receipt 08
+`e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c`,
+quarantine receipt
+`2ae8f48d9363ebbc9605f604c4b6bbcd7ac54161b77a819731a0abe27525dbf5`,
+and unused session `e33dbb...`. Before its one permitted air-gapped start it
+revalidates the exact authorization, transaction, stopped proof, quarantine
+paths and replacement receipt, plus absent old authority and an empty fresh
+namespace. `apply-hardened-vm` and every recovery dispatch are removed; the
+historical check-only rotation and recovery profile no longer supply active CLI
+arguments or authority.
 
 Both capture passes run pinned macOS observers sequentially under one total
 deadline. The continuous watchdog retains concurrent sampling, but each child

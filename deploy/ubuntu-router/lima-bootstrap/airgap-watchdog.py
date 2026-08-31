@@ -284,6 +284,25 @@ def _assert_no_named_acl(path: Path) -> None:
         raise WatchdogError("named_acl_present")
 
 
+def _verified_process_home() -> Path:
+    if (
+        not LIMA_PROCESS_HOME.is_absolute()
+        or LIMA_PROCESS_HOME.is_symlink()
+        or not LIMA_PROCESS_HOME.is_dir()
+        or LIMA_PROCESS_HOME.resolve(strict=True) != LIMA_PROCESS_HOME
+    ):
+        raise WatchdogError("force_stop_process_home")
+    metadata = LIMA_PROCESS_HOME.stat()
+    if (
+        metadata.st_uid != ROUTER_UID
+        or metadata.st_gid != ROUTER_GID
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise WatchdogError("force_stop_process_home")
+    _assert_no_named_acl(LIMA_PROCESS_HOME)
+    return LIMA_PROCESS_HOME
+
+
 def _assert_root_directory(path: Path, *, create: bool = False) -> None:
     if not path.exists() and not path.is_symlink() and create:
         path.mkdir(mode=0o700)
@@ -2738,6 +2757,7 @@ def _force_stop() -> dict[str, Any]:
                 or _sha256_file(LIMACTL) != LIMACTL_SHA256
             ):
                 raise WatchdogError("force_stop_limactl")
+            process_home = _verified_process_home()
             command_prefix = [
                 "/usr/bin/sudo",
                 "-n",
@@ -2785,6 +2805,7 @@ def _force_stop() -> dict[str, Any]:
                         "LANG": "C",
                         "LC_ALL": "C",
                     },
+                    cwd=process_home,
                     timeout=5,
                     check=False,
                 )
@@ -2812,6 +2833,7 @@ def _force_stop() -> dict[str, Any]:
                         "LANG": "C",
                         "LC_ALL": "C",
                     },
+                    cwd=process_home,
                     timeout=3,
                     check=False,
                 )

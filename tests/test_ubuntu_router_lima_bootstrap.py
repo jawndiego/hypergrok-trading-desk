@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from contextlib import redirect_stdout
 import errno
 import hashlib
@@ -239,6 +240,20 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             "ee4d159bae33ba541ef1b32c0f15e96e39c8b251e28b1cebc15738dace2de225",
             lock["pins"]["hardened_cloud_template_sha256"],
         )
+        self.assertEqual(
+            "e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c",
+            lock["pins"]["hardened_vm_receipt_sha256"],
+        )
+        self.assertEqual(
+            "2ae8f48d9363ebbc9605f604c4b6bbcd7ac54161b77a819731a0abe27525dbf5",
+            lock["pins"]["interrupted_first_boot_quarantine_receipt_sha256"],
+        )
+        self.assertEqual(
+            "e33dbb26c0b91014f0748dd121d78d66627dd11c1fe8db4af0931d2254865999",
+            lock["pins"]["airgap_session_id"],
+        )
+        self.assertFalse(lock["phases"]["hardened_recreate_apply_enabled"])
+        self.assertFalse(lock["phases"]["interrupted_first_boot_recovery_enabled"])
         self.assertFalse(any(value == "REVIEW_REQUIRED" for value in lock["pins"].values()))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
@@ -311,6 +326,11 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             self.assertFalse(manifest["apply_enabled"])
             self.assertFalse(manifest["vm_started"])
             self.assertFalse(manifest["network_changes_performed"])
+            self.assertFalse(manifest["hardened_recreate_apply_enabled"])
+            self.assertFalse(manifest["interrupted_first_boot_recovery_enabled"])
+            self.assertEqual(lock["pins"]["airgap_session_id"], manifest["airgap_session_id"])
+            self.assertFalse((output / "interrupted-recovery.py").exists())
+            self.assertFalse((output / "prestart-recovery-profile.json").exists())
             plan = (output / "lima-first-boot.yaml").read_text()
             self.assertFalse(re.findall(r"__[A-Z0-9_]+__", plan))
             self.assertEqual(
@@ -332,7 +352,7 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
 
     def test_host_controller_exposes_only_one_attended_start_and_no_delete(self) -> None:
         source = HOST_APPLY.read_text(encoding="utf-8")
-        self.assertIn('"create", "--tty=false"', source)
+        self.assertIn("def _run_lima_create(", source)
         self.assertEqual(1, source.count('\n    "start",\n'))
         self.assertIn('"--timeout=600s"', source)
         self.assertIn("_parse_guest_verifier", source)
@@ -344,13 +364,49 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         self.assertIn("failed reason={match.group(1)}", source)
         self.assertIn("watchdog timed out", source)
         launcher = (BOOTSTRAP / "bootstrap-apply-launcher.sh").read_text()
-        self.assertIn("apply-hardened-vm", launcher)
         self.assertIn("apply-airgapped-first-boot", launcher)
         self.assertIn("verify-stopped-after-airgap", launcher)
-        self.assertIn("recover-failed-prestart", launcher)
-        for forbidden in ("apply-guest-package", "apply-router"):
+        for forbidden in (
+            "apply-hardened-vm",
+            "recover-failed-prestart",
+            "recover-proven-preboot",
+            "recover-interrupted-first-boot",
+            "apply-guest-package",
+            "apply-router",
+        ):
             self.assertNotIn(forbidden, launcher)
         self.assertNotIn("probe-base", launcher)
+        controller = _load_module(HOST_APPLY, "bootstrap_final_dispatch_test")
+        action = next(
+            action
+            for action in controller._parser()._actions
+            if isinstance(action, controller.argparse._SubParsersAction)
+        )
+        self.assertEqual(
+            {
+                "check-airgap",
+                "apply-airgapped-first-boot",
+                "verify-stopped-after-airgap",
+            },
+            set(action.choices),
+        )
+
+    def test_every_uid454_preexec_has_verified_process_home_cwd(self) -> None:
+        tree = ast.parse(HOST_APPLY.read_text(encoding="utf-8"))
+        dropped = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and any(keyword.arg == "preexec_fn" for keyword in node.keywords)
+        ]
+        self.assertGreaterEqual(len(dropped), 6)
+        for call in dropped:
+            keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+            self.assertIn("cwd", keywords)
+            self.assertIn("_process_home", ast.unparse(keywords["cwd"]))
+        watchdog = (BOOTSTRAP / "airgap-watchdog.py").read_text(encoding="utf-8")
+        self.assertIn("process_home = _verified_process_home()", watchdog)
+        self.assertGreaterEqual(watchdog.count("cwd=process_home"), 2)
 
     def test_host_only_failure_reason_is_exactly_allowlisted(self) -> None:
         source = HOST_APPLY.read_text(encoding="utf-8")
@@ -503,44 +559,10 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         with self.assertRaisesRegex(controller.BootstrapError, "keys differ"):
             controller._recovery_instance_identity(instance_evidence, "/tmp/instance")
 
-        successor_args = SimpleNamespace(
-            attest_physical_airgap=True,
-            expected_controller_manifest_sha256="c" * 64,
-            expected_prestart_recovery_receipt_sha256="b" * 64,
-        )
-        successor_lock = {
-            "phases": {"airgapped_start_apply_enabled": True},
-            "pins": {"prestart_recovery_receipt_sha256": "a" * 64},
-        }
-        with (
-            mock.patch.object(controller, "_verify_bundle"),
-            mock.patch.object(controller, "_load_lock", return_value=successor_lock),
-            mock.patch.object(controller, "_verify_system_tools"),
-            mock.patch.object(
-                controller,
-                "_assert_attended_root_tty",
-                return_value={"evidence": {}, "sha256": "d" * 64},
-            ),
-            mock.patch.object(controller, "_assert_host_identity"),
-            mock.patch.object(
-                controller,
-                "_require_existing_state",
-                return_value={"receipts": Path("/fixed/receipts")},
-            ),
-            mock.patch.object(
-                controller,
-                "_load_prestart_recovery_profile",
-                return_value=(
-                    {
-                        "old_session_id": "e" * 64,
-                        "fresh_session_id": "f" * 64,
-                    },
-                    "1" * 64,
-                ),
-            ),
-            self.assertRaisesRegex(controller.BootstrapError, "not pinned"),
-        ):
-            controller._airgap_preconditions(successor_args, operation="check")
+        preconditions = inspect.getsource(controller._airgap_preconditions)
+        self.assertNotIn("expected_prestart_recovery_receipt_sha256", preconditions)
+        self.assertNotIn("_load_prestart_recovery_profile", preconditions)
+        self.assertIn("_validate_interrupted_first_boot_successor", preconditions)
         with mock.patch.object(controller, "_darwin_listxattr", return_value=[]):
             controller._verify_recovery_xattrs(probe, "pidfile")
             with self.assertRaises(controller.BootstrapError):
@@ -1046,6 +1068,25 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
                         cloud_template=template,
                         predecessor=None,
                     )
+
+    def test_hardened_receipt_rejects_pending_twin_before_read(self) -> None:
+        controller = _load_module(HOST_APPLY, "bootstrap_receipt08_pending_test")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "08-hardened-vm.json"
+            pending = path.parent / f".{path.name}.pending"
+            path.write_bytes(b"final")
+            pending.write_bytes(b"pending")
+            read = mock.Mock(side_effect=AssertionError("final read occurred"))
+            with (
+                mock.patch.object(controller, "_read_bound", read),
+                self.assertRaisesRegex(
+                    controller.BootstrapError, "receipt pending twin exists"
+                ),
+            ):
+                controller._hardened_vm_receipt(
+                    {"paths": {"hardened_vm_receipt": str(path)}}
+                )
+            read.assert_not_called()
 
     def test_partial_replacement_is_retained_without_deleting_predecessor(self) -> None:
         controller = _load_module(HOST_APPLY, "bootstrap_apply_partial_test")

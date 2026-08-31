@@ -2,11 +2,14 @@
 
 This continuation consumes only the commissioned receipt-07 VM whose digest is
 `1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601`.
-Its first phase retained that never-booted instance and created a hardened
-replacement that remains stopped. Receipt 08 is
-`8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6`.
-The second phase permits one attended, physically air-gapped first boot and
-returns the VM to `Stopped`. Neither phase accesses credentials or a venue.
+Its recovery history retained both the never-booted predecessor and the exact
+interrupted first-boot instance. The fresh hardened replacement remains stopped;
+receipt 08 is `e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c`
+and it binds quarantine receipt
+`2ae8f48d9363ebbc9605f604c4b6bbcd7ac54161b77a819731a0abe27525dbf5`.
+This final controller permits exactly one attended, physically air-gapped first
+boot in session `e33dbb...` and returns the VM to `Stopped`. It cannot recreate
+or recover a VM. No phase accesses credentials or a venue.
 
 Render and replay-check as the desktop operator:
 
@@ -41,22 +44,15 @@ physical, altered or non-host-only default still aborts.
 The fixed dormant Apple-local classes (`awdl0`, `llw0`, `ipsec0`) must first
 be taken down; their one canonical link-local is session-bound and only their
 exact local multicast/link-local route shapes are accepted.
-The current lock contains one exact check-only rotation from retained session
+The historical lock lineage records the exact check-only rotation from retained session
 `bca4e4...` to session `0fbd65...`. Check runs a write-free base probe. Apply
-publishes the target base once and immediately continues through PREPARING,
+now publishes the final `e33dbb...` base once and immediately continues through PREPARING,
 host-only validation, watchdog arming and the single boot in the same call.
 
-The recovery profile is also host-local and ignored by Git. It contains no
-secret and no caller-selected path: it binds the exact prior/failed/fresh
-session chain and the metadata hashes of one proven-prestart failure. Its
-committed example is deliberately impossible at runtime. Render without the
-`--prestart-recovery-profile` option only for a recovery-disabled review bundle;
-an actual recovery and its separately pinned successor must both use the same
-reviewed profile by adding:
-
-```sh
---prestart-recovery-profile /absolute/gitignored/prestart-recovery-profile.json
-```
+The final renderer neither accepts nor emits the historical prestart recovery
+profile. The recovery commands and `apply-hardened-vm` are absent from the
+launcher and parser. Their sealed receipts remain evidence, not active CLI
+authority.
 
 Do not start the replacement manually. From a local Terminal—not SSH, tmux or
 screen—disable all network services, turn Wi-Fi off, physically disconnect
@@ -113,12 +109,14 @@ the pinned daemon must exit cleanly, remove its PID file and leave only the
 inactive Unix socket for exact retention; watchdog SIGKILL incidents may retain
 the separately validated stale PID.
 
-All Lima subprocesses use the dedicated UID-454 mode-0700
-`/private/var/db/trading-desk-router-process-home` as `HOME`; `LIMA_HOME`
-remains the separate instance namespace. Failure cleanup contains the VM first,
-then reaps the watchdog process group with bounded TERM/KILL waits.
+All Lima subprocesses use the verified UID-454 mode-0700
+`/private/var/db/trading-desk-router-process-home` as both `HOME` and working
+directory; `LIMA_HOME` remains the separate instance namespace. This prevents
+an inaccessible caller directory from changing command behavior. Create/start
+output evidence is file-backed, durable and bounded. Failure cleanup contains
+the VM first, then reaps the watchdog process group with bounded TERM/KILL waits.
 
-`recover-interrupted-first-boot` handles only the sealed session `91c455...`,
+The retired `recover-interrupted-first-boot` flow handled only sealed session `91c455...`,
 whose retained start log proves VZ reached `running` and whose disk no longer
 matches receipt 08. From a local Terminal it first writes a durable transaction,
 then atomically retains the tainted `Library` tree and VM as opaque directories,
@@ -131,7 +129,11 @@ pins both new receipts and rotates to the printed fresh session.
 If recovery resumes across controller bundles, an attended root-owned mode-0400
 authorization file must bind the immutable predecessor transaction, its exact
 initiating manifest, and the one completing manifest; the quarantine and new
-receipt 08 retain that lineage and reject a third controller.
+receipt 08 retain that lineage and reject a third controller. The final
+controller validates that authorization, transaction, stopped proof, quarantine
+receipt and replacement receipt before either air-gap command; it exposes no
+recovery dispatch.
 
-This does not authorize another guest boot. A later stopped migration must
+After the final one-shot air-gapped boot, no additional guest boot is authorized.
+A later stopped migration must
 remove bootstrap passwordless sudo and per-boot provisioning first.

@@ -211,7 +211,8 @@ def _empty_lima_store(lock: dict[str, Any], limactl: Path) -> None:
     result = subprocess.run(
         [str(limactl), "--log-level=error", "list", "--format=json"],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=C._environment(lock), preexec_fn=C._drop_preexec(454, 454),
+        env=C._environment(lock), cwd=C._process_home(lock),
+        preexec_fn=C._drop_preexec(454, 454),
         timeout=30, check=False,
     )
     if result.returncode != 0 or result.stdout or result.stderr:
@@ -381,6 +382,8 @@ def _new_receipt(lock: dict[str, Any], state: dict[str, Path], digest: str, comp
 def recover(args: argparse.Namespace) -> int:
     C._verify_bundle(args.expected_controller_manifest_sha256)
     lock = C._load_lock()
+    if not lock["phases"]["interrupted_first_boot_recovery_enabled"]:
+        raise C.BootstrapError("interrupted first-boot recovery is disabled")
     state = C._require_existing_state(lock)
     C._verify_system_tools(lock)
     C._assert_attended_root_tty()

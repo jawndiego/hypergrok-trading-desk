@@ -44,13 +44,13 @@ class ProvenPrebootRecoveryTests(unittest.TestCase):
             module._sha256_bytes(module.PROVEN_PREBOOT_DAEMON_GROUP_STDERR),
         )
 
-    def test_phase_is_public_but_contains_no_start_or_network_mutator(self):
+    def test_phase_is_retired_from_final_dispatch(self):
         module = load_apply()
-        parsed = module._parser().parse_args([
-            "recover-proven-preboot", "--expected-controller-manifest-sha256", "a" * 64
-        ])
-        self.assertEqual("recover-proven-preboot", parsed.phase)
-        self.assertIn("recover-proven-preboot", LAUNCHER.read_text())
+        with self.assertRaises(SystemExit):
+            module._parser().parse_args([
+                "recover-proven-preboot", "--expected-controller-manifest-sha256", "a" * 64
+            ])
+        self.assertNotIn("recover-proven-preboot", LAUNCHER.read_text())
         body = APPLY.read_text().split("def _recover_proven_preboot(", 1)[1].split("\ndef _recover_failed_prestart", 1)[0]
         self.assertNotIn("_run_lima_guarded(", body)
         self.assertNotIn("_start_hostonly_daemon(", body)
@@ -77,9 +77,10 @@ class ProvenPrebootRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(module.BootstrapError, "receipt is required"):
             module._validate_proven_preboot_successor(pending, {})
         preconditions = APPLY.read_text().split("def _airgap_preconditions(", 1)[1].split("\ndef _check_airgap", 1)[0]
-        self.assertIn("_validate_proven_preboot_successor(lock, state)", preconditions)
+        self.assertNotIn("_validate_proven_preboot_successor(lock, state)", preconditions)
+        self.assertIn("_validate_interrupted_first_boot_successor", preconditions)
 
-    def test_lock_accepts_only_pending_source_or_pinned_fresh_state(self):
+    def test_lock_accepts_only_final_interrupted_successor_state(self):
         renderer = load_renderer()
         successor = json.loads(LOCK.read_text())
         renderer._load_lock(renderer._canonical_json(successor))
@@ -117,8 +118,7 @@ class ProvenPrebootRecoveryTests(unittest.TestCase):
             "proven_preboot_recovery"
         ]["source_session_id"]
         pending["phases"]["proven_preboot_recovery_enabled"] = True
-        renderer._load_lock(renderer._canonical_json(pending))
-        invalid_states = []
+        invalid_states = [pending]
         pending_with_fresh = json.loads(json.dumps(pending))
         pending_with_fresh["pins"]["airgap_session_id"] = pending[
             "proven_preboot_recovery"

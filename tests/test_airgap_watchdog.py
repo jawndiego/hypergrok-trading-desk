@@ -1827,6 +1827,7 @@ Network interfaces: bridge100
             st_uid=0, st_gid=0, st_mode=0o100555, st_nlink=1
         )
         with (
+            mock.patch.object(module, "_verified_process_home", return_value=Path("/")),
             mock.patch.object(module.pwd, "getpwnam", return_value=account),
             mock.patch.object(
                 module.os,
@@ -2000,6 +2001,7 @@ Network interfaces: bridge100
             "no_start_process_proven": True,
         }
         with (
+            mock.patch.object(module, "_verified_process_home", return_value=Path("/")),
             mock.patch.object(module.pwd, "getpwnam", return_value=account),
             mock.patch.object(
                 module.os,

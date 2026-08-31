@@ -320,6 +320,15 @@ authority, and authorize creation of a new stopped instance from pinned local
 media. The recreated receipt 08 MUST bind the quarantine receipt; no air-gap
 phase is admitted until a later successor pins both receipts and a fresh
 session.
+That final successor MUST remove every recreate/recovery dispatch before state
+mutation, stop accepting the historical recovery-profile argument, and bind the
+fresh session directly through the exact replacement receipt, quarantine
+receipt, external resume authorization, transaction and stopped proof. It MUST
+prove the fresh namespace unused and all old live VMNet authority/processes
+absent before admitting exactly one air-gapped start. Every subprocess that
+executes as the router UID MUST use the verified dedicated process `HOME` as its
+working directory; create/start failure output MUST be durably retained within
+fixed bounds.
 If the controller prestarts socket_vmnet, Lima MUST receive only temporary
 read-only access to the exact live PID file, verify the process identity, reuse
 that daemon, and lose the ACL immediately after the guarded start boundary.

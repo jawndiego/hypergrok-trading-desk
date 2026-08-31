@@ -241,10 +241,11 @@ This repository builds an agent-runtime-neutral trading research and execution h
   retain that exact instance and create an exact hardened replacement that
   also remains stopped. It embeds password-locked/key-only bootstrap identity,
   early APT masks, IPv6 disablement and a default-drop nftables policy, but
-  none of those guest controls exists until first boot. Receipt 08 for the
-  hardened stopped replacement is
-  `8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6`.
-  The continuation now exposes exactly one local-Terminal-only attended start:
+  none of those guest controls exists until first boot. After the interrupted
+  instance was durably quarantined, receipt 08 for the fresh stopped replacement
+  is `e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c`.
+  The final continuation disables every recreate/recovery dispatch and exposes
+  exactly one local-Terminal-only attended start:
   it requires every reviewed network service disabled and physical interface
   inactive, captures the exact offline and host-only topologies, arms an
   independent watchdog before the single start, verifies the guest only over

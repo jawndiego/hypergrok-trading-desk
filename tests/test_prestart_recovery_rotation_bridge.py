@@ -73,7 +73,8 @@ class RecoveryRotationBridgeTests(unittest.TestCase):
         source = (ROOT / "deploy/ubuntu-router/lima-bootstrap/bootstrap-apply.py").read_text()
         body = source.split("def _airgap_preconditions(", 1)[1].split("\ndef _check_airgap", 1)[0]
         self.assertNotIn("_validate_check_only_rotation(", body)
-        self.assertIn('recovery.get("prior_check_only_rotation") != lock["check_only_rotation"]', body)
+        self.assertNotIn("prior_check_only_rotation", body)
+        self.assertIn("_validate_interrupted_first_boot_successor", body)
 
     def test_recovery_binds_prior_receipt_to_rotation_source(self):
         source = (ROOT / "deploy/ubuntu-router/lima-bootstrap/bootstrap-apply.py").read_text()

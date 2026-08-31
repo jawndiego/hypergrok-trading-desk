@@ -245,22 +245,29 @@ class PrestartRecoveryProfileTests(unittest.TestCase):
             "failure_stage": "vm_start",
             "start_invoked": True,
         }
-        for cleanup in (
-            None,
-            {
-                "retained_sudoers": str(
-                    quarantine / f"first-boot-sudoers-{session}"
-                ),
-                "retained_vmnet_runtime": str(
-                    quarantine / f"first-boot-vmnet-runtime-{session}"
-                ),
-            },
+        for stage in (
+            "vm_start", "status_running", "guest_verifier", "guest_receipt",
+            "vm_stop", "host_only_teardown", "postboot_verify", "vmnet_cleanup",
+            "watchdog_complete", "receipt_publish",
         ):
-            post["temporary_vmnet_artifacts"] = cleanup
-            _, state = controller._validate_reconnect_incident(
-                controller._canonical_json(post), session, quarantine
-            )
-            self.assertEqual("poststart", state)
+            for cleanup in (
+                None,
+                {
+                    "retained_sudoers": str(
+                        quarantine / f"first-boot-sudoers-{session}"
+                    ),
+                    "retained_vmnet_runtime": str(
+                        quarantine / f"first-boot-vmnet-runtime-{session}"
+                    ),
+                },
+            ):
+                post["failure_stage"] = stage
+                post["temporary_vmnet_artifacts"] = cleanup
+                _, state = controller._validate_reconnect_incident(
+                    controller._canonical_json(post), session, quarantine
+                )
+                self.assertEqual("poststart", state)
+        post["failure_stage"] = "vm_start"
         for key, value in (
             ("disposition", "FAILED"),
             ("failure_stage", "host_only_capture"),
@@ -274,15 +281,14 @@ class PrestartRecoveryProfileTests(unittest.TestCase):
                     controller._canonical_json(changed), session, quarantine
                 )
 
-    def test_successor_receipt_selection_is_profile_bound(self) -> None:
+    def test_final_successor_uses_sealed_interrupted_lineage(self) -> None:
         controller = load(
             BOOTSTRAP / "bootstrap-apply.py", "recovery_successor_selection_test"
         )
         source = inspect.getsource(controller._airgap_preconditions)
-        self.assertIn("_load_prestart_recovery_profile", source)
-        self.assertIn("recovery_profile['old_session_id']", source)
-        self.assertIn("recovery_profile_sha256", source)
-        self.assertNotIn("46e7c23627c9e4a1207f86a5a3f186", source)
+        self.assertNotIn("_load_prestart_recovery_profile", source)
+        self.assertNotIn("expected_prestart_recovery_receipt_sha256", source)
+        self.assertIn("_validate_interrupted_first_boot_successor", source)
 
     def test_apply_failure_reason_is_allowlisted_or_redacted(self) -> None:
         controller = load(
@@ -292,8 +298,6 @@ class PrestartRecoveryProfileTests(unittest.TestCase):
             "apply-airgapped-first-boot",
             "--expected-controller-manifest-sha256",
             "a" * 64,
-            "--expected-prestart-recovery-receipt-sha256",
-            "b" * 64,
         ]
         for reason, expected in (
             (
