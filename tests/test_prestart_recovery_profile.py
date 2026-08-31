@@ -29,8 +29,12 @@ class PrestartRecoveryProfileTests(unittest.TestCase):
         profile = json.loads(
             (BOOTSTRAP / "prestart-recovery-profile.json.example").read_text()
         )
-        profile["fresh_session_id"] = lock["check_only_rotation"]["source_session_id"]
-        profile["old_session_id"] = "a" * 64
+        lock["pins"]["airgap_session_id"] = "1" * 64
+        profile["fresh_session_id"] = lock["pins"]["airgap_session_id"]
+        profile["old_session_id"] = lock["check_only_rotation"]["target_session_id"]
+        profile["prior_check_only_rotation"] = copy.deepcopy(
+            lock["check_only_rotation"]
+        )
         profile["prior_recovery"] = {
             "old_session_id": "b" * 64,
             "receipt_sha256": "c" * 64,

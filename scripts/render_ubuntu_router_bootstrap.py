@@ -359,7 +359,8 @@ def _validate_recovery_profile(
         raise ValueError("prestart recovery profile is invalid") from error
     expected = {
         "base_capture", "failed_controller_manifest_sha256", "fresh_session_id",
-        "incident", "kind", "old_session_id", "pidfile", "preparing", "prior_recovery",
+        "incident", "kind", "old_session_id", "pidfile", "preparing",
+        "prior_check_only_rotation", "prior_recovery",
         "retained_sudoers", "runtime", "schema_version", "socket", "stderr", "stdout",
     }
     if (
@@ -367,8 +368,16 @@ def _validate_recovery_profile(
         or set(value) != expected
         or value.get("schema_version") != 1
         or value.get("kind") != "trading-desk.router-bootstrap.prestart-recovery-profile"
-        or value.get("fresh_session_id")
-        != lock["check_only_rotation"]["source_session_id"]
+        or value.get("prior_check_only_rotation") != lock["check_only_rotation"]
+        or (
+            not allow_placeholder
+            and value.get("old_session_id")
+            != lock["check_only_rotation"]["target_session_id"]
+        )
+        or (
+            not allow_placeholder
+            and value.get("fresh_session_id") != lock["pins"]["airgap_session_id"]
+        )
     ):
         raise ValueError("prestart recovery profile schema differs")
     for key in ("failed_controller_manifest_sha256", "old_session_id"):

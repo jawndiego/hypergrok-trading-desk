@@ -660,15 +660,17 @@ def _load_prestart_recovery_profile(lock: dict[str, Any]) -> tuple[dict[str, Any
     value = _load_json_bytes(content, "prestart recovery profile")
     expected = {
         "base_capture", "failed_controller_manifest_sha256", "fresh_session_id",
-        "incident", "kind", "old_session_id", "pidfile", "preparing", "prior_recovery",
+        "incident", "kind", "old_session_id", "pidfile", "preparing",
+        "prior_check_only_rotation", "prior_recovery",
         "retained_sudoers", "runtime", "schema_version", "socket", "stderr", "stdout",
     }
     if (
         set(value) != expected
         or value.get("schema_version") != 1
         or value.get("kind") != "trading-desk.router-bootstrap.prestart-recovery-profile"
-        or value.get("fresh_session_id")
-        != lock["check_only_rotation"]["source_session_id"]
+        or value.get("prior_check_only_rotation") != lock["check_only_rotation"]
+        or value.get("old_session_id") != lock["check_only_rotation"]["target_session_id"]
+        or value.get("fresh_session_id") != lock["pins"]["airgap_session_id"]
         or any(
             not isinstance(value.get(key), str) or SHA256_RE.fullmatch(value[key]) is None
             for key in ("old_session_id", "failed_controller_manifest_sha256")
@@ -3419,8 +3421,8 @@ def _airgap_preconditions(
         or recovery.get("kind") != "trading-desk.router-bootstrap.prestart-recovery"
         or recovery.get("old_session_id") != recovery_profile["old_session_id"]
         or recovery.get("fresh_session_id") != recovery_profile["fresh_session_id"]
-        or recovery.get("fresh_session_id")
-        != lock["check_only_rotation"]["source_session_id"]
+        or recovery.get("old_session_id") != lock["check_only_rotation"]["target_session_id"]
+        or recovery.get("prior_check_only_rotation") != lock["check_only_rotation"]
         or recovery.get("recovery_profile_sha256") != recovery_profile_sha256
         or recovery.get("schema_version") != 1
         or recovery.get("phase") != "prestart-recovery"
@@ -3430,7 +3432,6 @@ def _airgap_preconditions(
         or recovery.get("vm_status") != "Stopped"
     ):
         raise BootstrapError("prestart recovery receipt differs")
-    _validate_check_only_rotation(lock, state, recovery)
     _assert_no_vm_process()
     limactl = _limactl(lock)
     receipt = _hardened_vm_receipt(lock)
@@ -4139,7 +4140,8 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             or prior_recovery.get("kind")
             != "trading-desk.router-bootstrap.prestart-recovery"
             or prior_recovery.get("old_session_id") != prior_session
-            or prior_recovery.get("fresh_session_id") != old_session
+            or prior_recovery.get("fresh_session_id")
+            != profile["prior_check_only_rotation"]["source_session_id"]
             or prior_recovery.get("hardened_vm_receipt_sha256")
             != lock["pins"]["hardened_vm_receipt_sha256"]
             or prior_recovery.get("start_invoked") is not False
@@ -4302,6 +4304,7 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             "recovery_profile_sha256": profile_sha256,
             "preparing_sha256": _sha256_bytes(preparing_content),
             "prior_recovery_receipt_sha256": prior_recovery_sha256,
+            "prior_check_only_rotation": profile["prior_check_only_rotation"],
             "recovery_controller_manifest_sha256": args.expected_controller_manifest_sha256,
             "schema_version": 1,
         }
@@ -4380,6 +4383,7 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             "recovery_profile_sha256": profile_sha256,
             "preparing_sha256": _sha256_bytes(preparing_content),
             "prior_recovery_receipt_sha256": prior_recovery_sha256,
+            "prior_check_only_rotation": profile["prior_check_only_rotation"],
             "recovery_controller_manifest_sha256": args.expected_controller_manifest_sha256,
             "quarantined_paths": [str(destination) for _, destination in moves],
             "schema_version": 1,
