@@ -70,6 +70,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 
@@ -121,7 +122,21 @@ DORMANT_APPLE_PROFILES = [
 MAC_RE = re.compile(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 MAX_SAMPLE_GAP_NS = 250_000_000
+WATCH_COMMAND_SECONDS = 0.12
+WATCH_REAP_SECONDS = 0.03
+WATCH_SOCKET_IDENTITY_SECONDS = 0.04
 MAX_OUTPUT = 2 * 1024 * 1024
+CAPTURE_TOTAL_SECONDS = 24.0
+CAPTURE_COMMAND_SECONDS = 1.5
+# Host-only capture performs identity probes before the two bounded snapshots
+# and may need to validate and stop socket_vmnet after a failed snapshot.
+CAPTURE_IDENTITY_BUDGET_SECONDS = 7.0
+CAPTURE_STOP_BUDGET_SECONDS = 8.0
+CAPTURE_MODE_MAX_SECONDS = (
+    CAPTURE_IDENTITY_BUDGET_SECONDS
+    + CAPTURE_TOTAL_SECONDS
+    + CAPTURE_STOP_BUDGET_SECONDS
+)
 NAT_PLIST = Path(
     "/Library/Preferences/SystemConfiguration/com.apple.nat.plist"
 )
@@ -1232,40 +1247,233 @@ def _command_map(lock: dict[str, Any]) -> dict[str, list[str]]:
 
 
 def _run_local(command: list[str], timeout: float) -> tuple[int, str, str]:
-    try:
-        result = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={
-                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                "LANG": "C",
-                "LC_ALL": "C",
-            },
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as error:
-        raise WatchdogError("local_command_timeout") from error
-    if len(result.stdout) > MAX_OUTPUT or len(result.stderr) > 128 * 1024:
-        raise WatchdogError("local_command_output_bound")
+    deadline = time.monotonic() + timeout
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
+                env={
+                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                    "LANG": "C",
+                    "LC_ALL": "C",
+                },
+                start_new_session=True,
+            )
+        except OSError as error:
+            raise WatchdogError("local_command_spawn") from error
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.002)
+        if process.poll() is None:
+            _kill_and_extinguish_process_group(
+                process, wait_seconds=WATCH_REAP_SECONDS, code="local_command"
+            )
+            raise WatchdogError("local_command_timeout")
+        if _process_group_exists(process.pid, code="local_command_descendant"):
+            _kill_and_extinguish_process_group(
+                process,
+                wait_seconds=WATCH_REAP_SECONDS,
+                code="local_command_descendant",
+            )
+            raise WatchdogError("local_command_descendant")
+        stdout_size = os.fstat(stdout.fileno()).st_size
+        stderr_size = os.fstat(stderr.fileno()).st_size
+        if stdout_size > MAX_OUTPUT or stderr_size > 128 * 1024:
+            raise WatchdogError("local_command_output_bound")
+        stdout.seek(0)
+        stderr.seek(0)
+        stdout_value = stdout.read()
+        stderr_value = stderr.read()
     try:
         return (
-            result.returncode,
-            result.stdout.decode("utf-8", errors="strict"),
-            result.stderr.decode("utf-8", errors="strict"),
+            int(process.returncode),
+            stdout_value.decode("utf-8", errors="strict"),
+            stderr_value.decode("utf-8", errors="strict"),
         )
     except UnicodeDecodeError as error:
         raise WatchdogError("local_command_encoding") from error
 
 
-def _run_snapshot_commands(lock: dict[str, Any]) -> dict[str, str]:
+def _capture_command_class(name: str) -> str:
+    category = name.split(":", 1)[0]
+    if category not in {
+        "forward4",
+        "forward6",
+        "global6",
+        "hardware",
+        "ifconfig",
+        "nwi",
+        "processes",
+        "routes4",
+        "routes6",
+        "service",
+        "services",
+        "vpn",
+        "wifi",
+    }:
+        raise WatchdogError("capture_command_class")
+    return category
+
+
+def _process_group_exists(pgid: int, *, code: str) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError as error:
+        raise WatchdogError(f"{code}_probe") from error
+    return True
+
+
+def _kill_and_extinguish_process_group(
+    process: subprocess.Popen[bytes], *, wait_seconds: float, code: str
+) -> None:
+    leader_live = process.poll() is None
+    if leader_live:
+        try:
+            if os.getpgid(process.pid) != process.pid:
+                process.kill()
+                process.wait(timeout=wait_seconds)
+                raise WatchdogError(f"{code}_process_group")
+        except ProcessLookupError:
+            leader_live = False
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError as error:
+        raise WatchdogError(f"{code}_kill") from error
+    if leader_live:
+        try:
+            process.wait(timeout=wait_seconds)
+        except subprocess.TimeoutExpired as error:
+            raise WatchdogError(f"{code}_reap_timeout") from error
+    deadline = time.monotonic() + wait_seconds
+    while _process_group_exists(process.pid, code=code):
+        if time.monotonic() >= deadline:
+            raise WatchdogError(f"{code}_group_extinction_timeout")
+        time.sleep(0.002)
+
+
+def _kill_capture_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    _kill_and_extinguish_process_group(
+        process, wait_seconds=1.0, code="capture_process"
+    )
+
+
+def _run_capture_local(
+    command: list[str], *, deadline: float
+) -> tuple[int, str, str]:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise WatchdogError("capture_total_timeout")
+    command_deadline = min(deadline, time.monotonic() + CAPTURE_COMMAND_SECONDS)
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
+                env={
+                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                    "LANG": "C",
+                    "LC_ALL": "C",
+                },
+                start_new_session=True,
+            )
+        except OSError as error:
+            raise WatchdogError("capture_command_spawn") from error
+        while process.poll() is None and time.monotonic() < command_deadline:
+            time.sleep(0.01)
+        if process.poll() is None:
+            _kill_capture_process(process)
+            raise WatchdogError("capture_command_timeout")
+        if _process_group_exists(
+            process.pid, code="capture_process_descendant"
+        ):
+            _kill_and_extinguish_process_group(
+                process,
+                wait_seconds=1.0,
+                code="capture_process_descendant",
+            )
+            raise WatchdogError("capture_process_descendant")
+        stdout_size = os.fstat(stdout.fileno()).st_size
+        stderr_size = os.fstat(stderr.fileno()).st_size
+        if stdout_size > MAX_OUTPUT or stderr_size > 128 * 1024:
+            raise WatchdogError("capture_command_output_bound")
+        stdout.seek(0)
+        stderr.seek(0)
+        stdout_value = stdout.read()
+        stderr_value = stderr.read()
+    try:
+        return (
+            int(process.returncode),
+            stdout_value.decode("utf-8", errors="strict"),
+            stderr_value.decode("utf-8", errors="strict"),
+        )
+    except UnicodeDecodeError as error:
+        raise WatchdogError("capture_command_encoding") from error
+
+
+def _run_capture_commands(
+    commands: dict[str, list[str]], *, deadline: float, stage: str
+) -> dict[str, str]:
+    outputs: dict[str, str] = {}
+    for name, command in commands.items():
+        category = _capture_command_class(name)
+        try:
+            returncode, stdout, stderr = _run_capture_local(
+                command, deadline=deadline
+            )
+        except WatchdogError as error:
+            if error.code in {
+                "capture_command_spawn",
+                "capture_command_timeout",
+                "capture_command_output_bound",
+                "capture_command_encoding",
+                "capture_process_group",
+                "capture_process_group_extinction_timeout",
+                "capture_process_kill",
+                "capture_process_probe",
+                "capture_process_reap_timeout",
+                "capture_process_descendant",
+                "capture_process_descendant_group_extinction_timeout",
+                "capture_process_descendant_kill",
+                "capture_process_descendant_probe",
+                "capture_total_timeout",
+            }:
+                raise WatchdogError(
+                    f"capture_{stage}_{category}_{error.code.removeprefix('capture_')}"
+                ) from error
+            raise
+        if name == "global6":
+            outputs[name] = _canonical_json(
+                {"returncode": returncode, "stderr": stderr, "stdout": stdout}
+            ).decode("utf-8")
+            continue
+        if returncode != 0 or stderr:
+            raise WatchdogError(f"capture_{stage}_{category}_command_failed")
+        outputs[name] = stdout
+    return outputs
+
+
+def _run_snapshot_commands(
+    lock: dict[str, Any], *, capture_deadline: float | None = None
+) -> dict[str, str]:
     commands = _command_map(lock)
+    if capture_deadline is not None:
+        return _run_capture_commands(
+            commands, deadline=capture_deadline, stage="sample"
+        )
     outputs: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=min(16, len(commands))) as executor:
         futures = {
-            executor.submit(_run_local, command, 0.18): name
+            executor.submit(_run_local, command, WATCH_COMMAND_SECONDS): name
             for name, command in commands.items()
         }
         for future in as_completed(futures):
@@ -1286,7 +1494,9 @@ def _run_snapshot_commands(lock: dict[str, Any]) -> dict[str, str]:
     return outputs
 
 
-def _run_core_snapshot_commands() -> dict[str, str]:
+def _run_core_snapshot_commands(
+    *, capture_deadline: float | None = None
+) -> dict[str, str]:
     commands = {
         "hardware": ["/usr/sbin/networksetup", "-listallhardwareports"],
         "services": ["/usr/sbin/networksetup", "-listallnetworkservices"],
@@ -1306,6 +1516,10 @@ def _run_core_snapshot_commands() -> dict[str, str]:
         ],
         "processes": ["/bin/ps", "-axo", "uid=,comm="],
     }
+    if capture_deadline is not None:
+        return _run_capture_commands(
+            commands, deadline=capture_deadline, stage="core"
+        )
     outputs: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=len(commands)) as executor:
         futures = {
@@ -1461,9 +1675,11 @@ def _validate_addresses(
     return host_only_observed
 
 
-def _sample(lock: dict[str, Any], *, allow_host_only: bool) -> dict[str, Any]:
+def _sample(
+    lock: dict[str, Any], *, allow_host_only: bool, capture_deadline: float | None = None
+) -> dict[str, Any]:
     started = time.monotonic_ns()
-    outputs = _run_snapshot_commands(lock)
+    outputs = _run_snapshot_commands(lock, capture_deadline=capture_deadline)
     _global_ipv6_unreachable(outputs["global6"])
     _nwi_unreachable(outputs["nwi"], allow_host_only=allow_host_only)
     observed_ports = _parse_hardware_ports(outputs["hardware"])
@@ -1642,14 +1858,17 @@ def _candidate_from_outputs(
 
 
 def _capture_base(session_id: str) -> tuple[Path, str]:
+    deadline = time.monotonic() + CAPTURE_TOTAL_SECONDS
     profile, profile_sha256 = _load_hardware_profile()
     if _observed_host() != profile["host"]:
         raise WatchdogError("capture_host_identity_drift")
-    outputs = _run_core_snapshot_commands()
+    outputs = _run_core_snapshot_commands(capture_deadline=deadline)
     candidate = _candidate_from_outputs(
         profile, profile_sha256, session_id, outputs
     )
-    sample = _sample(candidate, allow_host_only=False)
+    sample = _sample(
+        candidate, allow_host_only=False, capture_deadline=deadline
+    )
     sample.pop("duration_ns", None)
     value = {
         "capture_session_id": session_id,
@@ -1692,6 +1911,7 @@ def _read_base_capture(session_id: str) -> dict[str, Any]:
 
 
 def _capture_host_only(session_id: str) -> tuple[Path, str]:
+    deadline = time.monotonic() + CAPTURE_TOTAL_SECONDS
     base = _read_base_capture(session_id)
     profile, profile_sha256 = _load_hardware_profile()
     if base["hardware_profile_sha256"] != profile_sha256:
@@ -1733,7 +1953,7 @@ def _capture_host_only(session_id: str) -> tuple[Path, str]:
         )
     ):
         raise WatchdogError("base_capture_candidate_drift")
-    outputs = _run_core_snapshot_commands()
+    outputs = _run_core_snapshot_commands(capture_deadline=deadline)
     refreshed = _candidate_from_outputs(
         profile,
         profile_sha256,
@@ -1791,7 +2011,7 @@ def _capture_host_only(session_id: str) -> tuple[Path, str]:
         for address in candidate["host_only"]["ipv6_link_local_addresses"]
     ):
         raise WatchdogError("host_only_capture_ipv6")
-    sample = _sample(candidate, allow_host_only=True)
+    sample = _sample(candidate, allow_host_only=True, capture_deadline=deadline)
     if not sample["host_only_observed"]:
         raise WatchdogError("host_only_capture_not_observed")
     return _atomic_fixed_document(HARDWARE_LOCK, candidate)
@@ -2318,66 +2538,40 @@ def _socket_vmnet_identity(pid: int) -> dict[str, Any]:
         or _sha256_file(SOCKET_VMNET) != SOCKET_VMNET_SHA256
     ):
         raise WatchdogError("socket_vmnet_binary")
-    def ps_field(field: str, *, absence_is_conclusive: bool) -> str:
-        try:
-            result = subprocess.run(
-                [
-                    "/bin/ps",
-                    "-ww",
-                    "-p",
-                    str(pid),
-                    "-o",
-                    f"{field}=",
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env={
-                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                    "LANG": "C",
-                    "LC_ALL": "C",
-                },
-                timeout=2,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            raise WatchdogError("socket_vmnet_probe_failed") from error
-        if (
-            absence_is_conclusive
-            and result.returncode == 1
-            and not result.stdout
-            and not result.stderr
-        ):
-            raise WatchdogError("socket_vmnet_process_absent")
-        if (
-            result.returncode != 0
-            or result.stderr
-            or not result.stdout
-            or len(result.stdout) > 64 * 1024
-        ):
-            raise WatchdogError("socket_vmnet_probe_failed")
-        try:
-            value = result.stdout.decode("utf-8", errors="strict").strip()
-        except UnicodeDecodeError as error:
-            raise WatchdogError("socket_vmnet_process_shape") from error
-        if not value or "\n" in value:
-            raise WatchdogError("socket_vmnet_process_shape")
-        return value
-
-    if ps_field("uid", absence_is_conclusive=True) != "0":
-        raise WatchdogError("socket_vmnet_process_identity")
-    if _proc_pid_path(pid) != str(SOCKET_VMNET):
-        raise WatchdogError("socket_vmnet_executable")
-    command_text = ps_field("command", absence_is_conclusive=False)
     try:
-        argv = shlex.split(command_text)
+        returncode, stdout, stderr = _run_local(
+            [
+                "/bin/ps",
+                "-ww",
+                "-p",
+                str(pid),
+                "-o",
+                "uid=,command=",
+            ],
+            WATCH_SOCKET_IDENTITY_SECONDS,
+        )
+    except WatchdogError as error:
+        raise WatchdogError("socket_vmnet_probe_failed") from error
+    if returncode == 1 and not stdout and not stderr:
+        raise WatchdogError("socket_vmnet_process_absent")
+    if returncode != 0 or stderr:
+        raise WatchdogError("socket_vmnet_probe_failed")
+    lines = stdout.strip().splitlines()
+    if len(lines) != 1:
+        raise WatchdogError("socket_vmnet_process_shape")
+    fields = lines[0].split(None, 1)
+    if len(fields) != 2 or fields[0] != "0" or not fields[1]:
+        raise WatchdogError("socket_vmnet_process_identity")
+    executable_before = _proc_pid_path(pid)
+    if executable_before != str(SOCKET_VMNET):
+        raise WatchdogError("socket_vmnet_executable")
+    try:
+        argv = shlex.split(fields[1])
     except ValueError as error:
         raise WatchdogError("socket_vmnet_process_shape") from error
     if tuple(argv) != SOCKET_VMNET_ARGV:
         raise WatchdogError("socket_vmnet_process_identity")
-    if _proc_pid_path(pid) != str(SOCKET_VMNET) or ps_field(
-        "uid", absence_is_conclusive=False
-    ) != "0":
+    if _proc_pid_path(pid) != str(SOCKET_VMNET):
         raise WatchdogError("socket_vmnet_process_changed")
     value = {"argv": argv, "executable": str(SOCKET_VMNET), "pid": pid, "uid": 0}
     return {**value, "identity_sha256": _sha256_bytes(_canonical_json(value))}

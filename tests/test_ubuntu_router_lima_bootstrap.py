@@ -354,11 +354,11 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             _load_module(HOST_APPLY, "bootstrap_apply_recovery_static_test")._recover_failed_prestart
         )
         for required in (
-            "f8a65887de36d8f80a4fc0274bc65261977ecb915961762d178bb58f07dad76d",
-            "efe2706ef92f8ffc03c82692f69d06df9741dc6f0b1f637e77cecdd4ee058277",
-            "041c8f7907016decc31d082a31f9a092eb42a6dba2262ed4e29edb214bb84594",
-            "a1236507cb844686ba3d4a97ca11788cb5fbe63a5aedafa729a7ad22a68fb24b",
-            "b4e7db0865fcefaaa94d0753e0fc22e519a8d2dd0456ee35d24d2e87aa00da2a",
+            "_load_prestart_recovery_profile",
+            "profile_sha256",
+            'profile["old_session_id"]',
+            'profile["failed_controller_manifest_sha256"]',
+            'profile["fresh_session_id"]',
             "prestart-vmnet-runtime-",
             "prestart-recovery-transaction-",
             ".airgap-hardware-lock.json.pending",
@@ -388,6 +388,13 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             'stage = "residual_logs"',
         ):
             self.assertIn(required, recovery_source)
+        for stale in (
+            "f8a65887de36d8f80a4fc0274bc65261977ecb915961762d178bb58f07dad76d",
+            "efe2706ef92f8ffc03c82692f69d06df9741dc6f0b1f637e77cecdd4ee058277",
+            "041c8f7907016decc31d082a31f9a092eb42a6dba2262ed4e29edb214bb84594",
+            "b4e7db0865fcefaaa94d0753e0fc22e519a8d2dd0456ee35d24d2e87aa00da2a",
+        ):
+            self.assertNotIn(stale, recovery_source)
         self.assertNotIn('"stored_plan_sha256"', recovery_source)
         self.assertNotIn("unlink(", recovery_source)
         generic_cleanup = inspect.getsource(
@@ -493,6 +500,17 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
                 controller,
                 "_initialize",
                 return_value={"receipts": Path("/fixed/receipts")},
+            ),
+            mock.patch.object(
+                controller,
+                "_load_prestart_recovery_profile",
+                return_value=(
+                    {
+                        "old_session_id": "e" * 64,
+                        "fresh_session_id": "f" * 64,
+                    },
+                    "1" * 64,
+                ),
             ),
             self.assertRaisesRegex(controller.BootstrapError, "not pinned"),
         ):

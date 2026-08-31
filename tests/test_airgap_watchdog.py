@@ -1611,8 +1611,8 @@ Network interfaces: bridge100
                     stack.enter_context(patcher)
                 stack.enter_context(
                     mock.patch.object(
-                        module.subprocess,
-                        "run",
+                        module,
+                        "_run_local",
                         return_value=result,
                         side_effect=side_effect,
                     )
@@ -1620,17 +1620,39 @@ Network interfaces: bridge100
                 with self.assertRaisesRegex(module.WatchdogError, code):
                     module._socket_vmnet_identity(777)
 
-        absent = SimpleNamespace(returncode=1, stdout=b"", stderr=b"")
+        absent = (1, "", "")
         expect_failure(result=absent, code="socket_vmnet_process_absent")
 
-        failed = SimpleNamespace(
-            returncode=2, stdout=b"", stderr=b"transient probe failure\n"
-        )
+        failed = (2, "", "transient probe failure\n")
         expect_failure(result=failed, code="socket_vmnet_probe_failed")
         expect_failure(
-            side_effect=module.subprocess.TimeoutExpired("ps", 2),
+            side_effect=module.WatchdogError("local_command_timeout"),
             code="socket_vmnet_probe_failed",
         )
+
+        with ExitStack() as stack:
+            for patcher in common:
+                stack.enter_context(patcher)
+            run = stack.enter_context(
+                mock.patch.object(
+                    module,
+                    "_run_local",
+                    return_value=(
+                        0,
+                        "0 " + " ".join(module.SOCKET_VMNET_ARGV) + "\n",
+                        "",
+                    ),
+                )
+            )
+            proc = stack.enter_context(
+                mock.patch.object(
+                    module, "_proc_pid_path", return_value=str(module.SOCKET_VMNET)
+                )
+            )
+            identity = module._socket_vmnet_identity(777)
+        self.assertEqual(0, identity["uid"])
+        self.assertEqual(1, run.call_count)
+        self.assertEqual(2, proc.call_count)
 
     def test_live_socket_probe_failure_kills_socket_then_force_stops(self) -> None:
         module = _load()

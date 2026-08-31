@@ -356,13 +356,22 @@ live, and the temporary socket_vmnet runtime and sudoers file are absent. Do
 not reconnect unless that phase prints the same literal safe-to-restore line.
 
 A failure before `limactl start` uses the narrower
-`recover-failed-prestart` transaction. It accepts only the pinned old
-PREPARING marker/FAILED incident, exact inactive socket/pid residuals, absent
-STARTING/watchdog/receipt/VM processes and the unchanged preboot instance. It
-atomically retains the runtime, base capture and marker without deleting them,
-then issues one recovery receipt for a distinct fresh session. Fresh
-`check-airgap` and apply commands require that receipt hash; the old incident
-never becomes retry authority.
+`recover-failed-prestart` transaction. The renderer seals a reviewed,
+gitignored, path-free recovery profile containing the exact old/prior/fresh
+session lineage and inert marker/incident/base/socket metadata. The committed
+example contains impossible evidence and cannot execute recovery. The recovery
+controller must carry the literal `RECOVERY_RECEIPT_REQUIRED`; it verifies the
+exact inactive residuals, absent STARTING/watchdog/receipt/VM processes and the
+unchanged preboot instance, then atomically retains the runtime, base capture
+and marker without deleting them. A separately rendered successor pins the
+resulting receipt and the same profile before fresh `check-airgap` or apply can
+run; the old incident never becomes retry authority.
+
+Both capture passes run pinned macOS observers sequentially under one total
+deadline. The continuous watchdog retains concurrent sampling, but each child
+uses file-backed output, a dedicated process group, bounded reap and group
+extinction checks. A timed-out observer or surviving descendant therefore
+causes fail-stop instead of leaving an apparently live but frozen watchdog.
 
 For the reduced first canary, defer remote chat approval, launchd, sleep/reboot
 qualification and long-running PnL collection. Do not defer the physical

@@ -38,6 +38,18 @@ exact local multicast/link-local route shapes are accepted.
 Each immutable base-capture filename is session-scoped, so a retained failed
 preflight cannot alias or overwrite evidence for a later authorized session.
 
+The recovery profile is also host-local and ignored by Git. It contains no
+secret and no caller-selected path: it binds the exact prior/failed/fresh
+session chain and the metadata hashes of one proven-prestart failure. Its
+committed example is deliberately impossible at runtime. Render without the
+`--prestart-recovery-profile` option only for a recovery-disabled review bundle;
+an actual recovery and its separately pinned successor must both use the same
+reviewed profile by adding:
+
+```sh
+--prestart-recovery-profile /absolute/gitignored/prestart-recovery-profile.json
+```
+
 Do not start the replacement manually. From a local Terminal—not SSH, tmux or
 screen—disable all network services, turn Wi-Fi off, physically disconnect
 Ethernet/USB/Thunderbolt uplinks, and close VPN/sharing software. Run the sealed
@@ -51,6 +63,9 @@ allowlist by exact System-volume device/flags, owner, mode (including setuid),
 link count, size and a stable `O_NOFOLLOW` file-descriptor SHA-256. `/bin/ls`
 is verified before it performs the ACL checks; the allowlist also includes the
 execute-only `sudo` and `visudo` binaries and requires no online trust service.
+Capture commands use file-backed, process-group-bounded execution. The live
+watchdog extinguishes surviving command groups inside its 250 ms sample budget,
+so a child timeout cannot silently freeze monitoring.
 
 Restore host networking only after the command prints both:
 

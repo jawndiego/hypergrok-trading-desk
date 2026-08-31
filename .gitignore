@@ -26,3 +26,5 @@ dist/
 *.egg-info/
 # Host-specific physical interface inventory; contains local MAC addresses.
 airgap-hardware-profile.json
+# Host-specific failed-prestart metadata; rendered only after local review.
+prestart-recovery-profile.json

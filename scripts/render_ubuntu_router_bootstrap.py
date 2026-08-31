@@ -68,6 +68,7 @@ SOURCE_FILES: dict[str, int] = {
     "networks-first-boot.yaml": 0o600,
     "predecessor-cloud-config.template": 0o600,
     "predecessor-lima-create-local.yaml": 0o600,
+    "prestart-recovery-profile.json.example": 0o600,
     "verify-first-boot.py": 0o700,
 }
 
@@ -339,8 +340,105 @@ def _validate_hardware_profile(content: bytes) -> dict[str, Any]:
     return profile
 
 
+def _validate_recovery_profile(
+    content: bytes, lock: dict[str, Any], *, allow_placeholder: bool = False
+) -> dict[str, Any]:
+    try:
+        value = json.loads(content, object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("prestart recovery profile is invalid") from error
+    expected = {
+        "base_capture", "failed_controller_manifest_sha256", "fresh_session_id",
+        "incident", "kind", "old_session_id", "pidfile", "preparing", "prior_recovery",
+        "retained_sudoers", "runtime", "schema_version", "socket", "stderr", "stdout",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected
+        or value.get("schema_version") != 1
+        or value.get("kind") != "trading-desk.router-bootstrap.prestart-recovery-profile"
+        or value.get("fresh_session_id") != lock["pins"]["airgap_session_id"]
+    ):
+        raise ValueError("prestart recovery profile schema differs")
+    for key in ("failed_controller_manifest_sha256", "old_session_id"):
+        if not isinstance(value.get(key), str) or SHA256_RE.fullmatch(value[key]) is None:
+            raise ValueError("prestart recovery profile identity differs")
+    for key in ("base_capture", "preparing"):
+        item = value.get(key)
+        if (
+            not isinstance(item, dict) or set(item) != {"inode", "sha256", "size"}
+            or type(item["inode"]) is not int or item["inode"] < (0 if allow_placeholder else 1)
+            or type(item["size"]) is not int or item["size"] < (0 if allow_placeholder else 1)
+            or SHA256_RE.fullmatch(item.get("sha256", "")) is None
+        ):
+            raise ValueError("prestart recovery profile artifact differs")
+    incident = value.get("incident")
+    if (
+        not isinstance(incident, dict)
+        or set(incident) != {"error_type", "failure_stage", "sha256", "size"}
+        or incident.get("error_type") not in {"BootstrapError", "TimeoutExpired"}
+        or incident.get("failure_stage") != "host_only_capture"
+        or type(incident.get("size")) is not int
+        or incident["size"] < (0 if allow_placeholder else 1)
+        or SHA256_RE.fullmatch(incident.get("sha256", "")) is None
+    ):
+        raise ValueError("prestart recovery incident differs")
+    prior = value.get("prior_recovery")
+    if (
+        not isinstance(prior, dict)
+        or set(prior) != {"old_session_id", "receipt_sha256"}
+        or any(SHA256_RE.fullmatch(prior.get(key, "")) is None for key in prior)
+        or (
+            not allow_placeholder
+            and prior.get("old_session_id") == value.get("old_session_id")
+        )
+    ):
+        raise ValueError("prestart prior recovery differs")
+    if len(
+        {
+            value["fresh_session_id"],
+            value["old_session_id"],
+            prior["old_session_id"],
+        }
+    ) != 3 and not allow_placeholder:
+        raise ValueError("prestart recovery sessions overlap")
+    for key in ("runtime", "socket"):
+        item = value.get(key)
+        required = {"inode", "provenance_hex"} if key == "runtime" else {"inode"}
+        if not isinstance(item, dict) or set(item) != required or type(item["inode"]) is not int or item["inode"] < (0 if allow_placeholder else 1):
+            raise ValueError("prestart recovery runtime differs")
+    if value["runtime"]["provenance_hex"] != "010200f2ac997ac0532d6f":
+        raise ValueError("prestart recovery provenance differs")
+    pidfile = value.get("pidfile")
+    if (
+        not isinstance(pidfile, dict)
+        or set(pidfile) != {"content", "inode", "sha256", "size"}
+        or not isinstance(pidfile.get("content"), str)
+        or not pidfile["content"].isdigit()
+        or type(pidfile.get("inode")) is not int
+        or pidfile["inode"] < 0
+        or type(pidfile.get("size")) is not int
+        or pidfile["size"] != len(pidfile["content"].encode())
+        or SHA256_RE.fullmatch(pidfile.get("sha256", "")) is None
+        or _sha256(pidfile["content"].encode()) != pidfile["sha256"]
+    ):
+        raise ValueError("prestart recovery pidfile differs")
+    for key in ("retained_sudoers", "stderr", "stdout"):
+        item = value.get(key)
+        required = {"sha256", "size"} if key == "retained_sudoers" else {"sha256"}
+        if not isinstance(item, dict) or set(item) != required or SHA256_RE.fullmatch(item.get("sha256", "")) is None:
+            raise ValueError("prestart recovery hash differs")
+    if value["retained_sudoers"] != {
+        "sha256": lock["pins"]["lima_first_boot_sudoers_sha256"],
+        "size": 714,
+    } or any(set(value[key]) != {"sha256"} for key in ("stderr", "stdout")):
+        raise ValueError("prestart recovery fixed evidence differs")
+    return value
+
+
 def _rendered_files(
     hardware_profile_path: Path,
+    recovery_profile_path: Path | None = None,
 ) -> tuple[dict[str, tuple[bytes, int]], dict[str, Any]]:
     source_bytes = {
         name: _read(SOURCE / name, name)
@@ -351,6 +449,14 @@ def _rendered_files(
         hardware_profile_path.resolve(strict=True), "local air-gap hardware profile"
     )
     profile = _validate_hardware_profile(hardware_profile)
+    recovery_profile = (
+        source_bytes["prestart-recovery-profile.json.example"]
+        if recovery_profile_path is None
+        else _read(recovery_profile_path.resolve(strict=True), "local prestart recovery profile")
+    )
+    _validate_recovery_profile(
+        recovery_profile, lock, allow_placeholder=recovery_profile_path is None
+    )
     if profile["host"] != {
         "build_version": lock["host"]["build_version"],
         "machine": lock["host"]["architecture"],
@@ -395,6 +501,7 @@ def _rendered_files(
         name: (content, SOURCE_FILES[name]) for name, content in source_bytes.items()
     }
     files["airgap-hardware-profile.json"] = (hardware_profile, 0o600)
+    files["prestart-recovery-profile.json"] = (recovery_profile, 0o600)
     files["lima-first-boot.yaml"] = (plan, 0o600)
     return files, lock
 
@@ -414,12 +521,16 @@ def _write(path: Path, content: bytes, mode: int) -> None:
     path.chmod(mode)
 
 
-def render(output: Path, hardware_profile_path: Path) -> dict[str, Any]:
+def render(
+    output: Path,
+    hardware_profile_path: Path,
+    recovery_profile_path: Path | None = None,
+) -> dict[str, Any]:
     if not output.is_absolute() or output.exists() or output.is_symlink():
         raise ValueError("output must be a new absolute path")
     if not output.parent.is_dir() or output.parent.is_symlink():
         raise ValueError("output parent must be a real directory")
-    files, lock = _rendered_files(hardware_profile_path)
+    files, lock = _rendered_files(hardware_profile_path, recovery_profile_path)
     output.mkdir(mode=0o700)
     try:
         hashes: dict[str, str] = {}
@@ -453,6 +564,7 @@ def verify(
     expected_manifest_sha256: str,
     owner_uid: int | None,
     hardware_profile_path: Path,
+    recovery_profile_path: Path | None = None,
 ) -> dict[str, Any]:
     if SHA256_RE.fullmatch(expected_manifest_sha256) is None:
         raise ValueError("expected manifest digest is invalid")
@@ -470,7 +582,7 @@ def verify(
         manifest = json.loads(manifest_raw, object_pairs_hook=_unique_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("bundle manifest is invalid") from error
-    expected_files, lock = _rendered_files(hardware_profile_path)
+    expected_files, lock = _rendered_files(hardware_profile_path, recovery_profile_path)
     expected_names = set(expected_files) | {"bundle-manifest.json"}
     if {path.name for path in bundle.iterdir()} != expected_names:
         raise ValueError("bundle file inventory differs")
@@ -508,6 +620,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--hardware-profile", type=Path)
+    parser.add_argument("--prestart-recovery-profile", type=Path)
     parser.add_argument("--check-bundle", type=Path)
     parser.add_argument("--expected-manifest-sha256")
     parser.add_argument("--require-owner-uid", type=int)
@@ -522,7 +635,11 @@ def main() -> int:
             and args.check_bundle is None
             and args.hardware_profile is not None
         ):
-            manifest = render(args.output_dir, args.hardware_profile)
+            manifest = render(
+                args.output_dir,
+                args.hardware_profile,
+                args.prestart_recovery_profile,
+            )
             print(json.dumps(manifest, indent=2, sort_keys=True))
             return 0
         if (
@@ -536,6 +653,7 @@ def main() -> int:
                 args.expected_manifest_sha256,
                 args.require_owner_uid,
                 args.hardware_profile,
+                args.prestart_recovery_profile,
             )
             print(json.dumps(manifest, indent=2, sort_keys=True))
             return 0

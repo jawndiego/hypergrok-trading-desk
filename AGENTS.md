@@ -255,6 +255,15 @@ This repository builds an agent-runtime-neutral trading research and execution h
   migration must remove bootstrap passwordless sudo/per-boot provisioning
   before any networked guest boot. Router keys, credentials, venue writes and
   mainnet remain unauthorized.
+- Failed-prestart evidence enters a bundle only through the gitignored,
+  path-free `prestart-recovery-profile.json`. The committed example is
+  structurally renderable but cannot execute recovery. A recovery controller
+  must carry `RECOVERY_RECEIPT_REQUIRED`, bind the prior receipt chain and
+  exact inert residual metadata, retain artifacts through a durable
+  source-XOR-destination transaction, and rotate to an unused session. Its
+  successor separately pins the emitted receipt and the same profile. Capture
+  probes and the live watchdog use file-backed, process-group-bounded
+  subprocesses; never reintroduce PIPE-backed timeout handling there.
 - The VM and router renderers share the fixed `192.168.106.1/32` Mac to
   `192.168.106.2/24` guest ingress contract. The rendered
   `local-nat-lab-test-plan` is print-only: PF enforcement, a remote VPN exit,

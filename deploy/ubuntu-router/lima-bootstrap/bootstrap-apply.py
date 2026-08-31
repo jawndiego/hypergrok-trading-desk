@@ -29,6 +29,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 
@@ -39,6 +40,7 @@ MANIFEST_PATH = SCRIPT_DIR / "bundle-manifest.json"
 PLAN_PATH = SCRIPT_DIR / "lima-first-boot.yaml"
 NETWORKS_PATH = SCRIPT_DIR / "networks-first-boot.yaml"
 CLOUD_TEMPLATE_PATH = SCRIPT_DIR / "cloud-config-first-boot.yaml.example"
+RECOVERY_PROFILE_PATH = SCRIPT_DIR / "prestart-recovery-profile.json"
 F_FULLFSYNC = 51
 AT_FDCWD = -2
 RENAME_EXCL = 0x00000004
@@ -171,6 +173,9 @@ WATCHDOG_RESULT_KEYS = frozenset(
 
 class BootstrapError(RuntimeError):
     """Fail-closed bootstrap error."""
+
+
+CAPTURE_WATCHDOG_TIMEOUT_SECONDS = 50.0
 
 
 def _valid_ps_uid(value: str) -> bool:
@@ -562,6 +567,145 @@ def _recovery_instance_identity(
         **{key: instance_evidence[key] for key in keys},
         "instance_path": instance_path,
     }
+
+
+def _load_prestart_recovery_profile(lock: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    content = _read_bound(
+        RECOVERY_PROFILE_PATH, uid=0, gid=0, mode=0o400, maximum=64 * 1024
+    )
+    value = _load_json_bytes(content, "prestart recovery profile")
+    expected = {
+        "base_capture", "failed_controller_manifest_sha256", "fresh_session_id",
+        "incident", "kind", "old_session_id", "pidfile", "preparing", "prior_recovery",
+        "retained_sudoers", "runtime", "schema_version", "socket", "stderr", "stdout",
+    }
+    if (
+        set(value) != expected
+        or value.get("schema_version") != 1
+        or value.get("kind") != "trading-desk.router-bootstrap.prestart-recovery-profile"
+        or value.get("fresh_session_id") != lock["pins"]["airgap_session_id"]
+        or any(
+            not isinstance(value.get(key), str) or SHA256_RE.fullmatch(value[key]) is None
+            for key in ("old_session_id", "failed_controller_manifest_sha256")
+        )
+    ):
+        raise BootstrapError("prestart recovery profile differs")
+    for key in ("base_capture", "preparing"):
+        item = value.get(key)
+        if (
+            not isinstance(item, dict) or set(item) != {"inode", "sha256", "size"}
+            or type(item["inode"]) is not int or item["inode"] <= 0
+            or type(item["size"]) is not int or item["size"] <= 0
+            or SHA256_RE.fullmatch(item.get("sha256", "")) is None
+        ):
+            raise BootstrapError("prestart recovery artifact profile differs")
+    incident = value.get("incident")
+    if (
+        not isinstance(incident, dict)
+        or set(incident) != {"error_type", "failure_stage", "sha256", "size"}
+        or incident.get("error_type") not in {"BootstrapError", "TimeoutExpired"}
+        or incident.get("failure_stage") != "host_only_capture"
+        or type(incident.get("size")) is not int or incident["size"] <= 0
+        or SHA256_RE.fullmatch(incident.get("sha256", "")) is None
+    ):
+        raise BootstrapError("prestart recovery incident profile differs")
+    prior = value.get("prior_recovery")
+    if (
+        not isinstance(prior, dict)
+        or set(prior) != {"old_session_id", "receipt_sha256"}
+        or any(SHA256_RE.fullmatch(prior.get(key, "")) is None for key in prior)
+        or prior.get("old_session_id") == value.get("old_session_id")
+    ):
+        raise BootstrapError("prestart prior recovery profile differs")
+    if len(
+        {
+            value["fresh_session_id"],
+            value["old_session_id"],
+            prior["old_session_id"],
+        }
+    ) != 3:
+        raise BootstrapError("prestart recovery sessions overlap")
+    for key in ("runtime", "socket"):
+        item = value.get(key)
+        if not isinstance(item, dict) or type(item.get("inode")) is not int or item["inode"] <= 0:
+            raise BootstrapError("prestart recovery runtime profile differs")
+    if value["runtime"] != {
+        "inode": value["runtime"]["inode"],
+        "provenance_hex": APPLE_PROVENANCE_VALUE.hex(),
+    } or set(value["socket"]) != {"inode"}:
+        raise BootstrapError("prestart recovery runtime profile differs")
+    pidfile = value.get("pidfile")
+    if (
+        not isinstance(pidfile, dict)
+        or set(pidfile) != {"content", "inode", "sha256", "size"}
+        or not isinstance(pidfile.get("content"), str) or not pidfile["content"].isdigit()
+        or type(pidfile.get("inode")) is not int or pidfile["inode"] <= 0
+        or pidfile.get("size") != len(pidfile["content"].encode())
+        or _sha256_bytes(pidfile["content"].encode()) != pidfile.get("sha256")
+    ):
+        raise BootstrapError("prestart recovery pid profile differs")
+    if value.get("retained_sudoers") != {
+        "sha256": lock["pins"]["lima_first_boot_sudoers_sha256"],
+        "size": 714,
+    } or any(
+        not isinstance(value.get(key), dict)
+        or set(value[key]) != {"sha256"}
+        or SHA256_RE.fullmatch(value[key].get("sha256", "")) is None
+        for key in ("stderr", "stdout")
+    ):
+        raise BootstrapError("prestart recovery fixed evidence differs")
+    return value, _sha256_bytes(content)
+
+
+def _validate_prestart_incident(
+    content: bytes, profile: dict[str, Any], old_session: str
+) -> dict[str, Any]:
+    incident = _load_json_bytes(content, "prestart incident")
+    expected_keys = {
+        "attempt_id", "automatic_retry_authorized", "disposition", "error_type",
+        "failure_stage", "kind", "mainnet_authorized", "phase", "schema_version",
+        "start_invoked", "temporary_vmnet_artifacts", "venue_writes_authorized",
+    }
+    if (
+        set(incident) != expected_keys
+        or len(content) != profile["incident"]["size"]
+        or _sha256_bytes(content) != profile["incident"]["sha256"]
+        or incident.get("attempt_id") != old_session
+        or incident.get("kind") != "trading-desk.router-bootstrap.airgap-first-boot-incident"
+        or incident.get("disposition") != "FAILED"
+        or incident.get("error_type") != profile["incident"]["error_type"]
+        or incident.get("failure_stage") != profile["incident"]["failure_stage"]
+        or incident.get("automatic_retry_authorized") is not False
+        or incident.get("schema_version") != 1
+        or incident.get("phase") != "airgap-first-boot"
+        or incident.get("mainnet_authorized") is not False
+        or incident.get("venue_writes_authorized") is not False
+        or incident.get("start_invoked") is not False
+        or incident.get("temporary_vmnet_artifacts") is not None
+    ):
+        raise BootstrapError("prestart incident differs")
+    return incident
+
+
+def _fresh_recovery_artifacts(state: dict[str, Path], session: str) -> list[Path]:
+    return [
+        state["receipts"] / f"09-airgap-first-boot-incident-{session}.json",
+        state["receipts"] / f".09-airgap-first-boot-incident-{session}.json.pending",
+        state["receipts"] / f"10-prestart-recovery-{session}.json",
+        state["receipts"] / f".10-prestart-recovery-{session}.json.pending",
+        state["quarantine"] / f"prestart-recovery-transaction-{session}.json",
+        state["quarantine"] / f".prestart-recovery-transaction-{session}.json.pending",
+        state["state"] / f"socket-vmnet-{session}.stdout",
+        state["state"] / f"socket-vmnet-{session}.stderr",
+        state["state"] / f"limactl-start-{session}.stdout",
+        state["state"] / f"limactl-start-{session}.stderr",
+        state["state"] / f"airgap-hardware-base-capture-{session}.json",
+        state["state"] / f".airgap-hardware-base-capture-{session}.json.pending",
+        state["state"] / "airgap-watchdog-results" / f"{session}-watch.json",
+        state["state"] / "airgap-watchdog-results" / f".{session}-watch.json.pending",
+        state["state"] / "airgap-watchdog-results" / f"{session}-check.json",
+        state["state"] / "airgap-watchdog-results" / f".{session}-check.json.pending",
+    ]
 
 
 def _assert_recovery_stopped_instance(
@@ -1730,18 +1874,54 @@ def _run_watchdog_phase(
         if socket_vmnet_pid is None:
             raise BootstrapError("socket_vmnet PID is required for host-only capture")
         command.extend(["--socket-vmnet-pid", str(socket_vmnet_pid)])
-    try:
-        result = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
-            timeout=30,
-            check=False,
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
+                env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+                start_new_session=True,
+            )
+        except OSError as error:
+            raise BootstrapError(f"air-gap {mode} watchdog spawn failed") from error
+        # airgap-watchdog.py declares a 39-second worst-case capture-mode
+        # budget (identity + snapshots + socket cleanup). Keep independent
+        # parent containment beyond that child budget.
+        deadline = time.monotonic() + CAPTURE_WATCHDOG_TIMEOUT_SECONDS
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if process.poll() is None:
+            group_mismatch = False
+            try:
+                if os.getpgid(process.pid) != process.pid:
+                    group_mismatch = True
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired as error:
+                raise BootstrapError(
+                    f"air-gap {mode} watchdog reap timed out"
+                ) from error
+            if group_mismatch:
+                raise BootstrapError(
+                    f"air-gap {mode} watchdog process group differs"
+                )
+            raise BootstrapError(f"air-gap {mode} watchdog timed out")
+        if os.fstat(stdout.fileno()).st_size > 64 * 1024 or os.fstat(
+            stderr.fileno()
+        ).st_size > 64 * 1024:
+            raise BootstrapError(f"air-gap {mode} output differs")
+        stdout.seek(0)
+        stderr.seek(0)
+        result = subprocess.CompletedProcess(
+            command, process.returncode, stdout.read(), stderr.read()
         )
-    except subprocess.TimeoutExpired as error:
-        raise BootstrapError(f"air-gap {mode} watchdog timed out") from error
     if result.returncode != 0:
         try:
             error_lines = result.stderr.decode("utf-8", errors="strict").splitlines()
@@ -2939,13 +3119,14 @@ def _airgap_preconditions(args: argparse.Namespace) -> tuple[dict[str, Any], dic
     local_tty = _assert_attended_root_tty()
     _assert_host_identity(lock)
     state = _initialize(lock)
+    recovery_profile, recovery_profile_sha256 = _load_prestart_recovery_profile(lock)
     expected_recovery = args.expected_prestart_recovery_receipt_sha256
     if not isinstance(expected_recovery, str) or SHA256_RE.fullmatch(expected_recovery) is None:
         raise BootstrapError("prestart recovery receipt digest is invalid")
     if lock["pins"].get("prestart_recovery_receipt_sha256") != expected_recovery:
         raise BootstrapError("prestart recovery receipt is not pinned by this controller")
     recovery_path = state["receipts"] / (
-        "10-prestart-recovery-46e7c23627c9e4a1207f86a5a3f186cfee63f302e6940dfd90f1422097cd4e4d.json"
+        f"10-prestart-recovery-{recovery_profile['old_session_id']}.json"
     )
     recovery_content = _read_bound(
         recovery_path, uid=0, gid=0, mode=0o400, maximum=64 * 1024
@@ -2954,9 +3135,14 @@ def _airgap_preconditions(args: argparse.Namespace) -> tuple[dict[str, Any], dic
     if (
         _sha256_bytes(recovery_content) != expected_recovery
         or recovery.get("kind") != "trading-desk.router-bootstrap.prestart-recovery"
+        or recovery.get("old_session_id") != recovery_profile["old_session_id"]
+        or recovery.get("fresh_session_id") != recovery_profile["fresh_session_id"]
         or recovery.get("fresh_session_id") != lock["pins"]["airgap_session_id"]
-        or recovery.get("old_session_id")
-        != "46e7c23627c9e4a1207f86a5a3f186cfee63f302e6940dfd90f1422097cd4e4d"
+        or recovery.get("recovery_profile_sha256") != recovery_profile_sha256
+        or recovery.get("schema_version") != 1
+        or recovery.get("phase") != "prestart-recovery"
+        or recovery.get("mainnet_authorized") is not False
+        or recovery.get("venue_writes_authorized") is not False
         or recovery.get("start_invoked") is not False
         or recovery.get("vm_status") != "Stopped"
     ):
@@ -3501,17 +3687,21 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
     try:
         _verify_bundle(args.expected_controller_manifest_sha256)
         lock = _load_lock()
+        if lock["pins"].get("prestart_recovery_receipt_sha256") != "RECOVERY_RECEIPT_REQUIRED":
+            raise BootstrapError("recovery controller already carries successor authority")
         _verify_system_tools(lock)
         _assert_attended_root_tty()
         _assert_host_identity(lock)
         state = _require_existing_state(lock)
-        prior_session = "28de503250ad9a13f25d539c4119ec967c98e8a2feb624b6bc0496fccd6dd5a8"
-        prior_recovery_sha256 = (
-            "a6ffb13d74513e0dfe021a04dbddf85119763925b58e5af6c94320d624c0f493"
-        )
-        old_session = "46e7c23627c9e4a1207f86a5a3f186cfee63f302e6940dfd90f1422097cd4e4d"
-        old_manifest = "041c8f7907016decc31d082a31f9a092eb42a6dba2262ed4e29edb214bb84594"
-        fresh_session = "a1236507cb844686ba3d4a97ca11788cb5fbe63a5aedafa729a7ad22a68fb24b"
+        profile, profile_sha256 = _load_prestart_recovery_profile(lock)
+        prior_session = profile["prior_recovery"]["old_session_id"]
+        prior_recovery_sha256 = profile["prior_recovery"]["receipt_sha256"]
+        old_session = profile["old_session_id"]
+        old_manifest = profile["failed_controller_manifest_sha256"]
+        fresh_session = profile["fresh_session_id"]
+        fresh_absent = _fresh_recovery_artifacts(state, fresh_session)
+        if any(path.exists() or path.is_symlink() for path in fresh_absent):
+            raise BootstrapError("fresh recovery session already has artifacts")
         runtime = Path(lock["paths"]["vmnet_runtime"])
         base = Path(
             "/private/var/db/trading-desk-router-bootstrap-v1/"
@@ -3519,7 +3709,7 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
         )
         preparing = state["state"] / ".airgap-first-boot.PREPARING.json"
         moves = (
-            (runtime, state["quarantine"] / f"prestart-vmnet-runtime-{old_session}-52628148"),
+            (runtime, state["quarantine"] / f"prestart-vmnet-runtime-{old_session}-{profile['runtime']['inode']}"),
             (base, state["quarantine"] / f"prestart-base-capture-{old_session}"),
             (preparing, state["quarantine"] / f"prestart-preparing-{old_session}"),
         )
@@ -3558,10 +3748,10 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             preparing_current, uid=0, gid=0, mode=0o400, maximum=4096
         )
         if (
-            len(preparing_content) != 487
-            or preparing_current.stat().st_ino != 52628146
+            len(preparing_content) != profile["preparing"]["size"]
+            or preparing_current.stat().st_ino != profile["preparing"]["inode"]
             or _sha256_bytes(preparing_content)
-            != "f8a65887de36d8f80a4fc0274bc65261977ecb915961762d178bb58f07dad76d"
+            != profile["preparing"]["sha256"]
         ):
             raise BootstrapError("preparing marker differs")
         expected_marker = {
@@ -3604,38 +3794,9 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
         incident_content = _read_bound(
             incident_path, uid=0, gid=0, mode=0o400, maximum=4096
         )
-        incident = _load_json_bytes(incident_content, "prestart incident")
-        if (
-            set(incident)
-            != {
-                "attempt_id",
-                "automatic_retry_authorized",
-                "disposition",
-                "error_type",
-                "failure_stage",
-                "kind",
-                "mainnet_authorized",
-                "phase",
-                "schema_version",
-                "start_invoked",
-                "temporary_vmnet_artifacts",
-                "venue_writes_authorized",
-            }
-            or
-            len(incident_content) != 482
-            or _sha256_bytes(incident_content)
-            != "efe2706ef92f8ffc03c82692f69d06df9741dc6f0b1f637e77cecdd4ee058277"
-            or incident.get("attempt_id") != old_session
-            or incident.get("kind")
-            != "trading-desk.router-bootstrap.airgap-first-boot-incident"
-            or incident.get("disposition") != "FAILED"
-            or incident.get("error_type") != "TimeoutExpired"
-            or incident.get("failure_stage") != "host_only_capture"
-            or incident.get("automatic_retry_authorized") is not False
-            or incident.get("start_invoked") is not False
-            or incident.get("temporary_vmnet_artifacts") is not None
-        ):
-            raise BootstrapError("prestart incident differs")
+        incident = _validate_prestart_incident(
+            incident_content, profile, old_session
+        )
         stage = "stopped_no_vm"
         _assert_no_vm_process()
         stage = "stopped_no_watchdog"
@@ -3660,15 +3821,15 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             retained_sudoers, uid=0, gid=0, mode=0o400, maximum=4096
         )
         if (
-            len(sudoers_content) != 714
+            len(sudoers_content) != profile["retained_sudoers"]["size"]
             or _sha256_bytes(sudoers_content)
-            != lock["pins"]["lima_first_boot_sudoers_sha256"]
+            != profile["retained_sudoers"]["sha256"]
         ):
             raise BootstrapError("retained sudoers differs")
         stage = "residual_runtime_identity"
         runtime_current = _recovery_current_path(*moves[0])
         runtime_meta = _assert_real(runtime_current, kind="directory", uid=0, gid=0, mode=0o755)
-        if runtime_meta.st_ino != 52628148:
+        if runtime_meta.st_ino != profile["runtime"]["inode"]:
             raise BootstrapError("runtime identity differs")
         stage = "residual_runtime_xattr"
         _verify_recovery_xattrs(runtime_current, "runtime")
@@ -3688,17 +3849,17 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             or socket_path.is_symlink()
             or not stat.S_ISSOCK(socket_meta.st_mode)
             or (socket_meta.st_uid, socket_meta.st_gid, stat.S_IMODE(socket_meta.st_mode), socket_meta.st_nlink, socket_meta.st_size, socket_meta.st_ino)
-            != (0, 454, 0o770, 1, 0, 52628152)
-            or pid_path.stat().st_ino != 52628151
-            or pid_content != b"4313"
+            != (0, 454, 0o770, 1, 0, profile["socket"]["inode"])
+            or pid_path.stat().st_ino != profile["pidfile"]["inode"]
+            or pid_content != profile["pidfile"]["content"].encode()
             or _sha256_bytes(pid_content)
-            != "3c4dcf6dfc899bd68a7f7961e7ca5a61d2d71d500f9785ddb8d0cbdbb431bcfb"
+            != profile["pidfile"]["sha256"]
         ):
             raise BootstrapError("runtime residual differs")
         stage = "residual_logs"
         for suffix, digest in (
-            ("stdout", _sha256_bytes(b"")),
-            ("stderr", "fad8cb653d031d0675d31145afee59cafcc9c5593ad65dde7ab81b8cded444f4"),
+            ("stdout", profile["stdout"]["sha256"]),
+            ("stderr", profile["stderr"]["sha256"]),
         ):
             path = state["state"] / f"socket-vmnet-{old_session}.{suffix}"
             content = _read_bound(
@@ -3712,10 +3873,10 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             base_current, uid=0, gid=0, mode=0o400, maximum=128 * 1024
         )
         if (
-            base_current.stat().st_ino != 52729819
-            or len(base_content) != 7033
+            base_current.stat().st_ino != profile["base_capture"]["inode"]
+            or len(base_content) != profile["base_capture"]["size"]
             or _sha256_bytes(base_content)
-            != "b4e7db0865fcefaaa94d0753e0fc22e519a8d2dd0456ee35d24d2e87aa00da2a"
+            != profile["base_capture"]["sha256"]
         ):
             raise BootstrapError("base capture differs")
         transaction = {
@@ -3731,6 +3892,7 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
                 for source, destination in moves
             ],
             "old_session_id": old_session,
+            "recovery_profile_sha256": profile_sha256,
             "preparing_sha256": _sha256_bytes(preparing_content),
             "prior_recovery_receipt_sha256": prior_recovery_sha256,
             "recovery_controller_manifest_sha256": args.expected_controller_manifest_sha256,
@@ -3759,15 +3921,15 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             _assert_real(
                 retained_runtime, kind="directory", uid=0, gid=0, mode=0o755
             ).st_ino
-            != 52628148
+            != profile["runtime"]["inode"]
             or _sha256_bytes(
                 _read_bound(
                     retained_base, uid=0, gid=0, mode=0o400, maximum=128 * 1024
                 )
             )
-            != "b4e7db0865fcefaaa94d0753e0fc22e519a8d2dd0456ee35d24d2e87aa00da2a"
-            or retained_base.stat().st_ino != 52729819
-            or retained_base.stat().st_size != 7033
+            != profile["base_capture"]["sha256"]
+            or retained_base.stat().st_ino != profile["base_capture"]["inode"]
+            or retained_base.stat().st_size != profile["base_capture"]["size"]
             or _sha256_bytes(
                 _read_bound(
                     retained_preparing,
@@ -3777,8 +3939,8 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
                     maximum=4096,
                 )
             )
-            != "f8a65887de36d8f80a4fc0274bc65261977ecb915961762d178bb58f07dad76d"
-            or retained_preparing.stat().st_ino != 52628146
+            != profile["preparing"]["sha256"]
+            or retained_preparing.stat().st_ino != profile["preparing"]["inode"]
         ):
             raise BootstrapError("retained recovery evidence differs")
         stage = "postmove_proof"
@@ -3808,6 +3970,7 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             "old_session_id": old_session,
             "phase": "prestart-recovery",
             "postmove_processes_absent": True,
+            "recovery_profile_sha256": profile_sha256,
             "preparing_sha256": _sha256_bytes(preparing_content),
             "prior_recovery_receipt_sha256": prior_recovery_sha256,
             "recovery_controller_manifest_sha256": args.expected_controller_manifest_sha256,
