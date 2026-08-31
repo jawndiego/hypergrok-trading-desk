@@ -130,6 +130,18 @@
       "sha256": "f4a543ca644b3d37db613017dd8eaa3454b81e8ca97ff7c988a652416b86eaec",
       "size": 1575952
     },
+    "/usr/libexec/InternetSharing": {
+      "links": 1,
+      "mode": "00555",
+      "sha256": "78d771eb51bc8a6ec934876fe19bc8ed887fce44cdfb0c45e6a6cbdac74fb2b5",
+      "size": 470576
+    },
+    "/usr/libexec/bootpd": {
+      "links": 1,
+      "mode": "00755",
+      "sha256": "16712f8b616d2c3f198e81dda6ab3a8e848b6748e6f9a1c53b0dbbc548eefdc9",
+      "size": 462976
+    },
     "/usr/sbin/netstat": {
       "links": 1,
       "mode": "00555",

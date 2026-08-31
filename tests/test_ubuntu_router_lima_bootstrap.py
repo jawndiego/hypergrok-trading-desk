@@ -594,7 +594,15 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             "24752389e1d97c9555dd153b644902fadd460dfbe1a166251876c67bbacb0810",
             lock["system_tools"]["/bin/ls"]["sha256"],
         )
-        self.assertEqual(13, len(lock["system_tools"]))
+        self.assertEqual(15, len(lock["system_tools"]))
+        self.assertEqual(
+            "78d771eb51bc8a6ec934876fe19bc8ed887fce44cdfb0c45e6a6cbdac74fb2b5",
+            lock["system_tools"]["/usr/libexec/InternetSharing"]["sha256"],
+        )
+        self.assertEqual(
+            "16712f8b616d2c3f198e81dda6ab3a8e848b6748e6f9a1c53b0dbbc548eefdc9",
+            lock["system_tools"]["/usr/libexec/bootpd"]["sha256"],
+        )
         self.assertEqual("04755", lock["system_tools"]["/bin/ps"]["mode"])
         self.assertEqual("04511", lock["system_tools"]["/usr/bin/sudo"]["mode"])
         self.assertEqual(2, lock["system_tools"]["/usr/bin/pkill"]["links"])
@@ -1092,6 +1100,33 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             self.assertTrue(controller._valid_ps_uid(value))
         for value in ("-1", "-3", "+2", "", "uid"):
             self.assertFalse(controller._valid_ps_uid(value))
+
+    def test_host_helper_teardown_inventory_is_exact_and_all_uid(self) -> None:
+        controller = _load_module(HOST_APPLY, "bootstrap_host_helper_test")
+        self.assertFalse(controller._host_helpers_active("1 0 /sbin/launchd\n"))
+        for row in (
+            "20 0 /usr/libexec/InternetSharing\n",
+            "21 0 /usr/libexec/bootpd\n",
+            "22 501 /usr/libexec/bootpd\n",
+            "23 0 /tmp/InternetSharing\n",
+        ):
+            self.assertTrue(
+                controller._host_helpers_active("1 0 /sbin/launchd\n" + row)
+            )
+        for malformed in (
+            "0 0 /usr/libexec/bootpd\n",
+            "1 0 /sbin/launchd\n1 0 /usr/libexec/bootpd\n",
+            "pid uid command\n",
+        ):
+            with self.assertRaises(controller.BootstrapError):
+                controller._host_helpers_active(malformed)
+
+        no_vm_source = inspect.getsource(controller._assert_no_vm_process)
+        self.assertIn("/usr/libexec/InternetSharing", no_vm_source)
+        self.assertIn("/usr/libexec/bootpd", no_vm_source)
+        teardown_source = inspect.getsource(controller._wait_hostonly_teardown)
+        self.assertIn("_host_helpers_active", teardown_source)
+        self.assertIn("bridge_active and not helpers_active", teardown_source)
 
     def test_airgapped_flow_starts_once_verifies_and_stops(self) -> None:
         controller = _load_module(HOST_APPLY, "bootstrap_apply_airgap_flow_test")

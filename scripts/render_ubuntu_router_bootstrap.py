@@ -26,7 +26,7 @@ SOURCE = ROOT / "deploy" / "ubuntu-router" / "lima-bootstrap"
 LOCK_PATH = SOURCE / "bootstrap-lock.json"
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SYSTEM_TOOL_CONTRACT_SHA256 = (
-    "f2112a4323a7f9bb85cd3e6c6833791bf18c6fa26d709387876d113cfe050610"
+    "f4e3704a32328b3b7a35d7398e268375e95860bd69c87d5828797f213361ef5b"
 )
 SYSTEM_TOOL_PATHS = frozenset(
     {
@@ -38,6 +38,8 @@ SYSTEM_TOOL_PATHS = frozenset(
         "/usr/bin/pkill",
         "/usr/bin/ssh",
         "/usr/bin/sudo",
+        "/usr/libexec/InternetSharing",
+        "/usr/libexec/bootpd",
         "/usr/sbin/netstat",
         "/usr/sbin/networksetup",
         "/usr/sbin/scutil",

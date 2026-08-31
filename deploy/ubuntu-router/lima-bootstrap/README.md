@@ -61,7 +61,7 @@ controller's `check-airgap --attest-physical-airgap`, then
 between. The controller continuously monitors the complete topology, verifies
 the guest over vsock, and stops it again.
 
-The sealed controller verifies its 13-tool ACL/network/process/privilege
+The sealed controller verifies its 15-tool ACL/network/process/privilege
 allowlist by exact System-volume device/flags, owner, mode (including setuid),
 link count, size and a stable `O_NOFOLLOW` file-descriptor SHA-256. `/bin/ls`
 is verified before it performs the ACL checks; the allowlist also includes the

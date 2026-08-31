@@ -48,7 +48,7 @@ APPLE_PROVENANCE_NAME = "com.apple.provenance"
 APPLE_PROVENANCE_VALUE = bytes.fromhex("010200f2ac997ac0532d6f")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SYSTEM_TOOL_CONTRACT_SHA256 = (
-    "f2112a4323a7f9bb85cd3e6c6833791bf18c6fa26d709387876d113cfe050610"
+    "f4e3704a32328b3b7a35d7398e268375e95860bd69c87d5828797f213361ef5b"
 )
 SYSTEM_TOOL_PATHS = frozenset(
     {
@@ -60,6 +60,8 @@ SYSTEM_TOOL_PATHS = frozenset(
         "/usr/bin/pkill",
         "/usr/bin/ssh",
         "/usr/bin/sudo",
+        "/usr/libexec/InternetSharing",
+        "/usr/libexec/bootpd",
         "/usr/sbin/netstat",
         "/usr/sbin/networksetup",
         "/usr/sbin/scutil",
@@ -1399,9 +1401,38 @@ def _assert_no_vm_process() -> None:
     )
     if result.returncode != 0 or result.stderr or len(result.stdout) > 4 * 1024 * 1024:
         raise BootstrapError("process inventory failed")
-    forbidden = ("socket_vmnet", "limactl hostagent", "lima-trading-desk-router", "qemu-system")
+    forbidden = (
+        "/usr/libexec/InternetSharing",
+        "/usr/libexec/bootpd",
+        "socket_vmnet",
+        "limactl hostagent",
+        "lima-trading-desk-router",
+        "qemu-system",
+    )
     if any(token in line for token in forbidden for line in result.stdout.splitlines()):
         raise BootstrapError("VM or socket_vmnet process is active")
+
+
+def _host_helpers_active(content: str) -> bool:
+    helpers = {"InternetSharing", "bootpd"}
+    observed_pids: set[int] = set()
+    active = False
+    for line in content.splitlines():
+        fields = line.split(None, 2)
+        if (
+            len(fields) != 3
+            or not fields[0].isdigit()
+            or not _valid_ps_uid(fields[1])
+            or not fields[2]
+        ):
+            raise BootstrapError("host helper process inventory is malformed")
+        pid = int(fields[0])
+        if pid <= 0 or pid in observed_pids:
+            raise BootstrapError("host helper process inventory is malformed")
+        observed_pids.add(pid)
+        if Path(fields[2]).name in helpers:
+            active = True
+    return active
 
 
 def _assert_no_airgap_watchdog_process() -> None:
@@ -2586,12 +2617,28 @@ def _wait_hostonly_teardown(
             check=False,
         )
         text = result.stdout.decode("utf-8", errors="strict")
-        if result.returncode != 0 or (
-            "inet 192.168.106.1 " not in text and "status: active" not in text
-        ):
+        processes = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,uid=,comm="],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=3,
+            check=False,
+        )
+        if processes.returncode != 0 or processes.stderr or len(processes.stdout) > 4 * 1024 * 1024:
+            raise BootstrapError("host helper teardown inventory failed")
+        helpers_active = _host_helpers_active(processes.stdout)
+        bridge_active = result.returncode == 0 and (
+            "inet 192.168.106.1 " in text or "status: active" in text
+        )
+        if not bridge_active and not helpers_active:
             break
         if time.monotonic() >= deadline:
-            raise BootstrapError("host-only interface teardown timed out")
+            raise BootstrapError("host-only interface/helper teardown timed out")
         time.sleep(0.1)
     # Allow at least two 200 ms watchdog samples to bind the base topology.
     time.sleep(0.5)
@@ -3798,6 +3845,7 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
         socket_stop = _stop_hostonly_daemon(socket_process, socket_streams)
         socket_process = None
         socket_streams = None
+        _wait_hostonly_teardown(watchdog, caffeinate)
         _assert_no_vm_process()
         _status(lock, limactl)
         postboot = _hardened_instance_evidence(
@@ -3809,7 +3857,6 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
         vmnet_cleanup = _quarantine_vmnet_after_success(
             lock, state, limactl, attempt_id=attempt_id
         )
-        _wait_hostonly_teardown(watchdog, caffeinate)
         if watchdog.poll() is not None:
             raise BootstrapError("air-gap watchdog exited before completion")
         watchdog_result = _complete_watchdog(

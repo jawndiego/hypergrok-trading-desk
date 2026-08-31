@@ -179,7 +179,7 @@ utun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380
                 "stdout": "",
             }
         ).decode("utf-8"),
-        "processes": "  0 /sbin/launchd /sbin/launchd\n",
+        "processes": "1 0 /sbin/launchd\n",
         "wifi:en0": "Wi-Fi Power (en0): Off\n",
         "service:Ethernet": "Disabled\n",
         "service:Wi-Fi": "Disabled\n",
@@ -258,9 +258,9 @@ class AirgapWatchdogTests(unittest.TestCase):
             self.assertFalse(module._valid_ps_uid(value))
         self.assertTrue(
             module._internet_sharing_disabled(
-                "-2 /usr/libexec/dhcp6d\n0 /sbin/launchd\n",
-                allow_host_only_bootpd=False,
-            )
+                "2 -2 /usr/libexec/dhcp6d\n1 0 /sbin/launchd\n",
+                allow_host_only_helpers=False,
+            )[0]
         )
 
     def test_host_only_scoped_default_is_exact_and_ipv4_only(self) -> None:
@@ -666,7 +666,11 @@ Network interfaces: bridge100
             mock.patch.object(
                 module,
                 "_sample",
-                return_value={"duration_ns": 1, "host_only_observed": False},
+                return_value={
+                    "duration_ns": 1,
+                    "host_network_helpers_present": False,
+                    "host_only_observed": False,
+                },
             ),
             mock.patch.object(module, "_atomic_fixed_document", side_effect=atomic),
         ):
@@ -706,7 +710,11 @@ Network interfaces: bridge100
             mock.patch.object(
                 module,
                 "_sample",
-                return_value={"duration_ns": 1, "host_only_observed": True},
+                return_value={
+                    "duration_ns": 1,
+                    "host_network_helpers_present": False,
+                    "host_only_observed": True,
+                },
             ),
             mock.patch.object(module, "_atomic_fixed_document", side_effect=atomic),
         ):
@@ -721,20 +729,68 @@ Network interfaces: bridge100
             final_lock["host_only"]["route_topology_sha256"]["ipv4"],
         )
 
-    def test_bootpd_is_allowed_only_with_exact_host_only_route_phase(self) -> None:
+    def test_host_helpers_are_exact_root_singletons_only_in_host_phase(self) -> None:
         module = _load()
-        processes = "0 endpointsecurityd\n0 /usr/libexec/bootpd\n"
-        with mock.patch.object(module, "NAT_PLIST", Path("/nonexistent/nat.plist")):
+        processes = (
+            "1 0 /usr/libexec/endpointsecurityd\n"
+            "20 0 /usr/libexec/InternetSharing\n"
+            "21 0 /usr/libexec/bootpd\n"
+        )
+        paths = {20: "/usr/libexec/InternetSharing", 21: "/usr/libexec/bootpd"}
+        with (
+            mock.patch.object(module, "NAT_PLIST", Path("/nonexistent/nat.plist")),
+            mock.patch.object(module, "_proc_pid_path", side_effect=lambda pid: paths[pid]),
+        ):
             self.assertFalse(
                 module._internet_sharing_disabled(
-                    processes, allow_host_only_bootpd=False
-                )
+                    processes, allow_host_only_helpers=False
+                )[0]
             )
             self.assertTrue(
                 module._internet_sharing_disabled(
-                    processes, allow_host_only_bootpd=True
-                )
+                    processes, allow_host_only_helpers=True
+                )[0]
             )
+            for wrong in (
+                processes.replace("20 0", "20 501", 1),
+                processes.replace("/usr/libexec/InternetSharing", "/tmp/InternetSharing"),
+                processes + "22 0 /usr/libexec/bootpd\n",
+            ):
+                self.assertFalse(
+                    module._internet_sharing_disabled(
+                        wrong, allow_host_only_helpers=True
+                    )[0]
+                )
+            with self.assertRaisesRegex(module.WatchdogError, "inventory_shape"):
+                module._internet_sharing_disabled(
+                    processes.replace(
+                        "21 0 /usr/libexec/bootpd",
+                        "20 0 /usr/libexec/bootpd",
+                    ),
+                    allow_host_only_helpers=True,
+                )
+
+        lock, outputs = _fixtures(module)
+        outputs["processes"] = "1 0 /sbin/launchd\n20 0 /usr/libexec/InternetSharing\n"
+        lock["host_only"] = {
+            "interface": "bridge100",
+            "ipv4_addresses": ["192.168.106.1"],
+            "ipv6_link_local_addresses": [],
+            "nwi_sha256": "f" * 64,
+            "route_topology_sha256": {"ipv4": "f" * 64, "ipv6": "f" * 64},
+        }
+        with (
+            mock.patch.object(module, "_run_snapshot_commands", return_value=outputs),
+            mock.patch.object(module, "NAT_PLIST", Path("/nonexistent/nat.plist")),
+            mock.patch.object(
+                module,
+                "_proc_pid_path",
+                return_value="/usr/libexec/InternetSharing",
+            ),
+        ):
+            sample = module._sample(lock, allow_host_only=True)
+        self.assertFalse(sample["host_only_observed"])
+        self.assertTrue(sample["host_network_helpers_present"])
 
     def test_failed_capture_does_not_consume_watch_result_path(self) -> None:
         module = _load()
@@ -788,6 +844,7 @@ Network interfaces: bridge100
                 os.write(write_fd, b"COMPLETE\n")
             return {
                 "duration_ns": 1,
+                "host_network_helpers_present": False,
                 "host_only_observed": sample_number == 1,
             }
 
@@ -842,7 +899,11 @@ Network interfaces: bridge100
             self.assertTrue(allow_host_only)
             readable, _, _ = module.select.select([ready_read], [], [], 0)
             self.assertEqual([], readable)
-            return {"duration_ns": 1, "host_only_observed": True}
+            return {
+                "duration_ns": 1,
+                "host_network_helpers_present": False,
+                "host_only_observed": True,
+            }
 
         try:
             os.write(control_write, b"COMPLETE\n")
@@ -886,6 +947,7 @@ Network interfaces: bridge100
                     "_sample",
                     return_value={
                         "duration_ns": 1,
+                        "host_network_helpers_present": False,
                         "host_only_observed": True,
                     },
                 ),
@@ -934,6 +996,7 @@ Network interfaces: bridge100
                     "_sample",
                     return_value={
                         "duration_ns": 1,
+                        "host_network_helpers_present": False,
                         "host_only_observed": True,
                     },
                 ),
@@ -974,7 +1037,9 @@ Network interfaces: bridge100
         lock["host_only"] = {"interface": "bridge100"}
         alive = {"identity_sha256": "c" * 64}
 
-        def run_case(*, lingering_host_only: bool, final_identity):
+        def run_case(
+            *, lingering_host_only: bool, lingering_helpers: bool = False, final_identity
+        ):
             control_read, control_write = os.pipe()
             ready_read, ready_write = os.pipe()
             count = 0
@@ -986,6 +1051,7 @@ Network interfaces: bridge100
                     os.write(control_write, b"COMPLETE\n")
                 return {
                     "duration_ns": 1,
+                    "host_network_helpers_present": count == 2 and lingering_helpers,
                     "host_only_observed": count == 1 or lingering_host_only,
                 }
 
@@ -1030,6 +1096,16 @@ Network interfaces: bridge100
         ):
             run_case(
                 lingering_host_only=True,
+                final_identity=module.WatchdogError(
+                    "socket_vmnet_process_absent"
+                ),
+            )
+        with self.assertRaisesRegex(
+            module.WatchdogError, "complete_before_host_helper_teardown"
+        ):
+            run_case(
+                lingering_host_only=False,
+                lingering_helpers=True,
                 final_identity=module.WatchdogError(
                     "socket_vmnet_process_absent"
                 ),
@@ -1090,6 +1166,7 @@ Network interfaces: bridge100
                             "_sample",
                             return_value={
                                 "duration_ns": 1,
+                                "host_network_helpers_present": False,
                                 "host_only_observed": True,
                             },
                         ),
@@ -1167,6 +1244,7 @@ Network interfaces: bridge100
                             "_sample",
                             return_value={
                                 "duration_ns": 1,
+                                "host_network_helpers_present": False,
                                 "host_only_observed": True,
                             },
                         ),
@@ -1284,7 +1362,11 @@ Network interfaces: bridge100
             mock.patch.object(
                 module,
                 "_sample",
-                return_value={"duration_ns": 1, "host_only_observed": False},
+                return_value={
+                    "duration_ns": 1,
+                    "host_network_helpers_present": False,
+                    "host_only_observed": False,
+                },
             ),
             mock.patch.object(
                 module,

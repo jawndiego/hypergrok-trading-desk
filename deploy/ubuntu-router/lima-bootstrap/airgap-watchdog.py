@@ -1253,7 +1253,7 @@ def _command_map(lock: dict[str, Any]) -> dict[str, list[str]]:
             "-inet6",
             "2606:4700:4700::1111",
         ],
-        "processes": ["/bin/ps", "-axo", "uid=,comm="],
+        "processes": ["/bin/ps", "-axo", "pid=,uid=,comm="],
     }
     for interface in lock["wifi_interfaces"]:
         commands[f"wifi:{interface}"] = [
@@ -1538,7 +1538,7 @@ def _run_core_snapshot_commands(
             "-inet6",
             "2606:4700:4700::1111",
         ],
-        "processes": ["/bin/ps", "-axo", "uid=,comm="],
+        "processes": ["/bin/ps", "-axo", "pid=,uid=,comm="],
     }
     if capture_deadline is not None:
         return _run_capture_commands(
@@ -1568,36 +1568,91 @@ def _run_core_snapshot_commands(
     return outputs
 
 
-def _internet_sharing_disabled(processes: str, *, allow_host_only_bootpd: bool) -> bool:
-    commands: list[str] = []
+def _internet_sharing_disabled(
+    processes: str, *, allow_host_only_helpers: bool
+) -> tuple[bool, str, bool]:
+    helpers = {
+        "InternetSharing": "/usr/libexec/InternetSharing",
+        "bootpd": "/usr/libexec/bootpd",
+    }
+    inventory: list[tuple[int, int, str]] = []
+    helper_pids: dict[str, int] = {}
     for line in processes.splitlines():
-        fields = line.split(None, 1)
+        fields = line.split(None, 2)
         if (
-            len(fields) != 2
-            or not _valid_ps_uid(fields[0])
-            or not fields[1]
-            or any(ord(character) < 32 or ord(character) == 127 for character in fields[1])
+            len(fields) != 3
+            or not fields[0].isdigit()
+            or not _valid_ps_uid(fields[1])
+            or not fields[2]
+            or any(ord(character) < 32 or ord(character) == 127 for character in fields[2])
         ):
             raise WatchdogError("process_inventory_shape")
-        commands.append(fields[1])
-    basenames = {Path(command).name for command in commands}
-    if "InternetSharing" in basenames:
-        return False
-    if not allow_host_only_bootpd and "bootpd" in basenames:
-        return False
+        pid, uid = int(fields[0]), int(fields[1])
+        command = fields[2]
+        if pid <= 0 or any(item[0] == pid for item in inventory):
+            raise WatchdogError("process_inventory_shape")
+        inventory.append((pid, uid, command))
+        basename = Path(command).name
+        if basename not in helpers:
+            continue
+        if (
+            not allow_host_only_helpers
+            or uid != 0
+            or command != helpers[basename]
+            or basename in helper_pids
+        ):
+            return False, "", True
+        try:
+            before = _proc_pid_path(pid)
+        except WatchdogError:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except OSError as error:
+                raise WatchdogError("host_helper_process_probe") from error
+            raise WatchdogError("host_helper_process_probe")
+        if before != command:
+            return False, "", True
+        helper_pids[basename] = pid
+        try:
+            after = _proc_pid_path(pid)
+        except WatchdogError:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                helper_pids.pop(basename, None)
+                continue
+            except OSError as error:
+                raise WatchdogError("host_helper_process_probe") from error
+            raise WatchdogError("host_helper_process_probe")
+        if after != command:
+            return False, "", True
+    inventory_hash = _sha256_bytes(
+        _canonical_json(
+            [
+                {"command": command, "pid": pid, "uid": uid}
+                for pid, uid, command in sorted(inventory)
+            ]
+        )
+    )
     if not NAT_PLIST.exists() and not NAT_PLIST.is_symlink():
-        return True
+        return True, inventory_hash, bool(helper_pids)
     if NAT_PLIST.is_symlink() or not NAT_PLIST.is_file():
-        return False
+        return False, inventory_hash, bool(helper_pids)
     metadata = NAT_PLIST.stat()
     if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022:
-        return False
+        return False, inventory_hash, bool(helper_pids)
     try:
         value = plistlib.loads(NAT_PLIST.read_bytes())
     except (plistlib.InvalidFileException, ValueError):
-        return False
+        return False, inventory_hash, bool(helper_pids)
     nat = value.get("NAT", {}) if isinstance(value, dict) else {}
-    return not bool(nat.get("Enabled", False)) if isinstance(nat, dict) else False
+    return (
+        not bool(nat.get("Enabled", False)) if isinstance(nat, dict) else False,
+        inventory_hash,
+        bool(helper_pids),
+    )
 
 
 def _validate_addresses(
@@ -1775,9 +1830,10 @@ def _sample(
         raise WatchdogError("vpn_connected")
     if outputs["forward4"].strip() != "0" or outputs["forward6"].strip() != "0":
         raise WatchdogError("ip_forwarding_enabled")
-    if not _internet_sharing_disabled(
-        outputs["processes"], allow_host_only_bootpd=host_match
-    ):
+    sharing_disabled, processes_sha256, helpers_present = _internet_sharing_disabled(
+        outputs["processes"], allow_host_only_helpers=allow_host_only
+    )
+    if not sharing_disabled:
         raise WatchdogError("internet_sharing_enabled")
     interfaces = _parse_ifconfig(outputs["ifconfig"])
     if not allow_host_only:
@@ -1805,11 +1861,13 @@ def _sample(
         ),
         "hardware_interfaces_inactive": True,
         "host_only_observed": host_only_observed,
+        "host_network_helpers_present": helpers_present,
         "interfaces_sha256": _sha256_bytes(_canonical_json(interfaces)),
         "internet_sharing_disabled": True,
         "ip_forwarding_disabled": True,
         "network_services_sha256": _sha256_bytes(_canonical_json(services)),
         "nwi_sha256": nwi_sha256,
+        "process_inventory_sha256": processes_sha256,
         "route_ipv4_sha256": route4,
         "route_ipv6_sha256": route6,
         "vpn_disconnected": True,
@@ -2808,6 +2866,8 @@ def _watch(
                     raise WatchdogError("complete_before_socket_stop")
                 if sample["host_only_observed"]:
                     raise WatchdogError("complete_before_host_only_teardown")
+                if sample["host_network_helpers_present"]:
+                    raise WatchdogError("complete_before_host_helper_teardown")
                 evidence_out["socket_vmnet_alive_last"] = False
                 evidence_out["completion_socket_vmnet_absent"] = True
                 return "PASS", dict(evidence_out)
