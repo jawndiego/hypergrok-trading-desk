@@ -290,7 +290,7 @@ class PrestartRecoveryProfileTests(unittest.TestCase):
         self.assertNotIn("expected_prestart_recovery_receipt_sha256", source)
         self.assertIn("_validate_interrupted_first_boot_successor", source)
 
-    def test_apply_failure_reason_is_allowlisted_or_redacted(self) -> None:
+    def test_airgap_apply_is_absent_from_migration_only_dispatch(self) -> None:
         controller = load(
             BOOTSTRAP / "bootstrap-apply.py", "apply_failure_redaction_test"
         )
@@ -299,26 +299,8 @@ class PrestartRecoveryProfileTests(unittest.TestCase):
             "--expected-controller-manifest-sha256",
             "a" * 64,
         ]
-        for reason, expected in (
-            (
-                "capture_core_nwi_command_timeout",
-                "host_only_capture_reason=capture_core_nwi_command_timeout",
-            ),
-            ("path=/private/secret", "host_only_capture_reason=redacted"),
-        ):
-            with (
-                mock.patch.object(
-                    controller,
-                    "_apply_airgapped_first_boot",
-                    side_effect=controller.BootstrapError(
-                        f"host_only_capture_reason={reason}"
-                    ),
-                ),
-                redirect_stderr(io.StringIO()) as stderr,
-            ):
-                self.assertEqual(2, controller.main(argv))
-            self.assertIn(expected, stderr.getvalue())
-            self.assertNotIn("/private/secret", stderr.getvalue())
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            controller.main(argv)
 
 
 if __name__ == "__main__":

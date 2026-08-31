@@ -324,6 +324,8 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
                 manifest, renderer.verify(output, digest, os.getuid(), profile)
             )
             self.assertFalse(manifest["apply_enabled"])
+            self.assertFalse(manifest["attended_airgapped_start_apply_enabled"])
+            self.assertTrue(manifest["router_operator_home_migration_apply_enabled"])
             self.assertFalse(manifest["vm_started"])
             self.assertFalse(manifest["network_changes_performed"])
             self.assertFalse(manifest["hardened_recreate_apply_enabled"])
@@ -364,13 +366,15 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         self.assertIn("failed reason={match.group(1)}", source)
         self.assertIn("watchdog timed out", source)
         launcher = (BOOTSTRAP / "bootstrap-apply-launcher.sh").read_text()
-        self.assertIn("apply-airgapped-first-boot", launcher)
-        self.assertIn("verify-stopped-after-airgap", launcher)
+        self.assertIn("migrate-router-operator-home", launcher)
         for forbidden in (
             "apply-hardened-vm",
             "recover-failed-prestart",
             "recover-proven-preboot",
             "recover-interrupted-first-boot",
+            "check-airgap",
+            "apply-airgapped-first-boot",
+            "verify-stopped-after-airgap",
             "apply-guest-package",
             "apply-router",
         ):
@@ -382,14 +386,7 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             for action in controller._parser()._actions
             if isinstance(action, controller.argparse._SubParsersAction)
         )
-        self.assertEqual(
-            {
-                "check-airgap",
-                "apply-airgapped-first-boot",
-                "verify-stopped-after-airgap",
-            },
-            set(action.choices),
-        )
+        self.assertEqual({"migrate-router-operator-home"}, set(action.choices))
 
     def test_every_uid454_preexec_has_verified_process_home_cwd(self) -> None:
         tree = ast.parse(HOST_APPLY.read_text(encoding="utf-8"))
@@ -618,7 +615,11 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             "24752389e1d97c9555dd153b644902fadd460dfbe1a166251876c67bbacb0810",
             lock["system_tools"]["/bin/ls"]["sha256"],
         )
-        self.assertEqual(15, len(lock["system_tools"]))
+        self.assertEqual(19, len(lock["system_tools"]))
+        self.assertEqual(
+            "b4dbf509754d8e1117f7851baa93ede75bc75218c48d6ddf19fbb1505d261be7",
+            lock["system_tools"]["/bin/launchctl"]["sha256"],
+        )
         self.assertEqual(
             "78d771eb51bc8a6ec934876fe19bc8ed887fce44cdfb0c45e6a6cbdac74fb2b5",
             lock["system_tools"]["/usr/libexec/InternetSharing"]["sha256"],

@@ -15,6 +15,9 @@ SOURCE_SAMPLE=/opt/trading-desk/current/executor/.venv/bin/trading-desk-testnet-
 SOURCE_PROBE=/opt/trading-desk/current/executor/.venv/bin/trading-desk-testnet-remote-vpn-probe
 RUNTIME_PYTHON=/opt/trading-desk/runtime/python-3.11.16/bin/python3.11
 ROUTER_IDENTITY_RECEIPT=/etc/trading-desk/testnet-foreground-router-identity.receipt
+ROUTER_HOME_MIGRATION_RECEIPT=/private/var/db/trading-desk-router-bootstrap-v1/receipts/13-router-operator-home-migration.json
+ROUTER_HOME_MIGRATION_RECEIPT_SHA256=PIN_AFTER_ATTENDED_MIGRATION
+ROUTER_PROCESS_HOME=/private/var/db/trading-desk-router-process-home
 BASELINE_SUPPLEMENTARY_GROUPS=
 REVIEWED_DARWIN_SUPPLEMENTARY_GROUPS=12,61,100,701
 REVIEWED_DARWIN_GROUP_PRINCIPALS='12:everyone:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C:none,61:localaccounts:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D:none,100:_lpoperator:ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000064:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000003D+ABCDEFAB-CDEF-ABCD-EFAB-CDEF00000062,701:com.apple.sharepoint.group.1:EE977B55-20FF-44D2-81CD-3A51B6BBC5DC:ABCDEFAB-CDEF-ABCD-EFAB-CDEF0000000C'
@@ -345,6 +348,66 @@ assert_router_home_exact() {
     [ "$(/usr/bin/stat -f '%u:%g:%Lp' /private/var/db/trading-desk-lima)" = 454:454:700 ] || \
     die 'router operator Lima home metadata differs'
   no_acl /private/var/db/trading-desk-lima
+  [ -d "$ROUTER_PROCESS_HOME" ] && [ ! -L "$ROUTER_PROCESS_HOME" ] && \
+    [ "$(/bin/realpath "$ROUTER_PROCESS_HOME")" = "$ROUTER_PROCESS_HOME" ] && \
+    [ "$(/usr/bin/stat -f '%u:%g:%Lp' "$ROUTER_PROCESS_HOME")" = 454:454:700 ] || \
+    die 'router operator process home metadata differs'
+  no_acl "$ROUTER_PROCESS_HOME"
+}
+
+assert_router_home_migration_overlay() {
+  [ "$ROUTER_HOME_MIGRATION_RECEIPT_SHA256" != PIN_AFTER_ATTENDED_MIGRATION ] || \
+    die 'router home migration receipt hash is not pinned'
+  [ -f "$ROUTER_HOME_MIGRATION_RECEIPT" ] && [ ! -L "$ROUTER_HOME_MIGRATION_RECEIPT" ] || \
+    die 'router home migration receipt is unavailable'
+  [ "$(/usr/bin/stat -f '%u:%g:%Lp:%l' "$ROUTER_HOME_MIGRATION_RECEIPT")" = 0:0:400:1 ] || \
+    die 'router home migration receipt metadata differs'
+  no_acl "$ROUTER_HOME_MIGRATION_RECEIPT"
+  [ "$(digest "$ROUTER_HOME_MIGRATION_RECEIPT")" = "$ROUTER_HOME_MIGRATION_RECEIPT_SHA256" ] || \
+    die 'router home migration receipt digest differs'
+  /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
+    "$RUNTIME_PYTHON" -I -B -c '
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_bytes())
+required = {
+    "kind": "trading-desk.router-bootstrap.router-operator-home-migration",
+    "schema_version": 1,
+    "source_home": "/private/var/db/trading-desk-lima",
+    "target_home": "/private/var/db/trading-desk-router-process-home",
+    "prior_identity_receipt_sha256": "3fa28e27769770f925615862783edf65f2b748ef8444ed8c83787c21d35b0de6",
+    "prior_birth_marker_sha256": "46b42f2b276acf5b15559cb02ce4fa5aef537493acda1f53254674e7560aa231",
+    "hardened_vm_receipt_sha256": "e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c",
+    "interrupted_quarantine_receipt_sha256": "2ae8f48d9363ebbc9605f604c4b6bbcd7ac54161b77a819731a0abe27525dbf5",
+    "raw_uid454_processes_absent": True,
+    "network_changes_performed": False,
+    "venue_writes_authorized": False,
+    "mainnet_authorized": False,
+    "vm_started": False,
+    "vm_status": "Stopped",
+}
+if any(value.get(key) != expected for key, expected in required.items()):
+    raise SystemExit("router home migration receipt contract differs")
+identity = value.get("target_process_home_identity")
+if (
+    not isinstance(identity, dict)
+    or set(identity) != {"device", "gid", "inode", "mode", "path", "uid"}
+    or identity.get("path") != required["target_home"]
+    or identity.get("uid") != 454
+    or identity.get("gid") != 454
+    or identity.get("mode") != 0o700
+    or not isinstance(identity.get("device"), int)
+    or not isinstance(identity.get("inode"), int)
+):
+    raise SystemExit("router home migration process-home identity differs")
+snapshot = value.get("network_snapshot_sha256")
+if not isinstance(snapshot, str) or len(snapshot) != 64 or any(c not in "0123456789abcdef" for c in snapshot):
+    raise SystemExit("router home migration network snapshot differs")
+for key in ("pre_change_bootout", "post_change_bootout", "post_status_bootout"):
+    bootout = value.get(key)
+    if not isinstance(bootout, dict) or bootout.get("raw_uid454_processes_absent") is not True:
+        raise SystemExit("router home migration bootout evidence differs")
+' "$ROUTER_HOME_MIGRATION_RECEIPT" || die 'router home migration receipt contract differs'
 }
 
 assert_router_identity_receipt() {
@@ -397,7 +460,7 @@ assert_router_identity_exact() {
   [ "$(/usr/bin/id -g trading-router-operator)" = 454 ] || die 'trading-router-operator GID drift'
   assert_router_group_baseline
   [ "$(dscl_value /Users/trading-router-operator UserShell)" = /usr/bin/false ] || die 'trading-router-operator login shell is not disabled'
-  [ "$(dscl_value /Users/trading-router-operator NFSHomeDirectory)" = /private/var/db/trading-desk-lima ] || die 'trading-router-operator home drift'
+  [ "$(dscl_value /Users/trading-router-operator NFSHomeDirectory)" = "$ROUTER_PROCESS_HOME" ] || die 'trading-router-operator home drift'
   [ "$(dscl_value /Users/trading-router-operator IsHidden)" = 1 ] || die 'trading-router-operator is not hidden'
   [ "$(dscl_value /Groups/trading-router-operator PrimaryGroupID)" = 454 ] || die 'trading-router-operator group ID drift'
   assert_disabled_password_account trading-router-operator
@@ -406,6 +469,7 @@ assert_router_identity_exact() {
   assert_primary_group_has_no_members trading-router-operator
   assert_router_identity_receipt
   assert_router_home_exact
+  assert_router_home_migration_overlay
 }
 
 assert_root_sealed_directory_chain() {

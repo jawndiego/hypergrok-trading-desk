@@ -48,15 +48,19 @@ APPLE_PROVENANCE_NAME = "com.apple.provenance"
 APPLE_PROVENANCE_VALUE = bytes.fromhex("010200f2ac997ac0532d6f")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SYSTEM_TOOL_CONTRACT_SHA256 = (
-    "f4e3704a32328b3b7a35d7398e268375e95860bd69c87d5828797f213361ef5b"
+    "639ddd7e14aa2a8ab8d267d4a6c8737744ca1e96f2e256cc5e6537ae21581e8f"
 )
 SYSTEM_TOOL_PATHS = frozenset(
     {
+        "/bin/launchctl",
         "/bin/ls",
         "/bin/ps",
         "/sbin/ifconfig",
         "/sbin/route",
         "/usr/bin/caffeinate",
+        "/usr/bin/codesign",
+        "/usr/bin/dscacheutil",
+        "/usr/bin/dscl",
         "/usr/bin/pkill",
         "/usr/bin/ssh",
         "/usr/bin/sudo",
@@ -168,7 +172,44 @@ AIRGAP_START_ARGUMENTS = (
     "--timeout=600s",
     "trading-desk-router",
 )
-FINAL_AIRGAP_REVIEW_STATUS = "attended_airgap_final_one_boot_enabled"
+FINAL_AIRGAP_REVIEW_STATUS = (
+    "attended_router_home_migration_only"
+)
+ROUTER_HOME_MIGRATION = {
+    "birth_bug_quarantine_path": "/private/etc/trading-desk/.testnet-foreground-router-birth-v2.uid0-bug-79cf0db",
+    "birth_bug_quarantine_sha256": "dfa88545449855079cb4254709e8af42f95bec5a141a5df1122b79dbe66a9e41",
+    "birth_marker_path": "/private/etc/trading-desk/.testnet-foreground-router-birth-v2",
+    "group_generated_uid": "A9233544-15CC-4EE7-931B-357FF4F8CF98",
+    "migration_receipt_path": "/private/var/db/trading-desk-router-bootstrap-v1/receipts/13-router-operator-home-migration.json",
+    "migration_transaction_path": "/private/var/db/trading-desk-router-bootstrap-v1/quarantine/router-operator-home-migration-transaction.json",
+    "per_user_agent_tools": {
+        "/System/Library/Frameworks/NetFS.framework/Versions/A/XPCServices/PlugInLibraryService.xpc/Contents/MacOS/PlugInLibraryService": {"links": 1, "mode": "00755", "sha256": "7ec0d3e46377a840c2dcd18e44821621a3abf814e94f7d406e1233c83b78a1d7", "size": 302288},
+        "/usr/libexec/containermanagerd": {"links": 1, "mode": "00755", "sha256": "15600d88b5a1e03a532b8f554a88367cc20f3ec7d0ef9eaf9ae7cc57fe97652e", "size": 103312},
+        "/usr/libexec/lsd": {"links": 1, "mode": "00755", "sha256": "0a29d597019c5f3368063f9401e4ecdac60012d44e00bbc17d0ce0cca7c6262a", "size": 105600},
+        "/usr/libexec/secd": {"links": 1, "mode": "00755", "sha256": "5b60ac88c3b1ad47efc37606dbd0cf4b46a3040c4d701edc7cc8708820a7fd75", "size": 8922448},
+        "/usr/libexec/trustd": {"links": 1, "mode": "00755", "sha256": "9bfa3e7afa0567b0298954fb7d1fa295fec00f340d13b230166e18e2c0f41f05", "size": 1532912},
+        "/usr/sbin/cfprefsd": {"links": 1, "mode": "00755", "sha256": "68e67395c84c33cd9e7087ab20286917029a07eec0189b2ff6c6e79c284672f1", "size": 135728},
+        "/usr/sbin/distnoted": {"links": 1, "mode": "00755", "sha256": "1fcd1f4a6cbf830b92aef1866a250a0887a4b9706233868bc9e3a1c770f6abc1", "size": 291072},
+    },
+    "prior_birth_marker_sha256": "46b42f2b276acf5b15559cb02ce4fa5aef537493acda1f53254674e7560aa231",
+    "prior_identity_receipt_sha256": "3fa28e27769770f925615862783edf65f2b748ef8444ed8c83787c21d35b0de6",
+    "prior_library_retained_path": "/private/var/db/trading-desk-router-bootstrap-v1/quarantine/router-operator-pre-home-migration-Library",
+    "source_controller_manifest_sha256": "7e4a16f2622abc4a259c7c0eb117f9ea7d4de1b4cb121297c4fef9af952f3845",
+    "source_home": "/private/var/db/trading-desk-lima",
+    "target_home": "/private/var/db/trading-desk-router-process-home",
+    "user_generated_uid": "5C0E40AA-2FEF-4CAF-AD53-D2A17B7E4C01",
+}
+ROUTER_PER_USER_AGENT_COMMANDS = frozenset(
+    {
+        "/usr/libexec/lsd",
+        "/usr/sbin/cfprefsd agent",
+        "/usr/libexec/trustd --agent",
+        "/usr/sbin/distnoted agent",
+        "/usr/libexec/secd",
+        "/System/Library/Frameworks/NetFS.framework/Versions/A/XPCServices/PlugInLibraryService.xpc/Contents/MacOS/PlugInLibraryService",
+        "/usr/libexec/containermanagerd --runmode=agent --user-container-mode=current --bundle-container-mode=proxy --system-container-mode=none",
+    }
+)
 INTERRUPTED_FIRST_BOOT_RECOVERY = {
     "completing_recovery_controller_manifest_sha256": "a1c5f9b303eec36ff4ba4e607d762bb44dc794c56a3d3ffb0093b2911d17a7fd",
     "failed_controller_manifest_sha256": "b8e7fd49e23fa4b988834764f97ffbb1c1e179c26f491b2f098ba04e887d0f4d",
@@ -961,10 +1002,11 @@ def _load_lock() -> dict[str, Any]:
         }
         or lock.get("phases")
         != {
-            "airgapped_start_apply_enabled": True,
+            "airgapped_start_apply_enabled": False,
             "guest_package_apply_enabled": False,
             "hardened_recreate_apply_enabled": False,
             "interrupted_first_boot_recovery_enabled": False,
+            "router_operator_home_migration_enabled": True,
             "proven_preboot_recovery_enabled": False,
             "router_activation_apply_enabled": False,
         }
@@ -985,6 +1027,8 @@ def _load_lock() -> dict[str, Any]:
         }
     ):
         raise BootstrapError("bootstrap lock boundary differs")
+    if lock.get("router_operator_home_migration") != ROUTER_HOME_MIGRATION:
+        raise BootstrapError("router operator home migration lock differs")
     interrupted = lock.get("interrupted_first_boot_recovery")
     if (
         interrupted != INTERRUPTED_FIRST_BOOT_RECOVERY
@@ -1055,6 +1099,7 @@ def _verify_bundle(expected_manifest_sha256: str) -> dict[str, Any]:
             "mainnet_authorized",
             "network_changes_performed",
             "predecessor_vm_receipt_sha256",
+            "router_operator_home_migration_apply_enabled",
             "schema_version",
             "venue_writes_authorized",
             "vm_started",
@@ -1063,9 +1108,10 @@ def _verify_bundle(expected_manifest_sha256: str) -> dict[str, Any]:
         or manifest.get("bundle_kind")
         != "trading-desk.ubuntu-router-airgap-bootstrap"
         or manifest.get("apply_enabled") is not False
-        or manifest.get("attended_airgapped_start_apply_enabled") is not True
+        or manifest.get("attended_airgapped_start_apply_enabled") is not False
         or manifest.get("hardened_recreate_apply_enabled") is not False
         or manifest.get("interrupted_first_boot_recovery_enabled") is not False
+        or manifest.get("router_operator_home_migration_apply_enabled") is not True
         or manifest.get("airgap_session_id")
         != INTERRUPTED_FIRST_BOOT_RECOVERY["fresh_session_id"]
         or manifest.get("hardened_vm_receipt_sha256")
@@ -1343,9 +1389,83 @@ def _authentication_authority_state(returncode: int, stdout: str, stderr: str) -
     return "invalid"
 
 
-def _assert_host_identity(lock: dict[str, Any]) -> None:
+def _identity_receipt_content(lock: dict[str, Any], home: str) -> bytes:
+    migration = lock["router_operator_home_migration"]
     host = lock["host"]
+    values = (
+        ("schema_version", "3"),
+        ("role", "router"),
+        ("account", host["router_operator_account"]),
+        ("uid", str(host["router_operator_uid"])),
+        ("gid", str(host["router_operator_gid"])),
+        ("user_generated_uid", migration["user_generated_uid"]),
+        ("group_generated_uid", migration["group_generated_uid"]),
+        ("home", home),
+        ("shell", "/usr/bin/false"),
+        ("authentication", "password-star-and-false-shell"),
+        ("authentication_authority", "absent"),
+        ("hidden", "1"),
+        (
+            "supplementary_groups",
+            ",".join(
+                str(value)
+                for value in host["router_operator_supplementary_groups"]
+            ),
+        ),
+        (
+            "supplementary_group_model",
+            "matches-existing-trading-role-baseline",
+        ),
+        (
+            "supplementary_group_principals",
+            host["router_operator_group_principals"],
+        ),
+        ("primary_group_members", "none"),
+        ("primary_group_nested_groups", "none"),
+        ("credential_loaded", "false"),
+        ("network_changed", "false"),
+        ("service_started", "false"),
+        ("venue_write_attempted", "false"),
+        ("mainnet_authorized", "false"),
+    )
+    return "".join(f"{key}={value}\n" for key, value in values).encode("utf-8")
+
+
+def _birth_marker_content(home: str) -> bytes:
+    return (
+        "schema_version=2\n"
+        "kind=identity-birth-marker\n"
+        "role=router\n"
+        "account=trading-router-operator\n"
+        "uid=454\n"
+        "gid=454\n"
+        f"home={home}\n"
+        "shell=/usr/bin/false\n"
+        "password_marker=*\n"
+        "publish_numeric_uid_last=true\n"
+        "credential_loaded=false\n"
+        "network_changed=false\n"
+        "service_started=false\n"
+        "venue_write_attempted=false\n"
+    ).encode("utf-8")
+
+
+def _assert_host_identity(
+    lock: dict[str, Any],
+    *,
+    legacy_home: bool = False,
+    allow_cached_source_home: bool = False,
+) -> dict[str, Any]:
+    host = lock["host"]
+    migration = lock["router_operator_home_migration"]
     account = host["router_operator_account"]
+    expected_home = (
+        migration["source_home"] if legacy_home else migration["target_home"]
+    )
+    expected_receipt_sha256 = migration["prior_identity_receipt_sha256"]
+    allowed_cached_homes = {expected_home}
+    if allow_cached_source_home and not legacy_home:
+        allowed_cached_homes.add(migration["source_home"])
     try:
         user = pwd.getpwnam(account)
         group = grp.getgrnam(account)
@@ -1355,7 +1475,7 @@ def _assert_host_identity(lock: dict[str, Any]) -> None:
     if (
         user.pw_uid != host["router_operator_uid"]
         or user.pw_gid != host["router_operator_gid"]
-        or user.pw_dir != lock["paths"]["lima_home"]
+        or user.pw_dir not in allowed_cached_homes
         or user.pw_shell != "/usr/bin/false"
         or group.gr_gid != host["router_operator_gid"]
         or supplementary != host["router_operator_supplementary_groups"]
@@ -1394,6 +1514,13 @@ def _assert_host_identity(lock: dict[str, Any]) -> None:
     receipt_content = _read_bound(
         receipt_path, uid=0, gid=0, mode=0o400, maximum=64 * 1024
     )
+    _no_named_acl(receipt_path)
+    if (
+        receipt_content
+        != _identity_receipt_content(lock, migration["source_home"])
+        or _sha256_bytes(receipt_content) != expected_receipt_sha256
+    ):
+        raise BootstrapError("router identity receipt bytes differ")
     try:
         lines = receipt_content.decode("utf-8").splitlines()
     except UnicodeDecodeError as error:
@@ -1412,7 +1539,7 @@ def _assert_host_identity(lock: dict[str, Any]) -> None:
         "account": account,
         "uid": str(user.pw_uid),
         "gid": str(user.pw_gid),
-        "home": user.pw_dir,
+        "home": migration["source_home"],
         "shell": "/usr/bin/false",
         "authentication": "password-star-and-false-shell",
         "hidden": "1",
@@ -1443,6 +1570,8 @@ def _assert_host_identity(lock: dict[str, Any]) -> None:
         or _dscl_value(f"/Users/{account}", "GeneratedUID") != user_uuid
         or _dscl_value(f"/Groups/{account}", "GeneratedUID") != group_uuid
         or _dscl_value(f"/Users/{account}", "Password") != "*"
+        or _dscl_value(f"/Users/{account}", "NFSHomeDirectory")
+        != expected_home
         or _dscl_hidden(f"/Users/{account}") != "1"
     ):
         raise BootstrapError("router identity UUID/security binding differs")
@@ -1476,6 +1605,13 @@ def _assert_host_identity(lock: dict[str, Any]) -> None:
         or expected_authority not in {"absent", "disabled-user"}
     ):
         raise BootstrapError("router identity authentication authority differs")
+    return {
+        "group_generated_uid": group_uuid,
+        "home": expected_home,
+        "receipt_path": str(receipt_path),
+        "receipt_sha256": _sha256_bytes(receipt_content),
+        "user_generated_uid": user_uuid,
+    }
 
 
 def _drop_preexec(uid: int, gid: int):
@@ -1496,6 +1632,19 @@ def _process_home(lock: dict[str, Any]) -> Path:
         raise BootstrapError("Lima process HOME path differs")
     _assert_real(process_home, kind="directory", uid=454, gid=454, mode=0o700)
     return process_home
+
+
+def _process_home_identity(lock: dict[str, Any]) -> dict[str, Any]:
+    path = _process_home(lock)
+    metadata = path.stat()
+    return {
+        "device": metadata.st_dev,
+        "gid": metadata.st_gid,
+        "inode": metadata.st_ino,
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "path": str(path),
+        "uid": metadata.st_uid,
+    }
 
 
 def _environment(lock: dict[str, Any]) -> dict[str, str]:
@@ -1634,7 +1783,11 @@ def _free_bytes(path: Path) -> int:
 
 
 def _status(
-    lock: dict[str, Any], limactl: Path, *, expected_status: str = "Stopped"
+    lock: dict[str, Any],
+    limactl: Path,
+    *,
+    expected_status: str = "Stopped",
+    quiesce_after: bool = True,
 ) -> dict[str, Any]:
     if expected_status not in {"Stopped", "Running"}:
         raise BootstrapError("unexpected Lima status expectation")
@@ -1651,7 +1804,10 @@ def _status(
         timeout=30,
         check=False,
     )
-    return _parse_status_result(lock, result, expected_status=expected_status)
+    value = _parse_status_result(lock, result, expected_status=expected_status)
+    if expected_status == "Stopped" and quiesce_after:
+        _quiesce_router_user_domain(lock)
+    return value
 
 
 def _parse_status_result(
@@ -1814,6 +1970,8 @@ def _validate_interrupted_first_boot_successor(
     lock: dict[str, Any],
     state: dict[str, Path],
     hardened_receipt: dict[str, Any],
+    *,
+    allow_current_library: bool = False,
 ) -> dict[str, Any]:
     contract = lock["interrupted_first_boot_recovery"]
     source = contract["source_session_id"]
@@ -2104,7 +2262,6 @@ def _validate_interrupted_first_boot_successor(
         if (current.st_dev, current.st_ino) == (retained.st_dev, retained.st_ino):
             raise BootstrapError("interrupted source and destination alias")
     old_source_absent = [
-        live["library"],
         live["runtime"],
         live["sudoers"],
         live["base"],
@@ -2114,6 +2271,8 @@ def _validate_interrupted_first_boot_successor(
         live["preparing"],
         live["starting"],
     ]
+    if not allow_current_library:
+        old_source_absent.append(live["library"])
     if any(path.exists() or path.is_symlink() for path in old_source_absent):
         raise BootstrapError("interrupted source evidence reappeared")
 
@@ -2290,6 +2449,473 @@ def _validate_interrupted_first_boot_successor(
     )
     if any(path.exists() or path.is_symlink() for path in unused):
         raise BootstrapError("final air-gap session is not unused")
+    return receipt
+
+
+def _router_home_migration_paths(
+    lock: dict[str, Any],
+) -> dict[str, Path]:
+    migration = lock["router_operator_home_migration"]
+    return {
+        "birth": Path(migration["birth_marker_path"]),
+        "birth_bug": Path(migration["birth_bug_quarantine_path"]),
+        "identity": Path(lock["host"]["router_identity_receipt_path"]),
+        "library": Path(migration["source_home"]) / "Library",
+        "receipt": Path(migration["migration_receipt_path"]),
+        "retained_library": Path(migration["prior_library_retained_path"]),
+        "transaction": Path(migration["migration_transaction_path"]),
+    }
+
+
+def _router_library_identity(path: Path) -> dict[str, int]:
+    if (
+        not path.is_absolute()
+        or path.is_symlink()
+        or not path.is_dir()
+        or path.resolve(strict=True) != path
+    ):
+        raise BootstrapError("router per-user Library path differs")
+    metadata = path.stat()
+    mode = stat.S_IMODE(metadata.st_mode)
+    if metadata.st_uid != 454 or metadata.st_gid != 454 or mode not in {0o700, 0o755}:
+        raise BootstrapError("router per-user Library metadata differs")
+    _no_named_acl(path)
+    return {
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "mode": mode,
+    }
+
+
+def _proc_pid_path(pid: int) -> str:
+    if pid <= 1:
+        raise BootstrapError("router process PID is unsafe")
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+        proc_pidpath = libproc.proc_pidpath
+        proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        proc_pidpath.restype = ctypes.c_int
+        buffer = ctypes.create_string_buffer(4096)
+        length = proc_pidpath(pid, buffer, len(buffer))
+    except (AttributeError, OSError) as error:
+        raise BootstrapError("router process path probe failed") from error
+    if length <= 0 or length >= len(buffer):
+        raise BootstrapError("router process path probe failed")
+    try:
+        value = buffer.raw[:length].decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise BootstrapError("router process path encoding differs") from error
+    if not value.startswith("/") or "\x00" in value:
+        raise BootstrapError("router process path differs")
+    return value
+
+
+def _assert_migration_agent_profile(
+    lock: dict[str, Any], records: list[dict[str, Any]], *, live: bool
+) -> None:
+    commands = [record.get("command") for record in records]
+    if (
+        len(commands) != len(set(commands))
+        or not set(commands).issubset(ROUTER_PER_USER_AGENT_COMMANDS)
+        or any(
+            record.get("uid") != 454
+            or record.get("gid") != 454
+            or record.get("ppid") != 1
+            or record.get("pgid") != record.get("pid")
+            or type(record.get("pid")) is not int
+            or record["pid"] <= 1
+            for record in records
+        )
+    ):
+        raise BootstrapError("router migration per-user agent profile differs")
+    tools = lock["router_operator_home_migration"]["per_user_agent_tools"]
+    expected_paths = {
+        command.split(" ", 1)[0] for command in ROUTER_PER_USER_AGENT_COMMANDS
+    }
+    if set(tools) != expected_paths:
+        raise BootstrapError("router migration agent tool contract differs")
+    if not live:
+        return
+    volume = lock["system_volume"]
+    codesign = Path("/usr/bin/codesign")
+    _verify_exact_system_tool(
+        codesign, lock["system_tools"][str(codesign)], volume
+    )
+    observed_by_pid = {
+        record["pid"]: record for record in _router_uid_process_records()
+    }
+    for record in records:
+        executable = record["command"].split(" ", 1)[0]
+        path = Path(executable)
+        if (
+            observed_by_pid.get(record["pid"]) != record
+            or _proc_pid_path(record["pid"]) != executable
+        ):
+            raise BootstrapError("router migration agent process changed")
+        _verify_exact_system_tool(path, tools[executable], volume)
+        result = subprocess.run(
+            [
+                str(codesign),
+                "--verify",
+                "--strict",
+                "--test-requirement",
+                "=anchor apple",
+                str(path),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0 or result.stdout or result.stderr:
+            raise BootstrapError("router migration agent signature differs")
+        if _proc_pid_path(record["pid"]) != executable:
+            raise BootstrapError("router migration agent process changed")
+
+
+def _bound_migration_file(path: Path, expected_sha256: str) -> tuple[bytes, list[int]]:
+    content = _read_bound(path, uid=0, gid=0, mode=0o400, maximum=64 * 1024)
+    _no_named_acl(path)
+    metadata = path.stat()
+    if _sha256_bytes(content) != expected_sha256:
+        raise BootstrapError("router home migration source digest differs")
+    return content, [metadata.st_ino, metadata.st_size, expected_sha256]
+
+
+def _validate_bootout_evidence(lock: dict[str, Any], value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "attempts",
+        "initial_processes",
+        "raw_uid454_processes_absent",
+    }:
+        raise BootstrapError("router user domain bootout evidence differs")
+    initial = value.get("initial_processes")
+    attempts = value.get("attempts")
+    if (
+        not isinstance(initial, list)
+        or not isinstance(attempts, list)
+        or len(attempts) != 2
+        or value.get("raw_uid454_processes_absent") is not True
+    ):
+        raise BootstrapError("router user domain bootout evidence differs")
+    _assert_migration_agent_profile(lock, initial, live=False)
+    empty_sha256 = _sha256_bytes(b"")
+    argv_sha256 = _sha256_bytes(
+        _canonical_json(["/bin/launchctl", "bootout", "user/454"])
+    )
+    if any(
+        not isinstance(attempt, dict)
+        or attempt
+        != {
+            "idempotent_success": True,
+            "argv_sha256": argv_sha256,
+            "returncode": 0,
+            "stderr_sha256": empty_sha256,
+            "stdout_sha256": empty_sha256,
+        }
+        for attempt in attempts
+    ):
+        raise BootstrapError("router user domain bootout evidence differs")
+
+
+def _load_router_home_transaction(
+    lock: dict[str, Any],
+    expected_controller_manifest_sha256: str,
+    *,
+    transaction_path: Path | None = None,
+) -> tuple[dict[str, Any], bytes]:
+    migration = lock["router_operator_home_migration"]
+    paths = _router_home_migration_paths(lock)
+    candidate = paths["transaction"] if transaction_path is None else transaction_path
+    content = _read_bound(
+        candidate, uid=0, gid=0, mode=0o400, maximum=256 * 1024
+    )
+    _no_named_acl(candidate)
+    value = _load_json_bytes(content, "router home migration transaction")
+    expected_keys = {
+        "active_controller_manifest_sha256",
+        "birth_bug",
+        "birth_marker",
+        "bootout_argv_sha256",
+        "identity_receipt",
+        "hardened_vm_receipt_sha256",
+        "instance_identity",
+        "interrupted_quarantine_receipt_sha256",
+        "kind",
+        "library",
+        "mainnet_authorized",
+        "moves",
+        "network_changes_authorized",
+        "network_snapshot_sha256",
+        "per_user_agents",
+        "phase",
+        "schema_version",
+        "source_controller_manifest_sha256",
+        "source_home",
+        "stopped_evidence_sha256",
+        "target_home",
+        "target_process_home_identity",
+        "venue_writes_authorized",
+        "vm_started",
+        "vm_status",
+    }
+    expected_moves = [
+        {
+            "destination": str(paths["retained_library"]),
+            "source": str(paths["library"]),
+        }
+    ]
+    if (
+        set(value) != expected_keys
+        or value.get("schema_version") != 1
+        or value.get("kind")
+        != "trading-desk.router-bootstrap.router-operator-home-migration-transaction"
+        or value.get("phase") != "router-operator-home-migration"
+        or value.get("active_controller_manifest_sha256")
+        != expected_controller_manifest_sha256
+        or value.get("source_controller_manifest_sha256")
+        != migration["source_controller_manifest_sha256"]
+        or value.get("source_home") != migration["source_home"]
+        or value.get("target_home") != migration["target_home"]
+        or value.get("target_process_home_identity") != _process_home_identity(lock)
+        or not isinstance(value.get("network_snapshot_sha256"), str)
+        or SHA256_RE.fullmatch(value["network_snapshot_sha256"]) is None
+        or value.get("moves") != expected_moves
+        or value.get("bootout_argv_sha256")
+        != _sha256_bytes(_canonical_json(["/bin/launchctl", "bootout", "user/454"]))
+        or value.get("hardened_vm_receipt_sha256")
+        != lock["pins"]["hardened_vm_receipt_sha256"]
+        or value.get("interrupted_quarantine_receipt_sha256")
+        != lock["pins"]["interrupted_first_boot_quarantine_receipt_sha256"]
+        or not isinstance(value.get("instance_identity"), dict)
+        or value.get("stopped_evidence_sha256")
+        != _sha256_bytes(
+            _canonical_json(
+                {
+                    "hardened_vm_receipt_sha256": lock["pins"][
+                        "hardened_vm_receipt_sha256"
+                    ],
+                    "vm_processes_absent": True,
+                    "vm_status": "Stopped",
+                }
+            )
+        )
+        or value.get("vm_status") != "Stopped"
+        or any(
+            value.get(key) is not False
+            for key in (
+                "mainnet_authorized",
+                "network_changes_authorized",
+                "venue_writes_authorized",
+                "vm_started",
+            )
+        )
+    ):
+        raise BootstrapError("router home migration transaction differs")
+    _recovery_instance_identity(
+        value["instance_identity"],
+        str(Path(lock["paths"]["lima_home"]) / lock["guest"]["instance_name"]),
+    )
+    agents = value.get("per_user_agents")
+    if not isinstance(agents, list):
+        raise BootstrapError("router home migration agent evidence differs")
+    _assert_migration_agent_profile(lock, agents, live=False)
+    identity_content, identity_evidence = _bound_migration_file(
+        paths["identity"], migration["prior_identity_receipt_sha256"]
+    )
+    birth_content, birth_evidence = _bound_migration_file(
+        paths["birth"], migration["prior_birth_marker_sha256"]
+    )
+    bug_content, bug_evidence = _bound_migration_file(
+        paths["birth_bug"], migration["birth_bug_quarantine_sha256"]
+    )
+    source_present = paths["library"].exists() or paths["library"].is_symlink()
+    retained_present = (
+        paths["retained_library"].exists()
+        or paths["retained_library"].is_symlink()
+    )
+    if source_present == retained_present:
+        raise BootstrapError("router home migration Library frontier differs")
+    library_path = paths["library"] if source_present else paths["retained_library"]
+    if (
+        identity_content
+        != _identity_receipt_content(lock, migration["source_home"])
+        or birth_content != _birth_marker_content(migration["source_home"])
+        or bug_content
+        != _birth_marker_content(migration["source_home"])
+        .replace(b"uid=454\n", b"uid=0\n", 1)
+        .replace(b"gid=454\n", b"gid=0\n", 1)
+        or value.get("identity_receipt") != identity_evidence
+        or value.get("birth_marker") != birth_evidence
+        or value.get("birth_bug") != bug_evidence
+        or _router_library_identity(library_path) != value.get("library")
+    ):
+        raise BootstrapError("router home migration transaction lineage differs")
+    return value, content
+
+
+def _validate_router_home_migration(
+    lock: dict[str, Any],
+    state: dict[str, Path],
+    expected_controller_manifest_sha256: str,
+    *,
+    receipt_path: Path | None = None,
+) -> dict[str, Any]:
+    migration = lock["router_operator_home_migration"]
+    paths = _router_home_migration_paths(lock)
+    receipt_pending = paths["receipt"].parent / f".{paths['receipt'].name}.pending"
+    if receipt_path is None and (receipt_pending.exists() or receipt_pending.is_symlink()):
+        raise BootstrapError("router home migration receipt is pending")
+    transaction, transaction_content = _load_router_home_transaction(
+        lock, expected_controller_manifest_sha256
+    )
+    candidate = paths["receipt"] if receipt_path is None else receipt_path
+    receipt_content = _read_bound(
+        candidate, uid=0, gid=0, mode=0o400, maximum=256 * 1024
+    )
+    _no_named_acl(candidate)
+    receipt = _load_json_bytes(receipt_content, "router home migration receipt")
+    expected_keys = {
+        "active_controller_manifest_sha256",
+        "birth_bug_quarantine_sha256",
+        "post_change_bootout",
+        "post_migration_status_sha256",
+        "post_status_bootout",
+        "pre_change_bootout",
+        "credentials_accessed",
+        "hardened_vm_receipt_sha256",
+        "instance_identity",
+        "interrupted_quarantine_receipt_sha256",
+        "kind",
+        "mainnet_authorized",
+        "migration_transaction_path",
+        "migration_transaction_sha256",
+        "network_changes_performed",
+        "network_snapshot_sha256",
+        "prior_birth_marker_sha256",
+        "prior_identity_receipt_sha256",
+        "prior_library_identity",
+        "prior_library_retained_path",
+        "raw_uid454_processes_absent",
+        "schema_version",
+        "source_controller_manifest_sha256",
+        "source_home",
+        "target_home",
+        "target_process_home_identity",
+        "venue_writes_authorized",
+        "vm_started",
+        "vm_status",
+    }
+    if (
+        set(receipt) != expected_keys
+        or receipt.get("schema_version") != 1
+        or receipt.get("kind")
+        != "trading-desk.router-bootstrap.router-operator-home-migration"
+        or receipt.get("active_controller_manifest_sha256")
+        != expected_controller_manifest_sha256
+        or receipt.get("source_controller_manifest_sha256")
+        != migration["source_controller_manifest_sha256"]
+        or receipt.get("hardened_vm_receipt_sha256")
+        != lock["pins"]["hardened_vm_receipt_sha256"]
+        or receipt.get("interrupted_quarantine_receipt_sha256")
+        != lock["pins"]["interrupted_first_boot_quarantine_receipt_sha256"]
+        or receipt.get("instance_identity") != transaction["instance_identity"]
+        or receipt.get("migration_transaction_path") != str(paths["transaction"])
+        or receipt.get("migration_transaction_sha256")
+        != _sha256_bytes(transaction_content)
+        or receipt.get("source_home") != migration["source_home"]
+        or receipt.get("target_home") != migration["target_home"]
+        or receipt.get("target_process_home_identity")
+        != transaction["target_process_home_identity"]
+        or receipt.get("network_snapshot_sha256")
+        != transaction["network_snapshot_sha256"]
+        or receipt.get("prior_identity_receipt_sha256")
+        != migration["prior_identity_receipt_sha256"]
+        or receipt.get("prior_birth_marker_sha256")
+        != migration["prior_birth_marker_sha256"]
+        or receipt.get("birth_bug_quarantine_sha256")
+        != migration["birth_bug_quarantine_sha256"]
+        or receipt.get("prior_library_retained_path")
+        != str(paths["retained_library"])
+        or receipt.get("prior_library_identity") != transaction["library"]
+        or not isinstance(receipt.get("pre_change_bootout"), dict)
+        or receipt["pre_change_bootout"].get("initial_processes")
+        != transaction["per_user_agents"]
+        or not isinstance(receipt.get("post_migration_status_sha256"), str)
+        or SHA256_RE.fullmatch(receipt["post_migration_status_sha256"]) is None
+        or receipt.get("raw_uid454_processes_absent") is not True
+        or receipt.get("vm_status") != "Stopped"
+        or any(
+            receipt.get(key) is not False
+            for key in (
+                "credentials_accessed",
+                "mainnet_authorized",
+                "network_changes_performed",
+                "venue_writes_authorized",
+                "vm_started",
+            )
+        )
+    ):
+        raise BootstrapError("router home migration receipt differs")
+    for key in (
+        "pre_change_bootout",
+        "post_change_bootout",
+        "post_status_bootout",
+    ):
+        _validate_bootout_evidence(lock, receipt[key])
+
+    prior_receipt, prior_receipt_evidence = _bound_migration_file(
+        paths["identity"], migration["prior_identity_receipt_sha256"]
+    )
+    prior_birth, prior_birth_evidence = _bound_migration_file(
+        paths["birth"], migration["prior_birth_marker_sha256"]
+    )
+    bug, bug_evidence = _bound_migration_file(
+        paths["birth_bug"], migration["birth_bug_quarantine_sha256"]
+    )
+    if (
+        prior_receipt != _identity_receipt_content(lock, migration["source_home"])
+        or prior_birth != _birth_marker_content(migration["source_home"])
+        or bug
+        != _birth_marker_content(migration["source_home"])
+        .replace(b"uid=454\n", b"uid=0\n", 1)
+        .replace(b"gid=454\n", b"gid=0\n", 1)
+        or transaction.get("identity_receipt") != prior_receipt_evidence
+        or transaction.get("birth_marker") != prior_birth_evidence
+        or transaction.get("birth_bug") != bug_evidence
+        or _router_library_identity(paths["retained_library"])
+        != transaction.get("library")
+        or paths["library"].exists()
+        or paths["library"].is_symlink()
+    ):
+        raise BootstrapError("router home migration retained lineage differs")
+    _assert_host_identity(lock)
+    receipt08 = _hardened_vm_receipt(lock)
+    _validate_interrupted_first_boot_successor(lock, state, receipt08)
+    instance = _hardened_instance_evidence(
+        lock, receipt08, allow_runtime_files=False
+    )
+    if (
+        _recovery_instance_identity(instance, receipt08["instance_path"])
+        != transaction["instance_identity"]
+    ):
+        raise BootstrapError("router home migration instance lineage differs")
+    status = _status(lock, _limactl(lock), quiesce_after=False)
+    if (
+        _sha256_bytes(_canonical_json(status))
+        != receipt["post_migration_status_sha256"]
+    ):
+        raise BootstrapError("router home migration stopped status differs")
+    _quiesce_router_user_domain(lock)
+    if _router_uid_processes():
+        raise BootstrapError("router process remains after home migration")
+    if (
+        _sha256_bytes(_canonical_json(_network_snapshot()))
+        != transaction["network_snapshot_sha256"]
+    ):
+        raise BootstrapError("router home migration network snapshot differs")
     return receipt
 
 
@@ -2473,6 +3099,7 @@ def _prepare_vmnet(
         or generated.stdout != sudoers_content
     ):
         raise BootstrapError("generated Lima sudoers differs")
+    _quiesce_router_user_domain(lock)
     sudoers_parent = Path(lock["paths"]["vmnet_sudoers"]).parent
     _assert_real(sudoers_parent, kind="directory", uid=0, gid=0, mode=0o755)
     target = Path(lock["paths"]["vmnet_sudoers"])
@@ -3104,6 +3731,137 @@ def _complete_watchdog(
     return {"path": str(result_path), "sha256": result_sha256, "value": value}
 
 
+def _router_uid_process_records() -> list[dict[str, Any]]:
+    result = subprocess.run(
+        [
+            "/bin/ps",
+            "-axo",
+            "pid=,ppid=,uid=,gid=,pgid=,ucomm=,command=",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=5,
+        check=False,
+    )
+    if result.returncode != 0 or result.stderr or len(result.stdout) > 1024 * 1024:
+        raise BootstrapError("router detailed process inventory failed")
+    records: list[dict[str, Any]] = []
+    for line in result.stdout.splitlines():
+        fields = line.split(None, 6)
+        if (
+            len(fields) != 7
+            or not fields[0].isdigit()
+            or not fields[1].isdigit()
+            or not _valid_ps_uid(fields[2])
+            or not _valid_ps_uid(fields[3])
+            or not fields[4].isdigit()
+            or not fields[5]
+            or not fields[6]
+        ):
+            raise BootstrapError("router detailed process inventory is malformed")
+        pid, ppid, uid, gid, pgid = (int(value, 10) for value in fields[:5])
+        if uid == 454:
+            if pid <= 1:
+                raise BootstrapError("router process PID is unsafe")
+            records.append(
+                {
+                    "command": fields[6],
+                    "gid": gid,
+                    "pgid": pgid,
+                    "pid": pid,
+                    "ppid": ppid,
+                    "ucomm": fields[5],
+                    "uid": uid,
+                }
+            )
+    return sorted(records, key=lambda value: value["pid"])
+
+
+def _launchctl(lock: dict[str, Any]) -> Path:
+    volume, tools = _validated_system_tool_contract(lock)
+    path = Path("/bin/launchctl")
+    _verify_exact_system_tool(path, tools[str(path)], volume)
+    codesign = Path("/usr/bin/codesign")
+    _verify_exact_system_tool(codesign, tools[str(codesign)], volume)
+    result = subprocess.run(
+        [
+            str(codesign),
+            "--verify",
+            "--strict",
+            "--test-requirement",
+            "=anchor apple",
+            str(path),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0 or result.stdout or result.stderr:
+        raise BootstrapError("launchctl signature differs")
+    return path
+
+
+def _quiesce_router_user_domain(
+    lock: dict[str, Any], *, require_exact_migration_agents: bool = False
+) -> dict[str, Any]:
+    launchctl = _launchctl(lock)
+    initial = _router_uid_process_records()
+    _assert_migration_agent_profile(lock, initial, live=True)
+    deadline = time.monotonic() + 10
+    attempts: list[dict[str, Any]] = []
+    for _attempt in range(2):
+        current = _router_uid_process_records()
+        _assert_migration_agent_profile(lock, current, live=True)
+        result = subprocess.run(
+            [str(launchctl), "bootout", "user/454"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=10,
+            check=False,
+        )
+        if len(result.stdout) > 64 * 1024 or len(result.stderr) > 64 * 1024:
+            raise BootstrapError("router user domain bootout output exceeds bound")
+        if result.returncode != 0 or result.stdout or result.stderr:
+            raise BootstrapError("router user domain bootout result differs")
+        attempts.append(
+            {
+                "idempotent_success": True,
+                "argv_sha256": _sha256_bytes(
+                    _canonical_json([str(launchctl), "bootout", "user/454"])
+                ),
+                "returncode": result.returncode,
+                "stderr_sha256": _sha256_bytes(result.stderr),
+                "stdout_sha256": _sha256_bytes(result.stdout),
+            }
+        )
+        stable_absent_samples = 0
+        while stable_absent_samples < 2:
+            records = _router_uid_process_records()
+            _assert_migration_agent_profile(lock, records, live=False)
+            stable_absent_samples = stable_absent_samples + 1 if not records else 0
+            if time.monotonic() >= deadline:
+                raise BootstrapError("router user domain did not quiesce")
+            if stable_absent_samples < 2:
+                time.sleep(0.1)
+    if _router_uid_processes():
+        raise BootstrapError("router raw UID process invariant differs")
+    return {
+        "attempts": attempts,
+        "initial_processes": initial,
+        "raw_uid454_processes_absent": True,
+    }
+
+
 def _router_uid_processes() -> list[int]:
     result = subprocess.run(
         ["/bin/ps", "-axo", "pid=,uid="],
@@ -3192,18 +3950,9 @@ def _emergency_contain_until_stopped(lock: dict[str, Any], limactl: Path) -> Non
         except BaseException:
             pass
         try:
-            for pid in _router_uid_processes():
-                try:
-                    if _router_pid_still_dedicated(pid):
-                        os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            time.sleep(0.1)
-            if _router_uid_processes():
-                continue
             _status(lock, limactl)
+            _assert_no_vm_process()
             if not _router_uid_processes():
-                _assert_no_vm_process()
                 return
         except BaseException:
             pass
@@ -3405,7 +4154,10 @@ def _status_guarded(
         label=label,
         timeout=30,
     )
-    return _parse_status_result(lock, result, expected_status=expected_status)
+    value = _parse_status_result(lock, result, expected_status=expected_status)
+    if expected_status == "Stopped":
+        _quiesce_router_user_domain(lock)
+    return value
 
 
 def _stop_vm(
@@ -4293,6 +5045,360 @@ def _apply_hardened_vm(args: argparse.Namespace) -> int:
     return 0
 
 
+def _migrate_router_operator_home(args: argparse.Namespace) -> int:
+    _verify_bundle(args.expected_controller_manifest_sha256)
+    lock = _load_lock()
+    if (
+        lock["phases"]["router_operator_home_migration_enabled"] is not True
+        or lock["phases"]["airgapped_start_apply_enabled"] is not False
+    ):
+        raise BootstrapError("router operator home migration is disabled")
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        raise BootstrapError("host OS/architecture differs")
+    if platform.mac_ver()[0] != lock["host"]["product_version"]:
+        raise BootstrapError("host product version differs")
+    _verify_system_tools(lock)
+    _assert_attended_root_tty()
+    state = _require_existing_state(lock)
+    migration = lock["router_operator_home_migration"]
+    paths = _router_home_migration_paths(lock)
+    receipt_pending = paths["receipt"].parent / f".{paths['receipt'].name}.pending"
+    if (receipt_pending.exists() or receipt_pending.is_symlink()) and (
+        paths["receipt"].exists() or paths["receipt"].is_symlink()
+    ):
+        raise BootstrapError("router home migration receipt is ambiguous")
+    if receipt_pending.exists() or receipt_pending.is_symlink():
+        _quiesce_router_user_domain(lock)
+        _validate_router_home_migration(
+            lock,
+            state,
+            args.expected_controller_manifest_sha256,
+            receipt_path=receipt_pending,
+        )
+        _rename_exclusive(receipt_pending, paths["receipt"])
+    if paths["receipt"].exists() or paths["receipt"].is_symlink():
+        _quiesce_router_user_domain(lock)
+        receipt = _validate_router_home_migration(
+            lock, state, args.expected_controller_manifest_sha256
+        )
+        print(f"router_home_migration_receipt={paths['receipt']}")
+        print(f"router_home_migration_receipt_sha256={_sha256_file(paths['receipt'])}")
+        print(f"router_operator_home={receipt['target_home']}")
+        print("vm_status=Stopped")
+        print("network_changes_performed=false")
+        print("next=render a separately pinned final-airgap successor")
+        return 0
+
+    _assert_no_airgap_watchdog_process()
+    _assert_no_vm_process()
+    current_network = _network_snapshot()
+    transaction_pending = (
+        paths["transaction"].parent / f".{paths['transaction'].name}.pending"
+    )
+    if (transaction_pending.exists() or transaction_pending.is_symlink()) and (
+        paths["transaction"].exists() or paths["transaction"].is_symlink()
+    ):
+        raise BootstrapError("router home migration transaction is ambiguous")
+    if transaction_pending.exists() or transaction_pending.is_symlink():
+        pending_transaction, _pending_content = _load_router_home_transaction(
+            lock,
+            args.expected_controller_manifest_sha256,
+            transaction_path=transaction_pending,
+        )
+        if (
+            _sha256_bytes(_canonical_json(current_network))
+            != pending_transaction["network_snapshot_sha256"]
+        ):
+            raise BootstrapError("network changed before transaction promotion")
+        _rename_exclusive(transaction_pending, paths["transaction"])
+    transaction_exists = paths["transaction"].exists() or paths["transaction"].is_symlink()
+    if not transaction_exists:
+        _assert_host_identity(lock, legacy_home=True)
+        if paths["retained_library"].exists() or paths["retained_library"].is_symlink():
+            raise BootstrapError("router home migration destination predates transaction")
+        receipt08 = _hardened_vm_receipt(lock)
+        _validate_interrupted_first_boot_successor(
+            lock, state, receipt08, allow_current_library=True
+        )
+        instance = _hardened_instance_evidence(
+            lock, receipt08, allow_runtime_files=False
+        )
+        instance_identity = _recovery_instance_identity(
+            instance, receipt08["instance_path"]
+        )
+        agents = _router_uid_process_records()
+        _assert_migration_agent_profile(lock, agents, live=True)
+        prior_receipt, prior_receipt_evidence = _bound_migration_file(
+            paths["identity"], migration["prior_identity_receipt_sha256"]
+        )
+        prior_birth, prior_birth_evidence = _bound_migration_file(
+            paths["birth"], migration["prior_birth_marker_sha256"]
+        )
+        bug, bug_evidence = _bound_migration_file(
+            paths["birth_bug"], migration["birth_bug_quarantine_sha256"]
+        )
+        if (
+            prior_receipt
+            != _identity_receipt_content(lock, migration["source_home"])
+            or prior_birth != _birth_marker_content(migration["source_home"])
+            or bug
+            != _birth_marker_content(migration["source_home"])
+            .replace(b"uid=454\n", b"uid=0\n", 1)
+            .replace(b"gid=454\n", b"gid=0\n", 1)
+        ):
+            raise BootstrapError("router home migration birth lineage differs")
+        library = _router_library_identity(paths["library"])
+        transaction = {
+            "active_controller_manifest_sha256": args.expected_controller_manifest_sha256,
+            "birth_bug": bug_evidence,
+            "birth_marker": prior_birth_evidence,
+            "bootout_argv_sha256": _sha256_bytes(
+                _canonical_json(["/bin/launchctl", "bootout", "user/454"])
+            ),
+            "identity_receipt": prior_receipt_evidence,
+            "hardened_vm_receipt_sha256": lock["pins"][
+                "hardened_vm_receipt_sha256"
+            ],
+            "instance_identity": instance_identity,
+            "interrupted_quarantine_receipt_sha256": lock["pins"][
+                "interrupted_first_boot_quarantine_receipt_sha256"
+            ],
+            "kind": "trading-desk.router-bootstrap.router-operator-home-migration-transaction",
+            "library": library,
+            "mainnet_authorized": False,
+            "moves": [
+                {
+                    "destination": str(paths["retained_library"]),
+                    "source": str(paths["library"]),
+                }
+            ],
+            "network_changes_authorized": False,
+            "network_snapshot_sha256": _sha256_bytes(
+                _canonical_json(current_network)
+            ),
+            "per_user_agents": agents,
+            "phase": "router-operator-home-migration",
+            "schema_version": 1,
+            "source_controller_manifest_sha256": migration[
+                "source_controller_manifest_sha256"
+            ],
+            "source_home": migration["source_home"],
+            "stopped_evidence_sha256": _sha256_bytes(
+                _canonical_json(
+                    {
+                        "hardened_vm_receipt_sha256": lock["pins"][
+                            "hardened_vm_receipt_sha256"
+                        ],
+                        "vm_processes_absent": True,
+                        "vm_status": "Stopped",
+                    }
+                )
+            ),
+            "target_home": migration["target_home"],
+            "target_process_home_identity": _process_home_identity(lock),
+            "venue_writes_authorized": False,
+            "vm_started": False,
+            "vm_status": "Stopped",
+        }
+        _atomic_receipt(
+            paths["transaction"].parent,
+            paths["transaction"].name,
+            transaction,
+        )
+    transaction, transaction_content = _load_router_home_transaction(
+        lock, args.expected_controller_manifest_sha256
+    )
+    if (
+        _sha256_bytes(_canonical_json(current_network))
+        != transaction["network_snapshot_sha256"]
+    ):
+        raise BootstrapError("network changed before router home migration resume")
+    _assert_no_airgap_watchdog_process()
+    _assert_no_vm_process()
+    receipt08 = _hardened_vm_receipt(lock)
+    _validate_interrupted_first_boot_successor(
+        lock,
+        state,
+        receipt08,
+        allow_current_library=(
+            paths["library"].exists() or paths["library"].is_symlink()
+        ),
+    )
+    resumed_instance = _hardened_instance_evidence(
+        lock, receipt08, allow_runtime_files=False
+    )
+    if (
+        _recovery_instance_identity(resumed_instance, receipt08["instance_path"])
+        != transaction["instance_identity"]
+    ):
+        raise BootstrapError("router instance changed before migration resume")
+    pre_change_bootout = _quiesce_router_user_domain(
+        lock, require_exact_migration_agents=True
+    )
+    _assert_no_vm_process()
+    if _router_uid_processes():
+        raise BootstrapError("router processes remain after domain bootout")
+
+    current_home = _dscl_value(
+        f"/Users/{lock['host']['router_operator_account']}", "NFSHomeDirectory"
+    )
+    if current_home not in {migration["source_home"], migration["target_home"]}:
+        raise BootstrapError("router operator home migration source differs")
+    if current_home == migration["source_home"]:
+        _assert_host_identity(lock, legacy_home=True)
+    else:
+        _assert_host_identity(lock, allow_cached_source_home=True)
+    if current_home == migration["source_home"] and (
+        paths["retained_library"].exists()
+        or paths["retained_library"].is_symlink()
+    ):
+        raise BootstrapError("router home migration mutation order differs")
+    if current_home == migration["source_home"]:
+        result = subprocess.run(
+            [
+                "/usr/bin/dscl",
+                ".",
+                "-change",
+                f"/Users/{lock['host']['router_operator_account']}",
+                "NFSHomeDirectory",
+                migration["source_home"],
+                migration["target_home"],
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0 or result.stdout or result.stderr:
+            raise BootstrapError("router operator home update failed")
+    cache = subprocess.run(
+        ["/usr/bin/dscacheutil", "-flushcache"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=10,
+        check=False,
+    )
+    if cache.returncode != 0 or cache.stdout or cache.stderr:
+        raise BootstrapError("router operator identity cache flush failed")
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            user = pwd.getpwnam(lock["host"]["router_operator_account"])
+        except KeyError as error:
+            raise BootstrapError("router operator disappeared during migration") from error
+        if (
+            user.pw_dir == migration["target_home"]
+            and _dscl_value(
+                f"/Users/{lock['host']['router_operator_account']}",
+                "NFSHomeDirectory",
+            )
+            == migration["target_home"]
+        ):
+            break
+        if time.monotonic() >= deadline:
+            raise BootstrapError("router operator home cache did not converge")
+        time.sleep(0.1)
+    _assert_host_identity(lock)
+    post_change_bootout = _quiesce_router_user_domain(lock)
+    _assert_no_vm_process()
+    if _router_uid_processes():
+        raise BootstrapError("router process appeared after home change")
+    if paths["retained_library"].exists() or paths["retained_library"].is_symlink():
+        if _router_library_identity(paths["retained_library"]) != transaction["library"]:
+            raise BootstrapError("retained router per-user Library differs")
+        if paths["library"].exists() or paths["library"].is_symlink():
+            raise BootstrapError("router per-user Library source reappeared")
+    else:
+        if _router_library_identity(paths["library"]) != transaction["library"]:
+            raise BootstrapError("router per-user Library changed before retention")
+        _rename_exclusive(paths["library"], paths["retained_library"])
+        if _router_library_identity(paths["retained_library"]) != transaction["library"]:
+            raise BootstrapError("retained router per-user Library differs")
+    if paths["library"].exists() or paths["library"].is_symlink():
+        raise BootstrapError("router per-user Library remains live")
+    receipt08 = _hardened_vm_receipt(lock)
+    _validate_interrupted_first_boot_successor(lock, state, receipt08)
+    instance = _hardened_instance_evidence(
+        lock, receipt08, allow_runtime_files=False
+    )
+    if (
+        _recovery_instance_identity(instance, receipt08["instance_path"])
+        != transaction["instance_identity"]
+    ):
+        raise BootstrapError("router instance changed during home migration")
+    post_migration_status = _status(
+        lock, _limactl(lock), quiesce_after=False
+    )
+    post_status_bootout = _quiesce_router_user_domain(lock)
+    _assert_host_identity(lock)
+    _assert_no_vm_process()
+    if _router_uid_processes():
+        raise BootstrapError("router process appeared after stopped status")
+    if (
+        _sha256_bytes(_canonical_json(_network_snapshot()))
+        != transaction["network_snapshot_sha256"]
+    ):
+        raise BootstrapError("network changed during router home migration")
+    receipt = {
+        "active_controller_manifest_sha256": args.expected_controller_manifest_sha256,
+        "birth_bug_quarantine_sha256": migration["birth_bug_quarantine_sha256"],
+        "credentials_accessed": False,
+        "hardened_vm_receipt_sha256": lock["pins"]["hardened_vm_receipt_sha256"],
+        "instance_identity": transaction["instance_identity"],
+        "interrupted_quarantine_receipt_sha256": lock["pins"][
+            "interrupted_first_boot_quarantine_receipt_sha256"
+        ],
+        "kind": "trading-desk.router-bootstrap.router-operator-home-migration",
+        "mainnet_authorized": False,
+        "migration_transaction_path": str(paths["transaction"]),
+        "migration_transaction_sha256": _sha256_bytes(transaction_content),
+        "network_changes_performed": False,
+        "network_snapshot_sha256": transaction["network_snapshot_sha256"],
+        "post_change_bootout": post_change_bootout,
+        "post_migration_status_sha256": _sha256_bytes(
+            _canonical_json(post_migration_status)
+        ),
+        "post_status_bootout": post_status_bootout,
+        "pre_change_bootout": pre_change_bootout,
+        "prior_birth_marker_sha256": migration["prior_birth_marker_sha256"],
+        "prior_identity_receipt_sha256": migration[
+            "prior_identity_receipt_sha256"
+        ],
+        "prior_library_identity": transaction["library"],
+        "prior_library_retained_path": str(paths["retained_library"]),
+        "raw_uid454_processes_absent": True,
+        "schema_version": 1,
+        "source_controller_manifest_sha256": migration[
+            "source_controller_manifest_sha256"
+        ],
+        "source_home": migration["source_home"],
+        "target_home": migration["target_home"],
+        "target_process_home_identity": transaction["target_process_home_identity"],
+        "venue_writes_authorized": False,
+        "vm_started": False,
+        "vm_status": "Stopped",
+    }
+    path, digest = _atomic_receipt(paths["receipt"].parent, paths["receipt"].name, receipt)
+    _validate_router_home_migration(
+        lock, state, args.expected_controller_manifest_sha256
+    )
+    print(f"router_home_migration_receipt={path}")
+    print(f"router_home_migration_receipt_sha256={digest}")
+    print(f"router_operator_home={migration['target_home']}")
+    print("raw_uid454_processes_absent=true")
+    print("vm_status=Stopped")
+    print("network_changes_performed=false")
+    print("network_reconnect_authorized=false")
+    print("venue_writes_authorized=false")
+    print("mainnet_authorized=false")
+    print("next=render a separately pinned final-airgap successor")
+    return 0
+
+
 def _validate_check_only_rotation(
     lock: dict[str, Any], state: dict[str, Path], recovery: dict[str, Any]
 ) -> None:
@@ -4386,6 +5492,10 @@ def _airgap_preconditions(
     local_tty = _assert_attended_root_tty()
     _assert_host_identity(lock)
     state = _require_existing_state(lock)
+    _quiesce_router_user_domain(lock)
+    _validate_router_home_migration(
+        lock, state, args.expected_controller_manifest_sha256
+    )
     _assert_no_airgap_watchdog_process()
     if _router_uid_processes():
         raise BootstrapError("router process exists before air-gap probe")
@@ -5934,42 +7044,19 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="phase", required=True)
-    for name in ("check-airgap", "apply-airgapped-first-boot"):
-        airgap = subparsers.add_parser(name)
-        airgap.add_argument("--expected-controller-manifest-sha256", required=True)
-        airgap.add_argument("--attest-physical-airgap", action="store_true")
-    stopped = subparsers.add_parser("verify-stopped-after-airgap")
-    stopped.add_argument("--expected-controller-manifest-sha256", required=True)
+    migration = subparsers.add_parser("migrate-router-operator-home")
+    migration.add_argument("--expected-controller-manifest-sha256", required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.phase == "check-airgap":
-            return _check_airgap(args)
-        if args.phase == "apply-airgapped-first-boot":
-            return _apply_airgapped_first_boot(args)
-        if args.phase == "verify-stopped-after-airgap":
-            return _verify_stopped_after_airgap(args)
+        if args.phase == "migrate-router-operator-home":
+            return _migrate_router_operator_home(args)
         raise BootstrapError("unknown bootstrap phase")
     except (BootstrapError, OSError, KeyError, TypeError, ValueError, plistlib.InvalidFileException) as error:
-        if args.phase == "apply-airgapped-first-boot":
-            match = re.fullmatch(
-                r"host_only_capture_reason=([a-z0-9_]+)",
-                str(error),
-            )
-            reason = (
-                _allowlisted_capture_reason(match.group(1))
-                if match
-                else "redacted"
-            )
-            print(
-                f"router_bootstrap_failed: host_only_capture_reason={reason}",
-                file=sys.stderr,
-            )
-        else:
-            print(f"router_bootstrap_failed: {error}", file=sys.stderr)
+        print(f"router_bootstrap_failed: {error}", file=sys.stderr)
         return 2
 
 

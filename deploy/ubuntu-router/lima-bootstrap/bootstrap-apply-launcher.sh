@@ -30,8 +30,8 @@ launcher=$(/bin/realpath "$0")
 [ "$launcher" = "$0" ] || die 'launcher path is noncanonical'
 controller=$(/usr/bin/dirname "$launcher")
 case "${1-}" in
-    check-airgap|apply-airgapped-first-boot|verify-stopped-after-airgap) script=$controller/bootstrap-apply.py ;;
-    *) die 'launcher accepts only reviewed final-airgap phases' ;;
+    migrate-router-operator-home) script=$controller/bootstrap-apply.py ;;
+    *) die 'launcher accepts only the reviewed router-home migration' ;;
 esac
 runtime=/opt/trading-desk/runtime/python-3.11.16
 python=$runtime/bin/python3.11

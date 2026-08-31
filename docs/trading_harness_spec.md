@@ -329,6 +329,15 @@ absent before admitting exactly one air-gapped start. Every subprocess that
 executes as the router UID MUST use the verified dedicated process `HOME` as its
 working directory; create/start failure output MUST be durably retained within
 fixed bounds.
+If Darwin creates a router-UID per-user domain, it MUST NOT be normalized by a
+PID allowlist or generic UID kill. A migration-only controller MUST authenticate
+each observed on-demand Apple agent by exact process and pinned executable
+identity, write the stopped-lineage transaction first, issue fixed idempotent
+`launchctl bootout user/454` calls with stable raw-zero proofs, compare-and-swap
+the Directory Service home before retaining the accidental `LIMA_HOME/Library`,
+and preserve the original identity receipt/birth markers as historical bytes.
+It MUST expose no VM check/start/recovery authority. Only a later controller
+that pins the migration receipt may restore the single air-gapped start.
 If the controller prestarts socket_vmnet, Lima MUST receive only temporary
 read-only access to the exact live PID file, verify the process identity, reuse
 that daemon, and lose the ACL immediately after the guarded start boundary.

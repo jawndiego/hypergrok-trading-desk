@@ -7,9 +7,10 @@ interrupted first-boot instance. The fresh hardened replacement remains stopped;
 receipt 08 is `e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c`
 and it binds quarantine receipt
 `2ae8f48d9363ebbc9605f604c4b6bbcd7ac54161b77a819731a0abe27525dbf5`.
-This final controller permits exactly one attended, physically air-gapped first
-boot in session `e33dbb...` and returns the VM to `Stopped`. It cannot recreate
-or recover a VM. No phase accesses credentials or a venue.
+The current controller is migration-only. Its sole attended phase moves UID
+454's Directory Service home from `LIMA_HOME` to the verified process home and
+quarantines the newly created `LIMA_HOME/Library`. It cannot check, start,
+recreate, or recover a VM. No phase accesses credentials or a venue.
 
 Render and replay-check as the desktop operator:
 
@@ -49,13 +50,28 @@ The historical lock lineage records the exact check-only rotation from retained 
 now publishes the final `e33dbb...` base once and immediately continues through PREPARING,
 host-only validation, watchdog arming and the single boot in the same call.
 
-The final renderer neither accepts nor emits the historical prestart recovery
+The migration renderer neither accepts nor emits the historical prestart recovery
 profile. The recovery commands and `apply-hardened-vm` are absent from the
 launcher and parser. Their sealed receipts remain evidence, not active CLI
 authority.
 
-Do not start the replacement manually. From a local Terminal—not SSH, tmux or
-screen—disable all network services, turn Wi-Fi off, physically disconnect
+Do not start the replacement manually. This bundle exposes only
+`migrate-router-operator-home`. It pins `launchctl`, Directory Service tools,
+and all seven possible Apple per-user agents. Each observed agent must be a
+unique exact subset and is reauthenticated by PID path, command, parent,
+UID/GID/process group, System-volume metadata, SHA-256, ACL, and Apple
+signature. A write-ahead transaction binds the stopped receipt-08 and
+interrupted-recovery lineage before any mutation. Two fixed idempotent
+`launchctl bootout user/454` calls, each followed by stable raw-zero samples,
+replace generic UID kills. The Directory Service compare-and-swap occurs before
+the accidental Library is retained. The original schema-v3 identity receipt and
+birth markers remain byte-for-byte historical evidence.
+
+Record the printed migration receipt hash. Only a separately rendered successor
+may pin it, disable migration, and restore the one-airgapped-start surface.
+
+For that later successor, from a local Terminal—not SSH, tmux or screen—disable
+all network services, turn Wi-Fi off, physically disconnect
 Ethernet/USB/Thunderbolt uplinks, and close VPN/sharing software. Run the sealed
 controller's write-free `check-airgap --attest-physical-airgap`, then
 `apply-airgapped-first-boot --attest-physical-airgap` without reconnecting in
@@ -63,7 +79,7 @@ between. Apply captures its own target-session base once and never reuses the
 check's dynamic observation. The controller continuously monitors the complete
 topology, verifies the guest over vsock, and stops it again.
 
-The sealed controller verifies its 15-tool ACL/network/process/privilege
+The sealed controller verifies its 19-tool ACL/network/process/privilege
 allowlist by exact System-volume device/flags, owner, mode (including setuid),
 link count, size and a stable `O_NOFOLLOW` file-descriptor SHA-256. `/bin/ls`
 is verified before it performs the ACL checks; the allowlist also includes the
@@ -131,8 +147,8 @@ authorization file must bind the immutable predecessor transaction, its exact
 initiating manifest, and the one completing manifest; the quarantine and new
 receipt 08 retain that lineage and reject a third controller. The final
 controller validates that authorization, transaction, stopped proof, quarantine
-receipt and replacement receipt before either air-gap command; it exposes no
-recovery dispatch.
+receipt, replacement receipt, and home-migration receipt before either air-gap
+command; it exposes no recovery or migration dispatch.
 
 After the final one-shot air-gapped boot, no additional guest boot is authorized.
 A later stopped migration must

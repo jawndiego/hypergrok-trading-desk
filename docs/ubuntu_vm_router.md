@@ -425,16 +425,21 @@ session before any air-gap check or start can be admitted.
 Cross-controller resume additionally requires an attended root-owned immutable
 authorization binding the exact predecessor transaction and the sole completing
 controller; both identities are carried into the quarantine/new-receipt chain.
-The final successor pins fresh stopped receipt 08
+The stopped replacement is pinned by receipt 08
 `e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c`,
 quarantine receipt
 `2ae8f48d9363ebbc9605f604c4b6bbcd7ac54161b77a819731a0abe27525dbf5`,
-and unused session `e33dbb...`. Before its one permitted air-gapped start it
-revalidates the exact authorization, transaction, stopped proof, quarantine
-paths and replacement receipt, plus absent old authority and an empty fresh
-namespace. `apply-hardened-vm` and every recovery dispatch are removed; the
-historical check-only rotation and recovery profile no longer supply active CLI
-arguments or authority.
+and unused session `e33dbb...`. Its first final-airgap preflight exposed seven
+Apple per-user agents because UID 454's Directory Service home still named
+`LIMA_HOME`. A migration-only successor now binds the complete stopped lineage,
+authenticates only an exact subset of those pinned Apple agents, writes a
+transaction, performs two idempotent `launchctl bootout user/454` calls with
+stable zero-UID proofs, compares-and-swaps the home to the process-home path,
+and then retains the newly created `LIMA_HOME/Library` opaquely. It preserves
+the original schema-v3 identity receipt and birth markers byte-for-byte. This
+controller exposes no air-gap check, VM start, recreate, or recovery command.
+A separate successor must pin the migration receipt, disable migration, and
+revalidate all prior lineage before the one air-gapped start is restored.
 
 Both capture passes run pinned macOS observers sequentially under one total
 deadline. The continuous watchdog retains concurrent sampling, but each child

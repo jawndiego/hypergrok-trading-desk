@@ -1820,7 +1820,7 @@ Network interfaces: bridge100
         account = SimpleNamespace(
             pw_uid=454,
             pw_gid=454,
-            pw_dir=str(module.LIMA_HOME),
+            pw_dir=str(module.LIMA_PROCESS_HOME),
             pw_shell="/usr/bin/false",
         )
         metadata = SimpleNamespace(
@@ -1856,6 +1856,11 @@ Network interfaces: bridge100
             ),
             mock.patch.object(
                 module, "_scan_router_uid_processes", return_value=[]
+            ),
+            mock.patch.object(
+                module,
+                "_bootout_router_user_domain",
+                return_value={"raw_uid454_processes_absent": True},
             ),
             mock.patch.object(module.time, "monotonic", side_effect=[0.0, 0.0]),
         ):
@@ -1957,27 +1962,12 @@ Network interfaces: bridge100
         ):
             self.assertEqual([], module._scan_lima_start_sessions())
 
-    def test_router_uid_escalation_revalidates_then_kills_each_pid(self) -> None:
+    def test_generic_router_uid_kill_is_forbidden(self) -> None:
         module = _load()
-        uid_result = SimpleNamespace(
-            returncode=0, stdout=b"454\n", stderr=b""
-        )
-        with (
-            mock.patch.object(
-                module,
-                "_scan_router_uid_processes",
-                side_effect=[[{"pid": 700, "pgid": 600}], []],
-            ),
-            mock.patch.object(
-                module.subprocess, "run", return_value=uid_result
-            ),
-            mock.patch.object(module.os, "kill") as kill,
-            mock.patch.object(module.time, "sleep"),
+        with self.assertRaisesRegex(
+            module.WatchdogError, "generic_router_uid_kill_forbidden"
         ):
-            evidence = module._kill_remaining_router_processes()
-        kill.assert_called_once_with(700, module.signal.SIGKILL)
-        self.assertEqual(1, evidence["kill_count"])
-        self.assertTrue(evidence["processes_absent"])
+            module._kill_remaining_router_processes()
 
     def test_force_stop_retries_and_escalates_until_stopped_is_proven(
         self,
@@ -1986,7 +1976,7 @@ Network interfaces: bridge100
         account = SimpleNamespace(
             pw_uid=454,
             pw_gid=454,
-            pw_dir=str(module.LIMA_HOME),
+            pw_dir=str(module.LIMA_PROCESS_HOME),
             pw_shell="/usr/bin/false",
         )
         metadata = SimpleNamespace(
@@ -2028,19 +2018,16 @@ Network interfaces: bridge100
             ),
             mock.patch.object(
                 module,
-                "_kill_remaining_router_processes",
-                side_effect=[
-                    {"kill_count": 1, "processes_absent": True},
-                    {"kill_count": 0, "processes_absent": True},
-                ],
-            ) as escalate,
-            mock.patch.object(
-                module,
                 "_stopped_status",
                 return_value={},
             ),
             mock.patch.object(
                 module, "_scan_router_uid_processes", return_value=[]
+            ),
+            mock.patch.object(
+                module,
+                "_bootout_router_user_domain",
+                return_value={"raw_uid454_processes_absent": True},
             ),
             mock.patch.object(
                 module.time, "monotonic", side_effect=[0.0, 31.0, 32.0]
@@ -2049,9 +2036,8 @@ Network interfaces: bridge100
         ):
             evidence = module._force_stop()
         self.assertEqual(2, evidence["attempt_count"])
-        self.assertEqual(1, evidence["escalation_kill_count"])
+        self.assertEqual(0, evidence["escalation_kill_count"])
         self.assertTrue(evidence["stopped_proven"])
-        self.assertEqual(2, escalate.call_count)
 
     def test_socket_vmnet_absence_is_only_exact_ps_contract(self) -> None:
         module = _load()

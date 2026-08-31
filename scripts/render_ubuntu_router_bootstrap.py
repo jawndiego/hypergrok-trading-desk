@@ -26,15 +26,19 @@ SOURCE = ROOT / "deploy" / "ubuntu-router" / "lima-bootstrap"
 LOCK_PATH = SOURCE / "bootstrap-lock.json"
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SYSTEM_TOOL_CONTRACT_SHA256 = (
-    "f4e3704a32328b3b7a35d7398e268375e95860bd69c87d5828797f213361ef5b"
+    "639ddd7e14aa2a8ab8d267d4a6c8737744ca1e96f2e256cc5e6537ae21581e8f"
 )
 SYSTEM_TOOL_PATHS = frozenset(
     {
+        "/bin/launchctl",
         "/bin/ls",
         "/bin/ps",
         "/sbin/ifconfig",
         "/sbin/route",
         "/usr/bin/caffeinate",
+        "/usr/bin/codesign",
+        "/usr/bin/dscacheutil",
+        "/usr/bin/dscl",
         "/usr/bin/pkill",
         "/usr/bin/ssh",
         "/usr/bin/sudo",
@@ -54,7 +58,33 @@ DORMANT_APPLE_PROFILES = [
     {"flags": ["BROADCAST", "MULTICAST", "SIMPLEX", "SMART"], "interface": "llw0", "mtu": 1500, "route_class": "multicast_link", "status": None},
 ]
 PLACEHOLDER_RE = re.compile(r"__[A-Z0-9_]+__")
-FINAL_AIRGAP_REVIEW_STATUS = "attended_airgap_final_one_boot_enabled"
+FINAL_AIRGAP_REVIEW_STATUS = (
+    "attended_router_home_migration_only"
+)
+ROUTER_HOME_MIGRATION = {
+    "birth_bug_quarantine_path": "/private/etc/trading-desk/.testnet-foreground-router-birth-v2.uid0-bug-79cf0db",
+    "birth_bug_quarantine_sha256": "dfa88545449855079cb4254709e8af42f95bec5a141a5df1122b79dbe66a9e41",
+    "birth_marker_path": "/private/etc/trading-desk/.testnet-foreground-router-birth-v2",
+    "group_generated_uid": "A9233544-15CC-4EE7-931B-357FF4F8CF98",
+    "migration_receipt_path": "/private/var/db/trading-desk-router-bootstrap-v1/receipts/13-router-operator-home-migration.json",
+    "migration_transaction_path": "/private/var/db/trading-desk-router-bootstrap-v1/quarantine/router-operator-home-migration-transaction.json",
+    "per_user_agent_tools": {
+        "/System/Library/Frameworks/NetFS.framework/Versions/A/XPCServices/PlugInLibraryService.xpc/Contents/MacOS/PlugInLibraryService": {"links": 1, "mode": "00755", "sha256": "7ec0d3e46377a840c2dcd18e44821621a3abf814e94f7d406e1233c83b78a1d7", "size": 302288},
+        "/usr/libexec/containermanagerd": {"links": 1, "mode": "00755", "sha256": "15600d88b5a1e03a532b8f554a88367cc20f3ec7d0ef9eaf9ae7cc57fe97652e", "size": 103312},
+        "/usr/libexec/lsd": {"links": 1, "mode": "00755", "sha256": "0a29d597019c5f3368063f9401e4ecdac60012d44e00bbc17d0ce0cca7c6262a", "size": 105600},
+        "/usr/libexec/secd": {"links": 1, "mode": "00755", "sha256": "5b60ac88c3b1ad47efc37606dbd0cf4b46a3040c4d701edc7cc8708820a7fd75", "size": 8922448},
+        "/usr/libexec/trustd": {"links": 1, "mode": "00755", "sha256": "9bfa3e7afa0567b0298954fb7d1fa295fec00f340d13b230166e18e2c0f41f05", "size": 1532912},
+        "/usr/sbin/cfprefsd": {"links": 1, "mode": "00755", "sha256": "68e67395c84c33cd9e7087ab20286917029a07eec0189b2ff6c6e79c284672f1", "size": 135728},
+        "/usr/sbin/distnoted": {"links": 1, "mode": "00755", "sha256": "1fcd1f4a6cbf830b92aef1866a250a0887a4b9706233868bc9e3a1c770f6abc1", "size": 291072},
+    },
+    "prior_birth_marker_sha256": "46b42f2b276acf5b15559cb02ce4fa5aef537493acda1f53254674e7560aa231",
+    "prior_identity_receipt_sha256": "3fa28e27769770f925615862783edf65f2b748ef8444ed8c83787c21d35b0de6",
+    "prior_library_retained_path": "/private/var/db/trading-desk-router-bootstrap-v1/quarantine/router-operator-pre-home-migration-Library",
+    "source_controller_manifest_sha256": "7e4a16f2622abc4a259c7c0eb117f9ea7d4de1b4cb121297c4fef9af952f3845",
+    "source_home": "/private/var/db/trading-desk-lima",
+    "target_home": "/private/var/db/trading-desk-router-process-home",
+    "user_generated_uid": "5C0E40AA-2FEF-4CAF-AD53-D2A17B7E4C01",
+}
 INTERRUPTED_FIRST_BOOT_RECOVERY = {
     "completing_recovery_controller_manifest_sha256": "a1c5f9b303eec36ff4ba4e607d762bb44dc794c56a3d3ffb0093b2911d17a7fd",
     "failed_controller_manifest_sha256": "b8e7fd49e23fa4b988834764f97ffbb1c1e179c26f491b2f098ba04e887d0f4d",
@@ -174,10 +204,11 @@ def _load_lock(content: bytes) -> dict[str, Any]:
         }
         or value.get("phases")
         != {
-            "airgapped_start_apply_enabled": True,
+            "airgapped_start_apply_enabled": False,
             "guest_package_apply_enabled": False,
             "hardened_recreate_apply_enabled": False,
             "interrupted_first_boot_recovery_enabled": False,
+            "router_operator_home_migration_enabled": True,
             "proven_preboot_recovery_enabled": False,
             "router_activation_apply_enabled": False,
         }
@@ -198,6 +229,8 @@ def _load_lock(content: bytes) -> dict[str, Any]:
         }
     ):
         raise ValueError("bootstrap lock authorization boundary differs")
+    if value.get("router_operator_home_migration") != ROUTER_HOME_MIGRATION:
+        raise ValueError("bootstrap router home migration differs")
     interrupted = value.get("interrupted_first_boot_recovery")
     if (
         interrupted != INTERRUPTED_FIRST_BOOT_RECOVERY
@@ -642,7 +675,7 @@ def render(
         manifest = {
             "apply_enabled": False,
             "airgap_session_id": lock["pins"]["airgap_session_id"],
-            "attended_airgapped_start_apply_enabled": True,
+            "attended_airgapped_start_apply_enabled": False,
             "bundle_kind": "trading-desk.ubuntu-router-airgap-bootstrap",
             "files": hashes,
             "hardened_recreate_apply_enabled": False,
@@ -659,6 +692,7 @@ def render(
             "predecessor_vm_receipt_sha256": lock["pins"][
                 "predecessor_vm_receipt_sha256"
             ],
+            "router_operator_home_migration_apply_enabled": True,
             "schema_version": 1,
             "venue_writes_authorized": False,
             "vm_started": False,
@@ -713,6 +747,7 @@ def verify(
             "mainnet_authorized",
             "network_changes_performed",
             "predecessor_vm_receipt_sha256",
+            "router_operator_home_migration_apply_enabled",
             "schema_version",
             "venue_writes_authorized",
             "vm_started",
@@ -720,9 +755,10 @@ def verify(
         or manifest.get("bundle_kind")
         != "trading-desk.ubuntu-router-airgap-bootstrap"
         or manifest.get("apply_enabled") is not False
-        or manifest.get("attended_airgapped_start_apply_enabled") is not True
+        or manifest.get("attended_airgapped_start_apply_enabled") is not False
         or manifest.get("hardened_recreate_apply_enabled") is not False
         or manifest.get("interrupted_first_boot_recovery_enabled") is not False
+        or manifest.get("router_operator_home_migration_apply_enabled") is not True
         or manifest.get("airgap_session_id") != lock["pins"]["airgap_session_id"]
         or manifest.get("hardened_vm_receipt_sha256")
         != lock["pins"]["hardened_vm_receipt_sha256"]

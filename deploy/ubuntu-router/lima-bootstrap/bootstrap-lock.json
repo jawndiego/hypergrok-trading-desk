@@ -56,10 +56,11 @@
     "transaction_sha256": "e76da7a511d625dc4114cb0696a1ddc2e48029d351a3f8809c266fc7788eb2ef"
   },
   "phases": {
-    "airgapped_start_apply_enabled": true,
+    "airgapped_start_apply_enabled": false,
     "guest_package_apply_enabled": false,
     "hardened_recreate_apply_enabled": false,
     "interrupted_first_boot_recovery_enabled": false,
+    "router_operator_home_migration_enabled": true,
     "router_activation_apply_enabled": false,
     "proven_preboot_recovery_enabled": false
   },
@@ -87,6 +88,30 @@
     },
     "runtime": {"inode": 54411818, "pid": "26009", "pid_inode": 54411821, "pid_sha256": "8d65dfd431c8372588510f701bd6e7449020bc8c6f3af9735253b201b15764fd", "socket_inode": 54411822}
   },
+  "router_operator_home_migration": {
+    "birth_bug_quarantine_path": "/private/etc/trading-desk/.testnet-foreground-router-birth-v2.uid0-bug-79cf0db",
+    "birth_bug_quarantine_sha256": "dfa88545449855079cb4254709e8af42f95bec5a141a5df1122b79dbe66a9e41",
+    "birth_marker_path": "/private/etc/trading-desk/.testnet-foreground-router-birth-v2",
+    "group_generated_uid": "A9233544-15CC-4EE7-931B-357FF4F8CF98",
+    "migration_receipt_path": "/private/var/db/trading-desk-router-bootstrap-v1/receipts/13-router-operator-home-migration.json",
+    "migration_transaction_path": "/private/var/db/trading-desk-router-bootstrap-v1/quarantine/router-operator-home-migration-transaction.json",
+    "per_user_agent_tools": {
+      "/System/Library/Frameworks/NetFS.framework/Versions/A/XPCServices/PlugInLibraryService.xpc/Contents/MacOS/PlugInLibraryService": {"links": 1, "mode": "00755", "sha256": "7ec0d3e46377a840c2dcd18e44821621a3abf814e94f7d406e1233c83b78a1d7", "size": 302288},
+      "/usr/libexec/containermanagerd": {"links": 1, "mode": "00755", "sha256": "15600d88b5a1e03a532b8f554a88367cc20f3ec7d0ef9eaf9ae7cc57fe97652e", "size": 103312},
+      "/usr/libexec/lsd": {"links": 1, "mode": "00755", "sha256": "0a29d597019c5f3368063f9401e4ecdac60012d44e00bbc17d0ce0cca7c6262a", "size": 105600},
+      "/usr/libexec/secd": {"links": 1, "mode": "00755", "sha256": "5b60ac88c3b1ad47efc37606dbd0cf4b46a3040c4d701edc7cc8708820a7fd75", "size": 8922448},
+      "/usr/libexec/trustd": {"links": 1, "mode": "00755", "sha256": "9bfa3e7afa0567b0298954fb7d1fa295fec00f340d13b230166e18e2c0f41f05", "size": 1532912},
+      "/usr/sbin/cfprefsd": {"links": 1, "mode": "00755", "sha256": "68e67395c84c33cd9e7087ab20286917029a07eec0189b2ff6c6e79c284672f1", "size": 135728},
+      "/usr/sbin/distnoted": {"links": 1, "mode": "00755", "sha256": "1fcd1f4a6cbf830b92aef1866a250a0887a4b9706233868bc9e3a1c770f6abc1", "size": 291072}
+    },
+    "prior_birth_marker_sha256": "46b42f2b276acf5b15559cb02ce4fa5aef537493acda1f53254674e7560aa231",
+    "prior_identity_receipt_sha256": "3fa28e27769770f925615862783edf65f2b748ef8444ed8c83787c21d35b0de6",
+    "prior_library_retained_path": "/private/var/db/trading-desk-router-bootstrap-v1/quarantine/router-operator-pre-home-migration-Library",
+    "source_controller_manifest_sha256": "7e4a16f2622abc4a259c7c0eb117f9ea7d4de1b4cb121297c4fef9af952f3845",
+    "source_home": "/private/var/db/trading-desk-lima",
+    "target_home": "/private/var/db/trading-desk-router-process-home",
+    "user_generated_uid": "5C0E40AA-2FEF-4CAF-AD53-D2A17B7E4C01"
+  },
   "pins": {
     "airgap_session_id": "e33dbb26c0b91014f0748dd121d78d66627dd11c1fe8db4af0931d2254865999",
     "hardened_cloud_template_sha256": "ee4d159bae33ba541ef1b32c0f15e96e39c8b251e28b1cebc15738dace2de225",
@@ -107,7 +132,7 @@
     "proven_preboot_recovery_receipt_sha256": "60ccd31bee112bec55f133c9231da14878223e88e1be0ed8f30037f241fa1990",
     "socket_vmnet_sha256": "b8a72a62237312f2f756027dea504a844edeb40014702d4a320292c026d282b0"
   },
-  "review_status": "attended_airgap_final_one_boot_enabled",
+  "review_status": "attended_router_home_migration_only",
   "schema_version": 1,
   "storage": {
     "minimum_free_after_bytes": 5368709120,
@@ -127,6 +152,12 @@
     "flags": 524320
   },
   "system_tools": {
+    "/bin/launchctl": {
+      "links": 1,
+      "mode": "00755",
+      "sha256": "b4dbf509754d8e1117f7851baa93ede75bc75218c48d6ddf19fbb1505d261be7",
+      "size": 363488
+    },
     "/bin/ls": {
       "links": 1,
       "mode": "00755",
@@ -156,6 +187,24 @@
       "mode": "00755",
       "sha256": "fdd1c163779f87d667b6a4049293e165f2d30b716ca8bff9bed3fe54bc6d1d07",
       "size": 135712
+    },
+    "/usr/bin/codesign": {
+      "links": 1,
+      "mode": "00755",
+      "sha256": "844d30a12929b59c9f2215e2a308c3e1db572831a478f35906e452a54025603e",
+      "size": 458576
+    },
+    "/usr/bin/dscacheutil": {
+      "links": 1,
+      "mode": "00755",
+      "sha256": "f8b91c9b7d9716a96a37922264c9ba70f31385be8d99ae63f334d99ec9702dab",
+      "size": 137344
+    },
+    "/usr/bin/dscl": {
+      "links": 1,
+      "mode": "00755",
+      "sha256": "7870543dca5d253c509d2cb6c16893e53b688537b33f81d47d533d8693eb67f4",
+      "size": 423664
     },
     "/usr/bin/pkill": {
       "links": 2,

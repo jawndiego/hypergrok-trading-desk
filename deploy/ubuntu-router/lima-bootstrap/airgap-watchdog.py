@@ -90,6 +90,30 @@ LIMA_HOME = Path("/private/var/db/trading-desk-lima")
 LIMA_PROCESS_HOME = Path("/private/var/db/trading-desk-router-process-home")
 LIMACTL = Path("/opt/trading-desk-router-tools/lima-2.2.0/bin/limactl")
 LIMACTL_SHA256 = "f19a4fca3875e1017a5285672be4a62699c1e55918fb6a7afce86a14199e10d9"
+LAUNCHCTL = Path("/bin/launchctl")
+LAUNCHCTL_SHA256 = "b4dbf509754d8e1117f7851baa93ede75bc75218c48d6ddf19fbb1505d261be7"
+CODESIGN = Path("/usr/bin/codesign")
+CODESIGN_SHA256 = "844d30a12929b59c9f2215e2a308c3e1db572831a478f35906e452a54025603e"
+ROUTER_AGENT_TOOLS = {
+    "/System/Library/Frameworks/NetFS.framework/Versions/A/XPCServices/PlugInLibraryService.xpc/Contents/MacOS/PlugInLibraryService": (302288, "7ec0d3e46377a840c2dcd18e44821621a3abf814e94f7d406e1233c83b78a1d7"),
+    "/usr/libexec/containermanagerd": (103312, "15600d88b5a1e03a532b8f554a88367cc20f3ec7d0ef9eaf9ae7cc57fe97652e"),
+    "/usr/libexec/lsd": (105600, "0a29d597019c5f3368063f9401e4ecdac60012d44e00bbc17d0ce0cca7c6262a"),
+    "/usr/libexec/secd": (8922448, "5b60ac88c3b1ad47efc37606dbd0cf4b46a3040c4d701edc7cc8708820a7fd75"),
+    "/usr/libexec/trustd": (1532912, "9bfa3e7afa0567b0298954fb7d1fa295fec00f340d13b230166e18e2c0f41f05"),
+    "/usr/sbin/cfprefsd": (135728, "68e67395c84c33cd9e7087ab20286917029a07eec0189b2ff6c6e79c284672f1"),
+    "/usr/sbin/distnoted": (291072, "1fcd1f4a6cbf830b92aef1866a250a0887a4b9706233868bc9e3a1c770f6abc1"),
+}
+ROUTER_AGENT_COMMANDS = frozenset(
+    {
+        "/usr/libexec/lsd",
+        "/usr/sbin/cfprefsd agent",
+        "/usr/libexec/trustd --agent",
+        "/usr/sbin/distnoted agent",
+        "/usr/libexec/secd",
+        "/System/Library/Frameworks/NetFS.framework/Versions/A/XPCServices/PlugInLibraryService.xpc/Contents/MacOS/PlugInLibraryService",
+        "/usr/libexec/containermanagerd --runmode=agent --user-container-mode=current --bundle-container-mode=proxy --system-container-mode=none",
+    }
+)
 SOCKET_VMNET = Path("/opt/socket_vmnet/bin/socket_vmnet")
 SOCKET_VMNET_SHA256 = "b8a72a62237312f2f756027dea504a844edeb40014702d4a320292c026d282b0"
 SOCKET_VMNET_ARGV = (
@@ -2592,10 +2616,14 @@ def _kill_lima_start_sessions() -> dict[str, Any]:
     raise WatchdogError("start_process_kill_timeout")
 
 
-def _scan_router_uid_processes() -> list[dict[str, int]]:
+def _scan_router_uid_process_records() -> list[dict[str, Any]]:
     try:
         result = subprocess.run(
-            ["/bin/ps", "-axo", "pid=,pgid=,uid=,comm="],
+            [
+                "/bin/ps",
+                "-axo",
+                "pid=,ppid=,uid=,gid=,pgid=,ucomm=,command=",
+            ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -2619,58 +2647,178 @@ def _scan_router_uid_processes() -> list[dict[str, int]]:
         content = result.stdout.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
         raise WatchdogError("router_process_inventory_shape") from error
-    processes: list[dict[str, int]] = []
+    processes: list[dict[str, Any]] = []
     for line in content.splitlines():
-        fields = line.split(None, 3)
+        fields = line.split(None, 6)
         if (
-            len(fields) != 4
+            len(fields) != 7
             or not fields[0].isdigit()
             or not fields[1].isdigit()
             or not _valid_ps_uid(fields[2])
-            or not fields[3]
+            or not _valid_ps_uid(fields[3])
+            or not fields[4].isdigit()
+            or not fields[5]
+            or not fields[6]
         ):
             raise WatchdogError("router_process_inventory_shape")
-        pid, pgid, uid = (int(value) for value in fields[:3])
+        pid, ppid, uid, gid, pgid = (int(value) for value in fields[:5])
         if uid == ROUTER_UID:
-            processes.append({"pgid": pgid, "pid": pid})
+            processes.append(
+                {
+                    "command": fields[6],
+                    "gid": gid,
+                    "pgid": pgid,
+                    "pid": pid,
+                    "ppid": ppid,
+                    "ucomm": fields[5],
+                    "uid": uid,
+                }
+            )
+    return sorted(processes, key=lambda value: value["pid"])
+
+
+def _scan_router_uid_processes() -> list[dict[str, int]]:
+    processes = [
+        {"pgid": int(record["pgid"]), "pid": int(record["pid"])}
+        for record in _scan_router_uid_process_records()
+    ]
     return processes
 
 
 def _kill_remaining_router_processes() -> dict[str, Any]:
-    evidence: dict[str, Any] = {"kill_count": 0, "processes_absent": False}
-    for process in _scan_router_uid_processes():
-        pid = process["pid"]
-        if pid <= 1:
-            raise WatchdogError("router_process_pid")
-        try:
-            result = subprocess.run(
-                ["/bin/ps", "-p", str(pid), "-o", "uid="],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env={
-                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                    "LANG": "C",
-                    "LC_ALL": "C",
-                },
-                timeout=2,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError) as error:
-            raise WatchdogError("router_process_revalidation_failed") from error
-        if result.returncode == 1 and not result.stdout and not result.stderr:
-            continue
-        if (
-            result.returncode != 0
-            or result.stderr
-            or result.stdout.strip() != str(ROUTER_UID).encode("ascii")
-        ):
-            raise WatchdogError("router_process_revalidation_failed")
-        os.kill(pid, signal.SIGKILL)
-        evidence["kill_count"] += 1
-    time.sleep(0.05)
-    evidence["processes_absent"] = not _scan_router_uid_processes()
-    return evidence
+    raise WatchdogError("generic_router_uid_kill_forbidden")
+
+
+def _verify_pinned_apple_tool(
+    path: Path, *, size: int, digest: str, verify_signature: bool
+) -> None:
+    metadata = path.stat()
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or path.resolve(strict=True) != path
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o755
+        or metadata.st_nlink != 1
+        or metadata.st_size != size
+        or metadata.st_dev != 16777234
+        or getattr(metadata, "st_flags", None) != 524320
+        or _sha256_file(path) != digest
+    ):
+        raise WatchdogError("router_quiesce_tool_drift")
+    _assert_no_named_acl(path)
+    if verify_signature:
+        result = subprocess.run(
+            [
+                str(CODESIGN),
+                "--verify",
+                "--strict",
+                "--test-requirement",
+                "=anchor apple",
+                str(path),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            timeout=3,
+            check=False,
+        )
+        if result.returncode != 0 or result.stdout or result.stderr:
+            raise WatchdogError("router_quiesce_tool_signature")
+
+
+def _assert_router_agent_subset(
+    records: list[dict[str, Any]], *, live: bool
+) -> None:
+    commands = [record.get("command") for record in records]
+    if (
+        len(commands) != len(set(commands))
+        or not set(commands).issubset(ROUTER_AGENT_COMMANDS)
+        or any(
+            record.get("uid") != ROUTER_UID
+            or record.get("gid") != ROUTER_GID
+            or record.get("ppid") != 1
+            or record.get("pgid") != record.get("pid")
+            or type(record.get("pid")) is not int
+            or record["pid"] <= 1
+            for record in records
+        )
+    ):
+        raise WatchdogError("router_agent_profile_drift")
+    if not live:
+        return
+    _verify_pinned_apple_tool(
+        CODESIGN,
+        size=458576,
+        digest=CODESIGN_SHA256,
+        verify_signature=False,
+    )
+    observed = {record["pid"]: record for record in _scan_router_uid_process_records()}
+    for record in records:
+        executable = record["command"].split(" ", 1)[0]
+        if observed.get(record["pid"]) != record or _proc_pid_path(record["pid"]) != executable:
+            raise WatchdogError("router_agent_process_changed")
+        size, digest = ROUTER_AGENT_TOOLS[executable]
+        _verify_pinned_apple_tool(
+            Path(executable), size=size, digest=digest, verify_signature=True
+        )
+        if _proc_pid_path(record["pid"]) != executable:
+            raise WatchdogError("router_agent_process_changed")
+
+
+def _bootout_router_user_domain() -> dict[str, Any]:
+    _verify_pinned_apple_tool(
+        CODESIGN,
+        size=458576,
+        digest=CODESIGN_SHA256,
+        verify_signature=False,
+    )
+    _verify_pinned_apple_tool(
+        LAUNCHCTL,
+        size=363488,
+        digest=LAUNCHCTL_SHA256,
+        verify_signature=True,
+    )
+    attempts: list[dict[str, Any]] = []
+    deadline = time.monotonic() + 10
+    for _attempt in range(2):
+        initial = _scan_router_uid_process_records()
+        _assert_router_agent_subset(initial, live=True)
+        result = subprocess.run(
+            [str(LAUNCHCTL), "bootout", "user/454"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            timeout=3,
+            check=False,
+        )
+        if len(result.stdout) > 64 * 1024 or len(result.stderr) > 64 * 1024:
+            raise WatchdogError("router_domain_bootout_bound")
+        if result.returncode != 0 or result.stdout or result.stderr:
+            raise WatchdogError("router_domain_bootout_result")
+        attempts.append(
+            {
+                "idempotent_success": True,
+                "returncode": result.returncode,
+                "stderr_sha256": _sha256_bytes(result.stderr),
+                "stdout_sha256": _sha256_bytes(result.stdout),
+            }
+        )
+        stable = 0
+        while stable < 2:
+            records = _scan_router_uid_process_records()
+            _assert_router_agent_subset(records, live=False)
+            stable = stable + 1 if not records else 0
+            if time.monotonic() >= deadline:
+                raise WatchdogError("router_domain_quiesce_timeout")
+            if stable < 2:
+                time.sleep(0.05)
+    if _scan_router_uid_process_records():
+        raise WatchdogError("router_domain_quiesce_race")
+    return {"attempts": attempts, "raw_uid454_processes_absent": True}
 
 
 def _stopped_status(content: bytes) -> dict[str, Any]:
@@ -2732,15 +2880,15 @@ def _force_stop() -> dict[str, Any]:
         "stdout_sha256": None,
         "stderr_sha256": None,
         "stopped_proven": False,
+        "user_domain_bootout": None,
     }
-    escalation_at = time.monotonic() + 30.0
     while True:
         try:
             account = pwd.getpwnam(ROUTER_ACCOUNT)
             if (
                 account.pw_uid != ROUTER_UID
                 or account.pw_gid != ROUTER_GID
-                or account.pw_dir != str(LIMA_HOME)
+                or account.pw_dir != str(LIMA_PROCESS_HOME)
                 or account.pw_shell != "/usr/bin/false"
                 or set(os.getgrouplist(ROUTER_ACCOUNT, ROUTER_GID))
                 != ROUTER_GROUPS
@@ -2775,11 +2923,6 @@ def _force_stop() -> dict[str, Any]:
             ]
             evidence["invoked"] = True
             evidence["attempt_count"] += 1
-            if time.monotonic() >= escalation_at:
-                escalation = _kill_remaining_router_processes()
-                evidence["escalation_kill_count"] += escalation[
-                    "kill_count"
-                ]
             start_cleanup = _kill_lima_start_sessions()
             evidence["start_process_kill_count"] += start_cleanup["kill_count"]
             evidence["start_processes_killed_sha256"].extend(
@@ -2849,6 +2992,7 @@ def _force_stop() -> dict[str, Any]:
                     evidence["start_processes_absent"] = final_cleanup[
                         "no_start_process_proven"
                     ]
+                    evidence["user_domain_bootout"] = _bootout_router_user_domain()
                     router_processes = _scan_router_uid_processes()
                     evidence["router_process_count_last"] = len(
                         router_processes

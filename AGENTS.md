@@ -244,8 +244,12 @@ This repository builds an agent-runtime-neutral trading research and execution h
   none of those guest controls exists until first boot. After the interrupted
   instance was durably quarantined, receipt 08 for the fresh stopped replacement
   is `e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c`.
-  The final continuation disables every recreate/recovery dispatch and exposes
-  exactly one local-Terminal-only attended start:
+  A migration-only continuation currently disables every VM check/start and
+  recreate/recovery dispatch. It moves UID 454's Directory Service home to the
+  verified process-home path, quiesces its Apple per-user domain without generic
+  UID kills, and retains the accidental new `LIMA_HOME/Library`. Only a later
+  successor that pins the migration receipt may expose exactly one
+  local-Terminal-only attended start:
   it requires every reviewed network service disabled and physical interface
   inactive, captures the exact offline and host-only topologies, arms an
   independent watchdog before the single start, verifies the guest only over
