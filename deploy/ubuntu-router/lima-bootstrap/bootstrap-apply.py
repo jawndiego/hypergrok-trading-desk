@@ -68,6 +68,75 @@ SYSTEM_TOOL_PATHS = frozenset(
     }
 )
 SYSTEM_TOOL_SPEC_KEYS = frozenset({"links", "mode", "sha256", "size"})
+_CAPTURE_STAGES = ("core", "sample")
+_CAPTURE_CATEGORIES = (
+    "forward4", "forward6", "global6", "hardware", "ifconfig", "nwi",
+    "processes", "routes4", "routes6", "service", "services", "vpn", "wifi",
+)
+_CAPTURE_SUFFIXES = (
+    "command_encoding", "command_failed", "command_output_bound", "command_spawn",
+    "command_timeout", "process_descendant", "process_descendant_group_extinction_timeout",
+    "process_descendant_kill", "process_descendant_probe", "process_group",
+    "process_group_extinction_timeout", "process_kill", "process_probe",
+    "process_reap_timeout", "total_timeout",
+)
+HOST_ONLY_CAPTURE_REASON_ALLOWLIST = frozenset(
+    f"capture_{stage}_{category}_{suffix}"
+    for stage in _CAPTURE_STAGES
+    for category in _CAPTURE_CATEGORIES
+    for suffix in _CAPTURE_SUFFIXES
+) | frozenset(
+    {
+        "acl_probe_failed", "base_bridge_not_dormant",
+        "base_bridge_route_present", "base_capture_candidate_drift",
+        "base_capture_json", "base_capture_profile_drift",
+        "base_capture_schema", "capture_command_class",
+        "capture_default_route_present", "capture_hardware_profile_drift",
+        "capture_host_identity_drift", "capture_network_services_not_disabled",
+        "default_route_present", "duplicate_json_key",
+        "dormant_apple_interface_drift", "dormant_apple_route_drift",
+        "dormant_apple_route_duplicate", "dormant_apple_routes_incomplete",
+        "fixed_document_differs", "fixed_document_path",
+        "fixed_document_pending_differs", "full_route_topology_drift",
+        "global_ipv6_probe_failed", "global_ipv6_probe_shape",
+        "global_ipv6_route_present", "global_ipv6_selects_utun",
+        "hardware_interface_active", "hardware_inventory_drift",
+        "hardware_port_duplicate", "hardware_port_inventory",
+        "hardware_port_shape", "hardware_port_value",
+        "hardware_profile_dormant_apple_interfaces",
+        "hardware_profile_host", "hardware_profile_host_only",
+        "hardware_profile_inert_utun_overlap", "hardware_profile_json",
+        "hardware_profile_passive_interface_duplicate",
+        "hardware_profile_passive_interfaces", "hardware_profile_port_duplicate",
+        "hardware_profile_port_shape", "hardware_profile_ports",
+        "hardware_profile_schema", "hardware_profile_services",
+        "hardware_profile_wifi_classification",
+        "host_only_capture_address", "host_only_capture_base_drift",
+        "host_only_capture_default_route", "host_only_capture_ipv6",
+        "host_only_capture_not_observed", "host_only_interface_drift",
+        "host_only_not_locked", "host_only_phase_tuple_drift",
+        "inactive_interface_route_present", "inert_utun_default_routes_differ",
+        "inert_utun_interface_drift", "inert_utun_route_drift",
+        "interface_duplicate", "interface_ipv6_prefix_absent",
+        "interface_ipv6_prefix_invalid", "internal_failure",
+        "internet_sharing_enabled", "ip_forwarding_enabled",
+        "loopback_absent", "loopback_interface_drift", "named_acl_present",
+        "network_phase_tuple_drift", "network_service_enabled",
+        "network_service_inventory", "network_service_inventory_drift",
+        "network_service_name", "nwi_host_only_shape", "nwi_output_shape",
+        "nwi_reachable_interface_present", "passive_interface_drift",
+        "pending_document_differs", "pending_document_metadata",
+        "process_inventory_shape", "root_file_changed", "root_file_metadata",
+        "route_table_interface_shape", "route_table_shape",
+        "socket_vmnet_binary", "socket_vmnet_executable", "socket_vmnet_pid",
+        "socket_vmnet_probe_failed", "socket_vmnet_process_absent",
+        "socket_vmnet_process_changed", "socket_vmnet_process_identity",
+        "socket_vmnet_process_shape", "state_directory_metadata",
+        "unexpected_active_interface", "unexpected_utun_interface",
+        "unexpected_utun_route", "unsafe_root_file", "unsafe_state_directory",
+        "vpn_connected", "wifi_power_enabled", "zero_length_result_write",
+    }
+)
 MAC_RE = re.compile(rb"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}")
 UUID_RE = re.compile(
     r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}"
@@ -176,6 +245,19 @@ class BootstrapError(RuntimeError):
 
 
 CAPTURE_WATCHDOG_TIMEOUT_SECONDS = 50.0
+
+
+def _allowlisted_capture_reason(value: str) -> str:
+    return value if value in HOST_ONLY_CAPTURE_REASON_ALLOWLIST else "redacted"
+
+
+def _capture_reason_from_error(error: BaseException) -> str:
+    if type(error) is not BootstrapError:
+        return "redacted"
+    match = re.fullmatch(
+        r"air-gap capture-host-only failed reason=([a-z0-9_]+)", str(error)
+    )
+    return _allowlisted_capture_reason(match.group(1) if match else "redacted")
 
 
 def _valid_ps_uid(value: str) -> bool:
@@ -3178,20 +3260,128 @@ def _verify_stopped_after_airgap(args: argparse.Namespace) -> int:
     _assert_attended_root_tty()
     _assert_host_identity(lock)
     _require_existing_state(lock)
-    limactl = _limactl(lock)
-    _status(lock, limactl)
-    if _router_uid_processes():
-        raise BootstrapError("router UID still has a live process")
-    _assert_no_vm_process()
-    for live in (
-        Path(lock["paths"]["vmnet_sudoers"]),
-        Path(lock["paths"]["vmnet_runtime"]),
+    attempt_id = lock["pins"]["airgap_session_id"]
+    incident_content = _read_bound(
+        Path(lock["paths"]["hardened_vm_receipt"]).parent
+        / f"09-airgap-first-boot-incident-{attempt_id}.json",
+        uid=0,
+        gid=0,
+        mode=0o400,
+        maximum=4096,
+    )
+    incident = _load_json_bytes(incident_content, "current failed incident")
+    if (
+        set(incident)
+        != {
+            "attempt_id", "automatic_retry_authorized", "disposition", "error_type",
+            "failure_stage", "kind", "mainnet_authorized", "phase", "schema_version",
+            "start_invoked", "temporary_vmnet_artifacts", "venue_writes_authorized",
+        }
+        or incident.get("attempt_id") != attempt_id
+        or incident.get("kind") != "trading-desk.router-bootstrap.airgap-first-boot-incident"
+        or incident.get("schema_version") != 1
+        or incident.get("phase") != "airgap-first-boot"
+        or incident.get("disposition") != "FAILED"
+        or incident.get("error_type") != "BootstrapError"
+        or incident.get("failure_stage") != "host_only_capture"
+        or incident.get("automatic_retry_authorized") is not False
+        or incident.get("start_invoked") is not False
+        or incident.get("temporary_vmnet_artifacts") is not None
+        or incident.get("mainnet_authorized") is not False
+        or incident.get("venue_writes_authorized") is not False
     ):
-        if live.exists() or live.is_symlink():
-            raise BootstrapError("temporary VMNet authority remains live")
+        raise BootstrapError("current failed incident differs")
+    limactl = _limactl(lock)
+    def prove_stopped() -> None:
+        _status(lock, limactl)
+        _assert_no_airgap_watchdog_process()
+        if _router_uid_processes():
+            raise BootstrapError("router UID still has a live process")
+        _assert_no_vm_process()
+
+    sudoers = Path(lock["paths"]["vmnet_sudoers"])
+    runtime = Path(lock["paths"]["vmnet_runtime"])
+    inactive_residual = runtime.exists() or runtime.is_symlink()
+
+    def inspect_inactive_residual() -> tuple[Any, ...] | None:
+        prove_stopped()
+        if sudoers.exists() or sudoers.is_symlink():
+            raise BootstrapError("temporary VMNet sudo authority remains live")
+        if not inactive_residual:
+            if runtime.exists() or runtime.is_symlink():
+                raise BootstrapError("VMNet runtime appeared during stopped proof")
+            return None
+        runtime_metadata = _assert_real(
+            runtime, kind="directory", uid=0, gid=0, mode=0o755
+        )
+        _verify_recovery_xattrs(runtime, "runtime")
+        socket_path = runtime / "socket_vmnet.td-router-ingress"
+        pid_path = runtime / "td-router-ingress_socket_vmnet.pid"
+        if {path.name for path in runtime.iterdir()} != {socket_path.name, pid_path.name}:
+            raise BootstrapError("inactive VMNet residual set differs")
+        socket_metadata = socket_path.lstat()
+        _no_named_acl(socket_path)
+        pid_metadata = pid_path.lstat()
+        _no_named_acl(pid_path)
+        pid_content = _read_bound(
+            pid_path, uid=0, gid=0, mode=0o600, maximum=32
+        )
+        _verify_recovery_xattrs(pid_path, "pidfile")
+        if (
+            socket_path.is_symlink()
+            or not stat.S_ISSOCK(socket_metadata.st_mode)
+            or socket_metadata.st_uid != 0
+            or socket_metadata.st_gid != 454
+            or stat.S_IMODE(socket_metadata.st_mode) != 0o770
+            or socket_metadata.st_nlink != 1
+            or socket_metadata.st_size != 0
+            or not pid_content.isdigit()
+        ):
+            raise BootstrapError("inactive VMNet residual differs")
+        stale_pid = int(pid_content)
+        if stale_pid <= 1:
+            raise BootstrapError("inactive VMNet residual PID is unsafe")
+        try:
+            os.kill(stale_pid, 0)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            raise BootstrapError(
+                "inactive VMNet residual PID probe failed"
+            ) from None
+        else:
+            raise BootstrapError("inactive VMNet residual PID is not strictly absent")
+        return (
+            runtime_metadata.st_dev, runtime_metadata.st_ino,
+            runtime_metadata.st_uid, runtime_metadata.st_gid,
+            stat.S_IMODE(runtime_metadata.st_mode), runtime_metadata.st_nlink,
+            tuple(sorted(path.name for path in runtime.iterdir())),
+            socket_metadata.st_dev, socket_metadata.st_ino,
+            socket_metadata.st_uid, socket_metadata.st_gid,
+            stat.S_IMODE(socket_metadata.st_mode), socket_metadata.st_nlink,
+            socket_metadata.st_size,
+            pid_metadata.st_dev, pid_metadata.st_ino,
+            pid_metadata.st_uid, pid_metadata.st_gid,
+            stat.S_IMODE(pid_metadata.st_mode), pid_metadata.st_nlink,
+            pid_metadata.st_size, _sha256_bytes(pid_content),
+        )
+
+    before_identity = inspect_inactive_residual()
+    after_identity = inspect_inactive_residual()
+    if before_identity != after_identity:
+        raise BootstrapError("inactive VMNet residual changed during proof")
+    prove_stopped()
+    if sudoers.exists() or sudoers.is_symlink():
+        raise BootstrapError("temporary VMNet sudo authority appeared during proof")
+    if inactive_residual != (runtime.exists() or runtime.is_symlink()):
+        raise BootstrapError("VMNet runtime presence changed during proof")
     print("vm_status=Stopped")
     print("router_uid_processes=absent")
-    print("temporary_vmnet_authority=absent")
+    print(f"inactive_residual={str(inactive_residual).lower()}")
+    print(
+        "temporary_vmnet_authority="
+        + ("inactive_residual" if inactive_residual else "absent")
+    )
     print("host_uplink_restore_safe_while_vm_stopped=true")
     print("guest_network_reconnect_authorized=false")
     return 0
@@ -3628,6 +3818,9 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
         print("venue_writes_authorized=false")
         return 0
     except BaseException as error:
+        capture_reason = "redacted"
+        if failure_stage == "host_only_capture":
+            capture_reason = _capture_reason_from_error(error)
         if watchdog_write_fd is not None:
             try:
                 os.close(watchdog_write_fd)
@@ -3676,8 +3869,8 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
         except BaseException:
             pass
         raise BootstrapError(
-            "air-gapped first boot failed; keep uplinks disabled and review the retained incident"
-        ) from error
+            f"host_only_capture_reason={capture_reason}"
+        ) from None
     finally:
         _stop_caffeinate(caffeinate)
 
@@ -4028,7 +4221,22 @@ def main(argv: list[str] | None = None) -> int:
             return _recover_failed_prestart(args)
         raise BootstrapError("unknown bootstrap phase")
     except (BootstrapError, OSError, KeyError, TypeError, ValueError, plistlib.InvalidFileException) as error:
-        print(f"router_bootstrap_failed: {error}", file=sys.stderr)
+        if args.phase == "apply-airgapped-first-boot":
+            match = re.fullmatch(
+                r"host_only_capture_reason=([a-z0-9_]+)",
+                str(error),
+            )
+            reason = (
+                _allowlisted_capture_reason(match.group(1))
+                if match
+                else "redacted"
+            )
+            print(
+                f"router_bootstrap_failed: host_only_capture_reason={reason}",
+                file=sys.stderr,
+            )
+        else:
+            print(f"router_bootstrap_failed: {error}", file=sys.stderr)
         return 2
 
 

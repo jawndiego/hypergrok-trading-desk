@@ -350,6 +350,30 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         for forbidden in ("apply-guest-package", "apply-router"):
             self.assertNotIn(forbidden, launcher)
 
+    def test_host_only_failure_reason_is_exactly_allowlisted(self) -> None:
+        source = HOST_APPLY.read_text(encoding="utf-8")
+        controller = _load_module(
+            HOST_APPLY, "bootstrap_apply_capture_reason_test"
+        )
+        for reason in (
+            "network_phase_tuple_drift",
+            "capture_core_nwi_command_timeout",
+            "capture_sample_service_process_descendant",
+        ):
+            self.assertIn(reason, controller.HOST_ONLY_CAPTURE_REASON_ALLOWLIST)
+            error = controller.BootstrapError(
+                f"air-gap capture-host-only failed reason={reason}"
+            )
+            self.assertEqual(reason, controller._capture_reason_from_error(error))
+        for error in (
+            controller.BootstrapError(
+                "air-gap capture-host-only failed reason=not_reviewed"
+            ),
+            controller.BootstrapError("secret/path"),
+            ValueError("air-gap capture-host-only failed reason=network_phase_tuple_drift"),
+        ):
+            self.assertEqual("redacted", controller._capture_reason_from_error(error))
+
         recovery_source = inspect.getsource(
             _load_module(HOST_APPLY, "bootstrap_apply_recovery_static_test")._recover_failed_prestart
         )
@@ -729,8 +753,32 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             root = Path(directory).resolve()
             sudoers = root / "sudoers"
             runtime = root / "runtime"
-            lock = {"paths": {"vmnet_runtime": str(runtime), "vmnet_sudoers": str(sudoers)}}
+            session = "a" * 64
+            lock = {
+                "paths": {
+                    "hardened_vm_receipt": str(root / "receipts" / "08.json"),
+                    "vmnet_runtime": str(runtime),
+                    "vmnet_sudoers": str(sudoers),
+                },
+                "pins": {"airgap_session_id": session},
+            }
             args = SimpleNamespace(expected_controller_manifest_sha256="a" * 64)
+            incident = controller._canonical_json(
+                {
+                    "attempt_id": session,
+                    "automatic_retry_authorized": False,
+                    "disposition": "FAILED",
+                    "error_type": "BootstrapError",
+                    "failure_stage": "host_only_capture",
+                    "kind": "trading-desk.router-bootstrap.airgap-first-boot-incident",
+                    "mainnet_authorized": False,
+                    "phase": "airgap-first-boot",
+                    "schema_version": 1,
+                    "start_invoked": False,
+                    "temporary_vmnet_artifacts": None,
+                    "venue_writes_authorized": False,
+                }
+            )
 
             initialize = mock.Mock(side_effect=AssertionError("mutating initialize called"))
             write_exact = mock.Mock(side_effect=AssertionError("write called"))
@@ -743,10 +791,12 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
                 "_assert_attended_root_tty": mock.Mock(return_value={}),
                 "_assert_host_identity": mock.Mock(return_value=None),
                 "_assert_no_vm_process": no_vm,
+                "_assert_no_airgap_watchdog_process": mock.Mock(return_value=None),
                 "_initialize": initialize,
                 "_limactl": mock.Mock(return_value=Path("/limactl")),
                 "_load_lock": mock.Mock(return_value=lock),
                 "_require_existing_state": mock.Mock(return_value={"lock_descriptor": 9}),
+                "_read_bound": mock.Mock(return_value=incident),
                 "_router_uid_processes": processes,
                 "_status": status,
                 "_verify_bundle": mock.Mock(return_value={}),
@@ -778,9 +828,142 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
 
             runtime.mkdir()
             with mock.patch.dict(controller.__dict__, patches), self.assertRaisesRegex(
-                controller.BootstrapError, "temporary VMNet authority remains live"
+                controller.BootstrapError, "path metadata differs"
             ):
                 controller._verify_stopped_after_airgap(args)
+
+            verifier_source = inspect.getsource(
+                controller._verify_stopped_after_airgap
+            )
+            self.assertGreaterEqual(verifier_source.count("prove_stopped()"), 3)
+            for required in (
+                "_no_named_acl(pid_path)",
+                '_verify_recovery_xattrs(pid_path, "pidfile")',
+                "os.kill(stale_pid, 0)",
+                "temporary VMNet sudo authority appeared during proof",
+                "VMNet runtime presence changed during proof",
+            ):
+                self.assertIn(required, verifier_source)
+
+    def test_stopped_verifier_accepts_only_stable_inactive_vmnet_residual(self) -> None:
+        controller = _load_module(
+            HOST_APPLY, "bootstrap_apply_inactive_residual_test"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            runtime = root / "runtime"
+            runtime.mkdir(mode=0o755)
+            socket_path = runtime / "socket_vmnet.td-router-ingress"
+            pid_path = runtime / "td-router-ingress_socket_vmnet.pid"
+            socket_path.touch()
+            pid_content = b"999999"
+            pid_path.write_bytes(pid_content)
+            session = "a" * 64
+            incident = controller._canonical_json(
+                {
+                    "attempt_id": session,
+                    "automatic_retry_authorized": False,
+                    "disposition": "FAILED",
+                    "error_type": "BootstrapError",
+                    "failure_stage": "host_only_capture",
+                    "kind": "trading-desk.router-bootstrap.airgap-first-boot-incident",
+                    "mainnet_authorized": False,
+                    "phase": "airgap-first-boot",
+                    "schema_version": 1,
+                    "start_invoked": False,
+                    "temporary_vmnet_artifacts": None,
+                    "venue_writes_authorized": False,
+                }
+            )
+            lock = {
+                "paths": {
+                    "hardened_vm_receipt": str(root / "receipts" / "08.json"),
+                    "vmnet_runtime": str(runtime),
+                    "vmnet_sudoers": str(root / "sudoers"),
+                },
+                "pins": {"airgap_session_id": session},
+            }
+            runtime_metadata = SimpleNamespace(
+                st_dev=7,
+                st_ino=11,
+                st_uid=0,
+                st_gid=0,
+                st_mode=stat.S_IFDIR | 0o755,
+                st_nlink=4,
+            )
+            socket_metadata = SimpleNamespace(
+                st_dev=7,
+                st_ino=12,
+                st_uid=0,
+                st_gid=454,
+                st_mode=stat.S_IFSOCK | 0o770,
+                st_nlink=1,
+                st_size=0,
+            )
+            pid_metadata = SimpleNamespace(
+                st_dev=7,
+                st_ino=13,
+                st_uid=0,
+                st_gid=0,
+                st_mode=stat.S_IFREG | 0o600,
+                st_nlink=1,
+                st_size=len(pid_content),
+            )
+            original_stat = Path.stat
+            original_lstat = Path.lstat
+
+            def fake_stat(path: Path, *args, **kwargs):
+                if path == runtime:
+                    return runtime_metadata
+                return original_stat(path, *args, **kwargs)
+
+            def fake_lstat(path: Path):
+                if path == socket_path:
+                    return socket_metadata
+                if path == pid_path:
+                    return pid_metadata
+                return original_lstat(path)
+
+            def read_bound(path: Path, **_kwargs):
+                return pid_content if path == pid_path else incident
+
+            patches = {
+                "_assert_attended_root_tty": mock.Mock(return_value={}),
+                "_assert_host_identity": mock.Mock(return_value=None),
+                "_assert_no_airgap_watchdog_process": mock.Mock(return_value=None),
+                "_assert_no_vm_process": mock.Mock(return_value=None),
+                "_assert_real": mock.Mock(return_value=runtime_metadata),
+                "_limactl": mock.Mock(return_value=Path("/limactl")),
+                "_load_lock": mock.Mock(return_value=lock),
+                "_no_named_acl": mock.Mock(return_value=None),
+                "_read_bound": mock.Mock(side_effect=read_bound),
+                "_require_existing_state": mock.Mock(return_value={}),
+                "_router_uid_processes": mock.Mock(return_value=[]),
+                "_status": mock.Mock(return_value={}),
+                "_verify_bundle": mock.Mock(return_value={}),
+                "_verify_recovery_xattrs": mock.Mock(return_value=None),
+                "_verify_system_tools": mock.Mock(return_value=None),
+            }
+            with (
+                mock.patch.dict(controller.__dict__, patches),
+                mock.patch.object(Path, "stat", fake_stat),
+                mock.patch.object(Path, "lstat", fake_lstat),
+                mock.patch.object(controller.os, "kill", side_effect=ProcessLookupError),
+                redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(
+                    0,
+                    controller._verify_stopped_after_airgap(
+                        SimpleNamespace(expected_controller_manifest_sha256="b" * 64)
+                    ),
+                )
+            self.assertIn("inactive_residual=true", output.getvalue())
+            self.assertIn(
+                "host_uplink_restore_safe_while_vm_stopped=true",
+                output.getvalue(),
+            )
+            self.assertTrue(socket_path.exists())
+            self.assertEqual(pid_content, pid_path.read_bytes())
 
     def test_stopped_instance_verifier_binds_plan_cloud_and_identifier(self) -> None:
         controller = _load_module(HOST_APPLY, "bootstrap_apply_instance_test")

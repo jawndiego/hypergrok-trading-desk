@@ -352,8 +352,13 @@ If the apply phase fails, leave the physical uplinks disconnected and every
 network service disabled. The sealed `verify-stopped-after-airgap` recovery
 phase performs no start and authorizes host reconnection only after proving the
 instance is exactly `Stopped`, UID 454 has no process, no VM/socket process is
-live, and the temporary socket_vmnet runtime and sudoers file are absent. Do
-not reconnect unless that phase prints the same literal safe-to-restore line.
+live, and the temporary sudoers file is absent. It may retain an exact inert
+socket/PID directory, but only for a current-session prestart incident after
+two complete metadata/ACL/xattr/PID-absence inspections and three stopped/all-
+UID process proofs. That exception authorizes only Mac uplink restoration, not
+guest reconnect or retry. Do not reconnect unless the phase prints the same
+literal safe-to-restore line. A host-only capture failure exposes only one
+fixed allowlisted diagnostic code; arbitrary exception text remains redacted.
 
 A failure before `limactl start` uses the narrower
 `recover-failed-prestart` transaction. The renderer seals a reviewed,
