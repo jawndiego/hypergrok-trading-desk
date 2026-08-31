@@ -263,6 +263,39 @@ class AirgapWatchdogTests(unittest.TestCase):
             )
         )
 
+    def test_host_only_scoped_default_is_exact_and_ipv4_only(self) -> None:
+        module = _load()
+        _lock, outputs = _fixtures(module)
+        exact = "default link#20 UCSIg bridge100 !\n"
+        _, default_present = module._canonical_routes(outputs["routes4"] + exact)
+        self.assertTrue(default_present)
+        accepted_hash, default_present = module._canonical_routes(
+            outputs["routes4"] + exact, allow_host_only=True
+        )
+        self.assertFalse(default_present)
+        self.assertRegex(accepted_hash, r"^[0-9a-f]{64}$")
+
+        for changed in (
+            "default link#x UCSIg bridge100 !\n",
+            "default link#20 UGSIg bridge100 !\n",
+            "default link#20 UCSIg bridge101 !\n",
+            "default link#20 UCSIg bridge100\n",
+            "default link#20 UCSIg bridge100 9\n",
+            "default link#20 UCSIg bridge100 ! extra\n",
+        ):
+            with self.subTest(route=changed.strip()):
+                _, present = module._canonical_routes(
+                    outputs["routes4"] + changed, allow_host_only=True
+                )
+                self.assertTrue(present)
+        _, ipv6_present = module._canonical_routes(
+            outputs["routes6"] + exact,
+            allow_host_only=True,
+            inert_utun_interfaces=_lock["inert_utun_interfaces"],
+            dormant_apple_interfaces=_lock["dormant_apple_interfaces"],
+        )
+        self.assertTrue(ipv6_present)
+
     def test_single_sample_accepts_only_locked_airgap(self) -> None:
         module = _load()
         lock, outputs = _fixtures(module)
@@ -482,10 +515,14 @@ Network interfaces: bridge100
             "\tstatus: active\n"
         )
         host_outputs["routes4"] += (
+            "default link#20 UCSIg bridge100 !\n"
             "192.168.106/24 link#20 UCS bridge100\n"
             "192.168.106.1 127.0.0.1 UHS lo0\n"
         )
-        route4, _ = module._canonical_routes(host_outputs["routes4"])
+        route4, default_present = module._canonical_routes(
+            host_outputs["routes4"], allow_host_only=True
+        )
+        self.assertFalse(default_present)
         lock["host_only"] = {
             "interface": "bridge100",
             "ipv4_cidr": "192.168.106.1/24",

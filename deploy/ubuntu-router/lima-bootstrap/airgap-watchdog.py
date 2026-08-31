@@ -502,9 +502,24 @@ def _is_host_only_neighbor_route(fields: list[str]) -> bool:
     )
 
 
+def _is_host_only_scoped_default_route(
+    fields: list[str], *, route_family: int | None
+) -> bool:
+    return bool(
+        route_family == 4
+        and len(fields) == 5
+        and fields[0] == "default"
+        and re.fullmatch(r"link#[0-9]+", fields[1]) is not None
+        and fields[2] == "UCSIg"
+        and fields[3] == "bridge100"
+        and fields[4] == "!"
+    )
+
+
 def _canonical_routes(
     content: str,
     *,
+    allow_host_only: bool = False,
     ignore_host_only_neighbors: bool = False,
     inert_utun_interfaces: list[dict[str, Any]] | None = None,
     dormant_apple_interfaces: list[dict[str, Any]] | None = None,
@@ -525,12 +540,17 @@ def _canonical_routes(
     observed_dormant: dict[str, set[tuple[str, str, str]]] = {
         name: set() for name in dormant
     }
+    route_family: int | None = None
     for line in content.splitlines():
         fields = line.split()
+        if fields == ["Internet:"]:
+            route_family = 4
+            continue
+        if fields == ["Internet6:"]:
+            route_family = 6
+            continue
         if not fields or fields[0] in {
             "Routing",
-            "Internet:",
-            "Internet6:",
             "Destination",
         }:
             continue
@@ -582,6 +602,10 @@ def _canonical_routes(
             route = (destination, gateway, flags, interface)
             if route in expected_utun_defaults:
                 observed_utun_defaults.append(route)
+            elif allow_host_only and _is_host_only_scoped_default_route(
+                fields, route_family=route_family
+            ):
+                pass
             else:
                 default_present = True
         entries.append("|".join((destination, gateway, flags, interface)))
@@ -1704,10 +1728,13 @@ def _sample(
         if outputs[f"wifi:{interface}"].strip() != expected:
             raise WatchdogError("wifi_power_enabled")
     route4, default4 = _canonical_routes(
-        outputs["routes4"], ignore_host_only_neighbors=allow_host_only
+        outputs["routes4"],
+        allow_host_only=allow_host_only,
+        ignore_host_only_neighbors=allow_host_only,
     )
     route6, default6 = _canonical_routes(
         outputs["routes6"],
+        allow_host_only=allow_host_only,
         ignore_host_only_neighbors=allow_host_only,
         inert_utun_interfaces=lock["inert_utun_interfaces"],
         dormant_apple_interfaces=lock["dormant_apple_interfaces"],
@@ -1821,9 +1848,12 @@ def _candidate_from_outputs(
     dormant_apple = _capture_dormant_apple(
         profile["dormant_apple_interfaces"], interfaces
     )
-    route4, default4 = _canonical_routes(outputs["routes4"])
+    route4, default4 = _canonical_routes(
+        outputs["routes4"], allow_host_only=allow_host_only
+    )
     route6, default6 = _canonical_routes(
         outputs["routes6"],
+        allow_host_only=allow_host_only,
         inert_utun_interfaces=profile["inert_utun_interfaces"],
         dormant_apple_interfaces=dormant_apple,
     )
@@ -1983,10 +2013,13 @@ def _capture_host_only(session_id: str) -> tuple[Path, str]:
     ):
         raise WatchdogError("host_only_capture_address")
     route4, default4 = _canonical_routes(
-        outputs["routes4"], ignore_host_only_neighbors=True
+        outputs["routes4"],
+        allow_host_only=True,
+        ignore_host_only_neighbors=True,
     )
     route6, default6 = _canonical_routes(
         outputs["routes6"],
+        allow_host_only=True,
         ignore_host_only_neighbors=True,
         inert_utun_interfaces=candidate["inert_utun_interfaces"],
         dormant_apple_interfaces=candidate["dormant_apple_interfaces"],

@@ -32,6 +32,9 @@ Internet reachability: only their exact scoped IPv6 defaults are accepted,
 and the global IPv6 route/NWI probes must still prove no externally reachable
 interface. During the host-only phase, only exact local `bridge100`
 reachability at `192.168.106.1` is permitted.
+The exact macOS-scoped IPv4 row `default link#N UCSIg bridge100 !` is also
+permitted only in that phase and remains topology-hashed; every gateway-bearing,
+physical, altered or non-host-only default still aborts.
 The fixed dormant Apple-local classes (`awdl0`, `llw0`, `ipsec0`) must first
 be taken down; their one canonical link-local is session-bound and only their
 exact local multicast/link-local route shapes are accepted.
