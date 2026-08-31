@@ -155,7 +155,7 @@ def _load_lock(content: bytes) -> dict[str, Any]:
             "target_session_id": "0fbd65f00cd16cd949c15df3147249a35d8034ef3f052a441ba0246ccb8183d1",
         }
         or value.get("pins", {}).get("airgap_session_id")
-        != value.get("check_only_rotation", {}).get("target_session_id")
+        != "6d7d93fc3f480f6ad02035a4def8d73d371c20d5ca5c9ae18ee0d27fd2a55345"
         or value.get("phases")
         != {
             "airgapped_start_apply_enabled": True,
