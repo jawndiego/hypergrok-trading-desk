@@ -878,6 +878,13 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         ):
             self.assertEqual("invalid", controller._authentication_authority_state(*observed))
 
+    def test_process_inventory_accepts_only_darwin_nobody_negative_uid(self) -> None:
+        controller = _load_module(HOST_APPLY, "bootstrap_apply_ps_uid_test")
+        for value in ("-2", "0", "454"):
+            self.assertTrue(controller._valid_ps_uid(value))
+        for value in ("-1", "-3", "+2", "", "uid"):
+            self.assertFalse(controller._valid_ps_uid(value))
+
     def test_airgapped_flow_starts_once_verifies_and_stops(self) -> None:
         controller = _load_module(HOST_APPLY, "bootstrap_apply_airgap_flow_test")
         guest_receipt = {

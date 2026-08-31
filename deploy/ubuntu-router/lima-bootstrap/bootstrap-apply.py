@@ -173,6 +173,10 @@ class BootstrapError(RuntimeError):
     """Fail-closed bootstrap error."""
 
 
+def _valid_ps_uid(value: str) -> bool:
+    return value == "-2" or value.isdigit()
+
+
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -1895,7 +1899,11 @@ def _router_uid_processes() -> list[int]:
     pids: list[int] = []
     for line in result.stdout.splitlines():
         fields = line.split()
-        if len(fields) != 2 or not all(value.isdigit() for value in fields):
+        if (
+            len(fields) != 2
+            or not fields[0].isdigit()
+            or not _valid_ps_uid(fields[1])
+        ):
             raise BootstrapError("router process inventory is malformed")
         pid, uid = (int(value, 10) for value in fields)
         if uid == 454:

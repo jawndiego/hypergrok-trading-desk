@@ -139,6 +139,10 @@ class WatchdogError(RuntimeError):
         self.code = code
 
 
+def _valid_ps_uid(value: str) -> bool:
+    return value == "-2" or value.isdigit()
+
+
 def _canonical_json(value: object) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
@@ -1327,7 +1331,7 @@ def _internet_sharing_disabled(processes: str, *, allow_host_only_bootpd: bool) 
         fields = line.split(None, 1)
         if (
             len(fields) != 2
-            or not fields[0].isdigit()
+            or not _valid_ps_uid(fields[0])
             or not fields[1]
             or any(ord(character) < 32 or ord(character) == 127 for character in fields[1])
         ):
@@ -1889,7 +1893,9 @@ def _scan_lima_start_sessions() -> list[dict[str, int | str]]:
         fields = line.split(None, 3)
         if (
             len(fields) != 4
-            or any(not value.isdigit() for value in fields[:3])
+            or not fields[0].isdigit()
+            or not fields[1].isdigit()
+            or not _valid_ps_uid(fields[2])
             or not fields[3]
         ):
             raise WatchdogError("start_process_inventory_shape")
@@ -2050,7 +2056,9 @@ def _scan_router_uid_processes() -> list[dict[str, int]]:
         fields = line.split(None, 3)
         if (
             len(fields) != 4
-            or any(not value.isdigit() for value in fields[:3])
+            or not fields[0].isdigit()
+            or not fields[1].isdigit()
+            or not _valid_ps_uid(fields[2])
             or not fields[3]
         ):
             raise WatchdogError("router_process_inventory_shape")

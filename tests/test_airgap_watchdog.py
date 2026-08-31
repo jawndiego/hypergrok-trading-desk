@@ -249,6 +249,20 @@ class AirgapWatchdogTests(unittest.TestCase):
         )
         self.assertTrue(default_route)
 
+    def test_process_inventory_accepts_only_the_darwin_nobody_negative_uid(self) -> None:
+        module = _load()
+        self.assertTrue(module._valid_ps_uid("-2"))
+        self.assertTrue(module._valid_ps_uid("0"))
+        self.assertTrue(module._valid_ps_uid("454"))
+        for value in ("-1", "-3", "+2", "", "uid"):
+            self.assertFalse(module._valid_ps_uid(value))
+        self.assertTrue(
+            module._internet_sharing_disabled(
+                "-2 /usr/libexec/dhcp6d\n0 /sbin/launchd\n",
+                allow_host_only_bootpd=False,
+            )
+        )
+
     def test_single_sample_accepts_only_locked_airgap(self) -> None:
         module = _load()
         lock, outputs = _fixtures(module)
