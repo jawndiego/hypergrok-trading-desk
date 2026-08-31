@@ -137,6 +137,12 @@ CAPTURE_MODE_MAX_SECONDS = (
     + CAPTURE_TOTAL_SECONDS
     + CAPTURE_STOP_BUDGET_SECONDS
 )
+LEGACY_BASE_ADOPTION_SESSION = (
+    "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1"
+)
+LEGACY_BASE_ADOPTION_SHA256 = (
+    "a39b3d2c7951696306b3279a9cc854fdcc281612d32544a59c3e3e7abd07b002"
+)
 NAT_PLIST = Path(
     "/Library/Preferences/SystemConfiguration/com.apple.nat.plist"
 )
@@ -416,6 +422,59 @@ def _atomic_fixed_document(path: Path, value: dict[str, Any]) -> tuple[Path, str
     _resync_exact_root_file(pending, content)
     _rename_exclusive(pending, path)
     return path, digest
+
+
+def _adopt_exact_legacy_base_capture(
+    path: Path, current: dict[str, Any]
+) -> tuple[Path, str] | None:
+    if current.get("capture_session_id") != LEGACY_BASE_ADOPTION_SESSION:
+        return None
+    if path != _base_capture_path(LEGACY_BASE_ADOPTION_SESSION):
+        raise WatchdogError("legacy_base_capture_path")
+    _assert_root_directory(STATE_ROOT)
+    if not path.exists() and not path.is_symlink():
+        return None
+    pending = path.parent / f".{path.name}.pending"
+    if pending.exists() or pending.is_symlink():
+        raise WatchdogError("legacy_base_capture_pending")
+    content = _safe_root_file(path, 0o400)
+    if _sha256_bytes(content) != LEGACY_BASE_ADOPTION_SHA256:
+        raise WatchdogError("legacy_base_capture_digest")
+    try:
+        stored = json.loads(content, object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise WatchdogError("legacy_base_capture_json") from error
+    keys = {
+        "capture_session_id",
+        "hardware_lock_candidate",
+        "hardware_profile_sha256",
+        "kind",
+        "sample_sha256",
+        "schema_version",
+    }
+    if (
+        not isinstance(stored, dict)
+        or set(stored) != keys
+        or set(current) != keys
+        or stored.get("schema_version") != 1
+        or current.get("schema_version") != 1
+        or stored.get("kind")
+        != "trading-desk.router-bootstrap.airgap-base-capture"
+        or current.get("kind") != stored.get("kind")
+        or stored.get("capture_session_id") != LEGACY_BASE_ADOPTION_SESSION
+        or current.get("capture_session_id") != stored.get("capture_session_id")
+        or stored.get("hardware_profile_sha256")
+        != current.get("hardware_profile_sha256")
+        or stored.get("hardware_lock_candidate")
+        != current.get("hardware_lock_candidate")
+        or not isinstance(stored.get("sample_sha256"), str)
+        or SHA256_RE.fullmatch(stored["sample_sha256"]) is None
+        or not isinstance(current.get("sample_sha256"), str)
+        or SHA256_RE.fullmatch(current["sample_sha256"]) is None
+        or stored["sample_sha256"] == current["sample_sha256"]
+    ):
+        raise WatchdogError("legacy_base_capture_binding")
+    return path, LEGACY_BASE_ADOPTION_SHA256
 
 
 def _parse_hardware_ports(content: str) -> list[dict[str, str]]:
@@ -1966,7 +2025,11 @@ def _capture_base(session_id: str) -> tuple[Path, str]:
         "sample_sha256": _sha256_bytes(_canonical_json(sample)),
         "schema_version": 1,
     }
-    return _atomic_fixed_document(_base_capture_path(session_id), value)
+    path = _base_capture_path(session_id)
+    adopted = _adopt_exact_legacy_base_capture(path, value)
+    if adopted is not None:
+        return adopted
+    return _atomic_fixed_document(path, value)
 
 
 def _read_base_capture(session_id: str) -> dict[str, Any]:
