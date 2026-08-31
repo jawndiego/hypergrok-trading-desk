@@ -323,10 +323,14 @@ Only the matching `default fe80::%utunN UGcIg utunN` IPv6 rows are treated as
 scoped defaults; they remain in the topology hash. IPv4 defaults, global utun
 routes, an unprofiled utun, any externally reachable `scutil --nwi` interface,
 or a global IPv6 route lookup selecting any interface still aborts the
-air-gap. The sole IPv4-default exception is macOS's exact five-field
+air-gap. The same profile binds any inactive, addressless built-in Thunderbolt
+bridge to its exact hardware members and exact `DISCOVER,LEARNING` member
+flags; no member may be added, removed, substituted or altered. The sole
+IPv4-default exception is macOS's exact five-field
 `default link#N UCSIg bridge100 !` interface-scoped row during the host-only
 phase; it remains in the topology hash and carries no gateway. Only exact local
-`bridge100` reachability at `192.168.106.1` is otherwise permitted.
+`bridge100` reachability at `192.168.106.1` is otherwise permitted, with its
+sole independently validated member fixed to addressless `vmenet0`.
 
 The profile separately binds dormant `awdl0`, `llw0` and `ipsec0` classes.
 They must be down with their exact post-down flags, MTU and status, no IPv4,

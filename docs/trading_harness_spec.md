@@ -298,6 +298,12 @@ repository/shared-state mount and MUST use default-drop forwarding, distinct
 ingress/WAN interfaces, NAT limited to the WireGuard IPv4 subnet and deliberate
 IPv6 non-forwarding.
 
+The attended macOS air-gap bootstrap MUST bind any pre-existing inactive
+Thunderbolt bridge to its exact hardware-port members and member flags. That
+passive bridge remains distinct from the temporary host-only `bridge100`, whose
+sole permitted member is the exact addressless `vmenet0`; any additional,
+missing, substituted or altered bridge member aborts before VM start.
+
 WireGuard private keys MUST be generated and retained on their owning machines
 outside repo, chat, cloud-init, argv and environment variables. Router-only key
 generation, preparation and read-only qualification MUST occur before venue

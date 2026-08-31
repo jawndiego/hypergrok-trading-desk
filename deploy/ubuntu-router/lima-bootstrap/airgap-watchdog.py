@@ -33,6 +33,11 @@ Hardware-lock schema (all keys are exact)::
     "passive_interfaces": [
       {"interface": "anpi0", "status": "inactive", "up": true}
     ],
+    "passive_bridges": [
+      {"interface": "bridge0", "members": [
+        {"flags": ["DISCOVER", "LEARNING"], "interface": "en2"}
+      ]}
+    ],
     "inert_utun_interfaces": [
       {"interface": "utun0", "flags": ["MULTICAST", "POINTOPOINT", "RUNNING", "UP"],
        "mtu": 1380, "status": null, "ipv4_addresses": [],
@@ -981,6 +986,7 @@ def _load_hardware_profile() -> tuple[dict[str, Any], str]:
             "inert_utun_interfaces",
             "network_services",
             "passive_interfaces",
+            "passive_bridges",
             "host_only",
         }
         or value.get("schema_version") != 1
@@ -1045,6 +1051,43 @@ def _load_hardware_profile() -> tuple[dict[str, Any], str]:
         or set(passive_names) & {item["device"] for item in ports}
     ):
         raise WatchdogError("hardware_profile_passive_interface_duplicate")
+    passive_bridges = value.get("passive_bridges")
+    if (
+        not isinstance(passive_bridges, list)
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"interface", "members"}
+            or INTERFACE_RE.fullmatch(item.get("interface", "")) is None
+            or not item["interface"].startswith("bridge")
+            or not isinstance(item.get("members"), list)
+            or not item["members"]
+            or any(
+                not isinstance(member, dict)
+                or set(member) != {"flags", "interface"}
+                or member.get("flags") != ["DISCOVER", "LEARNING"]
+                or INTERFACE_RE.fullmatch(member.get("interface", "")) is None
+                for member in item["members"]
+            )
+            or [member["interface"] for member in item["members"]]
+               != sorted({member["interface"] for member in item["members"]})
+            for item in passive_bridges
+        )
+        or len({item["interface"] for item in passive_bridges})
+        != len(passive_bridges)
+    ):
+        raise WatchdogError("hardware_profile_passive_bridges")
+    port_by_device = {item["device"]: item for item in ports}
+    for bridge in passive_bridges:
+        if (
+            port_by_device.get(bridge["interface"], {}).get("hardware_port")
+            != "Thunderbolt Bridge"
+            or any(
+                port_by_device.get(member["interface"], {}).get("kind")
+                != "thunderbolt"
+                for member in bridge["members"]
+            )
+        ):
+            raise WatchdogError("hardware_profile_passive_bridge_binding")
     inert_utuns = _inert_utun_contract(
         value.get("inert_utun_interfaces"), "hardware_profile"
     )
@@ -1075,6 +1118,9 @@ def _load_hardware_profile() -> tuple[dict[str, Any], str]:
     value["passive_interfaces"] = sorted(
         passive, key=lambda item: item["interface"]
     )
+    value["passive_bridges"] = sorted(
+        passive_bridges, key=lambda item: item["interface"]
+    )
     value["inert_utun_interfaces"] = inert_utuns
     return value, _sha256_bytes(content)
 
@@ -1096,6 +1142,7 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
         "inert_utun_interfaces",
         "network_services",
         "passive_interfaces",
+        "passive_bridges",
         "wifi_interfaces",
         "route_topology_sha256",
         "nwi_sha256",
@@ -1172,6 +1219,43 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
         or set(passive_names) & {item["device"] for item in normalized_ports}
     ):
         raise WatchdogError("hardware_lock_passive_interface_duplicate")
+    passive_bridges = value.get("passive_bridges")
+    if (
+        not isinstance(passive_bridges, list)
+        or passive_bridges
+        != sorted(passive_bridges, key=lambda item: item.get("interface", ""))
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"interface", "members"}
+            or INTERFACE_RE.fullmatch(item.get("interface", "")) is None
+            or not item["interface"].startswith("bridge")
+            or not isinstance(item.get("members"), list)
+            or not item["members"]
+            or any(
+                not isinstance(member, dict)
+                or set(member) != {"flags", "interface"}
+                or member.get("flags") != ["DISCOVER", "LEARNING"]
+                or INTERFACE_RE.fullmatch(member.get("interface", "")) is None
+                for member in item["members"]
+            )
+            or [member["interface"] for member in item["members"]]
+               != sorted({member["interface"] for member in item["members"]})
+            for item in passive_bridges
+        )
+    ):
+        raise WatchdogError("hardware_lock_passive_bridges")
+    lock_ports = {item["device"]: item for item in normalized_ports}
+    for bridge in passive_bridges:
+        if (
+            lock_ports.get(bridge["interface"], {}).get("hardware_port")
+            != "Thunderbolt Bridge"
+            or any(
+                lock_ports.get(member["interface"], {}).get("kind")
+                != "thunderbolt"
+                for member in bridge["members"]
+            )
+        ):
+            raise WatchdogError("hardware_lock_passive_bridge_binding")
     inert_utuns = _inert_utun_contract(
         value.get("inert_utun_interfaces"), "hardware_lock"
     )
@@ -1243,6 +1327,7 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
     value["passive_interfaces"] = sorted(
         passive, key=lambda item: item["interface"]
     )
+    value["passive_bridges"] = passive_bridges
     value["inert_utun_interfaces"] = inert_utuns
     value["dormant_apple_interfaces"] = dormant_apple
     profile, profile_sha256 = _load_hardware_profile()
@@ -1259,6 +1344,7 @@ def _load_hardware_lock() -> tuple[dict[str, Any], str]:
             if item["kind"] == "wifi"
         )
         or value["passive_interfaces"] != profile["passive_interfaces"]
+        or value["passive_bridges"] != profile["passive_bridges"]
         or value["inert_utun_interfaces"]
         != profile["inert_utun_interfaces"]
         or [
@@ -1697,16 +1783,28 @@ def _internet_sharing_disabled(
 
 
 def _validate_host_only_vmenet(
-    interfaces: dict[str, dict[str, Any]], *, allow_host_only: bool
+    interfaces: dict[str, dict[str, Any]],
+    lock: dict[str, Any],
+    *,
+    allow_host_only: bool,
 ) -> str | None:
     vmenets = sorted(
         name
         for name in interfaces
         if VMENET_INTERFACE_RE.fullmatch(name) is not None
     )
-    member_parents = sorted(
+    observed_parents = {
         name for name, value in interfaces.items() if value["members"]
-    )
+    }
+    passive = {
+        item["interface"]: item["members"]
+        for item in lock["passive_bridges"]
+    }
+    for name, members in passive.items():
+        value = interfaces.get(name)
+        if value is None or value["members"] != members:
+            raise WatchdogError("passive_bridge_topology_drift")
+    member_parents = sorted(observed_parents - set(passive))
     if not allow_host_only:
         if vmenets:
             raise WatchdogError("unexpected_vmenet_interface")
@@ -1780,7 +1878,7 @@ def _validate_addresses(
     allow_host_only: bool,
 ) -> bool:
     host_only_vmenet = _validate_host_only_vmenet(
-        interfaces, allow_host_only=allow_host_only
+        interfaces, lock, allow_host_only=allow_host_only
     )
     hardware = {item["device"] for item in lock["hardware_ports"]}
     loopback = interfaces.get("lo0")
@@ -2055,6 +2153,7 @@ def _candidate_from_outputs(
         "passive_interfaces": [
             dict(item) for item in profile["passive_interfaces"]
         ],
+        "passive_bridges": [dict(item) for item in profile["passive_bridges"]],
         "wifi_interfaces": sorted(
             item["device"]
             for item in profile["hardware_ports"]
@@ -2150,6 +2249,7 @@ def _capture_host_only(session_id: str) -> tuple[Path, str]:
             "inert_utun_interfaces",
             "network_services",
             "passive_interfaces",
+            "passive_bridges",
             "wifi_interfaces",
             "route_topology_sha256",
             "nwi_sha256",

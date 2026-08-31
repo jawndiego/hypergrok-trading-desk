@@ -295,6 +295,7 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
                         "passive_interfaces": [
                             {"interface": "anpi0", "status": "inactive", "up": True}
                         ],
+                        "passive_bridges": [],
                         "schema_version": 1,
                     },
                     indent=2,

@@ -133,6 +133,7 @@ ff02::%utun0/32                         fe80::1234%utun0                UmCI    
         "passive_interfaces": [
             {"interface": "anpi0", "status": "inactive", "up": True}
         ],
+        "passive_bridges": [],
         "wifi_interfaces": ["en0"],
         "route_topology_sha256": {
             "ipv4": route4_hash,
@@ -220,6 +221,57 @@ def _host_only_ifconfig(
 
 
 class AirgapWatchdogTests(unittest.TestCase):
+    def test_passive_bridge_members_are_exact_and_separate_from_host_only(self) -> None:
+        module = _load()
+        lock, outputs = _fixtures(module)
+        lock["passive_bridges"] = [
+            {
+                "interface": "bridge0",
+                "members": [
+                    {"flags": ["DISCOVER", "LEARNING"], "interface": name}
+                    for name in ("en2", "en3", "en4")
+                ],
+            }
+        ]
+        text = """bridge0: flags=8862<BROADCAST,SMART,SIMPLEX,MULTICAST> mtu 1500
+\tmember: en2 flags=3<LEARNING,DISCOVER>
+\tmember: en3 flags=3<LEARNING,DISCOVER>
+\tmember: en4 flags=3<LEARNING,DISCOVER>
+\tstatus: inactive
+"""
+        parsed = module._parse_ifconfig(outputs["ifconfig"] + text)
+        self.assertIsNone(
+            module._validate_host_only_vmenet(parsed, lock, allow_host_only=False)
+        )
+        self.assertEqual(
+            "vmenet0",
+            module._validate_host_only_vmenet(
+                module._parse_ifconfig(
+                    outputs["ifconfig"] + text + _host_only_ifconfig()
+                ),
+                lock,
+                allow_host_only=True,
+            ),
+        )
+        for changed in (
+            text.replace("member: en4", "member: en5"),
+            text.replace("member: en4", "member: vmenet0"),
+            text.replace("flags=3<LEARNING,DISCOVER>", "flags=1<LEARNING>", 1),
+            text
+            + "bridge99: flags=8862<BROADCAST,SMART,SIMPLEX,MULTICAST> "
+            "mtu 1500\n\tmember: en5 flags=3<LEARNING,DISCOVER>\n"
+            "\tstatus: inactive\n",
+        ):
+            with self.assertRaisesRegex(
+                module.WatchdogError,
+                "passive_bridge_topology_drift|unexpected_bridge_member",
+            ):
+                module._validate_host_only_vmenet(
+                    module._parse_ifconfig(outputs["ifconfig"] + changed),
+                    lock,
+                    allow_host_only=False,
+                )
+
     def test_manifest_hardware_profile_is_exact_and_parseable(self) -> None:
         module = _load()
         template = json.loads(PROFILE_TEMPLATE.read_bytes())
@@ -241,6 +293,7 @@ class AirgapWatchdogTests(unittest.TestCase):
             "inert_utun_interfaces": lock["inert_utun_interfaces"],
             "network_services": ["Ethernet", "Wi-Fi"],
             "passive_interfaces": lock["passive_interfaces"],
+            "passive_bridges": lock["passive_bridges"],
             "host_only": {
                 "interface": "bridge100",
                 "ipv4_cidr": "192.168.106.1/24",
@@ -671,7 +724,7 @@ Network interfaces: bridge100
         self.assertEqual(
             "vmenet0",
             module._validate_host_only_vmenet(
-                parsed, allow_host_only=True
+                parsed, {"passive_bridges": []}, allow_host_only=True
             ),
         )
 
@@ -688,7 +741,7 @@ Network interfaces: bridge100
         self.assertEqual(
             "vmenet0",
             module._validate_host_only_vmenet(
-                optional, allow_host_only=True
+                optional, {"passive_bridges": []}, allow_host_only=True
             ),
         )
 
@@ -696,7 +749,7 @@ Network interfaces: bridge100
             module.WatchdogError, "unexpected_vmenet_interface"
         ):
             module._validate_host_only_vmenet(
-                parsed, allow_host_only=False
+                parsed, {"passive_bridges": []}, allow_host_only=False
             )
         dormant_vmenet = module._parse_ifconfig(
             outputs["ifconfig"]
@@ -707,7 +760,7 @@ Network interfaces: bridge100
             module.WatchdogError, "unexpected_vmenet_interface"
         ):
             module._validate_host_only_vmenet(
-                dormant_vmenet, allow_host_only=False
+                dormant_vmenet, {"passive_bridges": []}, allow_host_only=False
             )
 
     def test_host_only_vmenet_rejects_link_and_membership_drift(self) -> None:
@@ -818,7 +871,7 @@ Network interfaces: bridge100
                 parsed = module._parse_ifconfig(outputs["ifconfig"] + changed)
                 with self.assertRaisesRegex(module.WatchdogError, error):
                     module._validate_host_only_vmenet(
-                        parsed, allow_host_only=True
+                        parsed, {"passive_bridges": []}, allow_host_only=True
                     )
 
         malformed = (
@@ -883,6 +936,7 @@ Network interfaces: bridge100
             "inert_utun_interfaces": lock["inert_utun_interfaces"],
             "network_services": ["Ethernet", "Wi-Fi"],
             "passive_interfaces": lock["passive_interfaces"],
+            "passive_bridges": lock["passive_bridges"],
             "host_only": {
                 "interface": "bridge100",
                 "ipv4_cidr": "192.168.106.1/24",

@@ -49,5 +49,24 @@
       "up": true
     }
   ],
+  "passive_bridges": [
+    {
+      "interface": "bridge0",
+      "members": [
+        {
+          "flags": ["DISCOVER", "LEARNING"],
+          "interface": "en2"
+        },
+        {
+          "flags": ["DISCOVER", "LEARNING"],
+          "interface": "en3"
+        },
+        {
+          "flags": ["DISCOVER", "LEARNING"],
+          "interface": "en4"
+        }
+      ]
+    }
+  ],
   "schema_version": 1
 }

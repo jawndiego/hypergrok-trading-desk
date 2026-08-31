@@ -227,6 +227,7 @@ def _validate_hardware_profile(content: bytes) -> dict[str, Any]:
             "kind",
             "network_services",
             "passive_interfaces",
+            "passive_bridges",
             "schema_version",
         }
         or profile.get("schema_version") != 1
@@ -288,6 +289,43 @@ def _validate_hardware_profile(content: bytes) -> dict[str, Any]:
         for item in passive
     ):
         raise ValueError("air-gap passive-interface profile differs")
+    passive_bridges = profile.get("passive_bridges")
+    if (
+        not isinstance(passive_bridges, list)
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"interface", "members"}
+            or not item.get("interface", "").startswith("bridge")
+            or interface_re.fullmatch(item.get("interface", "")) is None
+            or not isinstance(item.get("members"), list)
+            or not item["members"]
+            or any(
+                not isinstance(member, dict)
+                or set(member) != {"flags", "interface"}
+                or member.get("flags") != ["DISCOVER", "LEARNING"]
+                or interface_re.fullmatch(member.get("interface", "")) is None
+                for member in item["members"]
+            )
+            or [member["interface"] for member in item["members"]]
+               != sorted({member["interface"] for member in item["members"]})
+            for item in passive_bridges
+        )
+        or len({item["interface"] for item in passive_bridges})
+        != len(passive_bridges)
+    ):
+        raise ValueError("air-gap passive-bridge profile differs")
+    port_by_device = {item["device"]: item for item in ports}
+    for bridge in passive_bridges:
+        if (
+            port_by_device.get(bridge["interface"], {}).get("hardware_port")
+            != "Thunderbolt Bridge"
+            or any(
+                port_by_device.get(member["interface"], {}).get("kind")
+                != "thunderbolt"
+                for member in bridge["members"]
+            )
+        ):
+            raise ValueError("air-gap passive-bridge binding differs")
     dormant = profile.get("dormant_apple_interfaces")
     if dormant != DORMANT_APPLE_PROFILES:
         raise ValueError("air-gap dormant-Apple profile differs")

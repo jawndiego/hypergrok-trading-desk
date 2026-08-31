@@ -30,7 +30,10 @@ MAC addresses and exact inert-utun link-local identities. The committed
 `.example` is not a usable profile. Profiled inert utuns do not authorize
 Internet reachability: only their exact scoped IPv6 defaults are accepted,
 and the global IPv6 route/NWI probes must still prove no externally reachable
-interface. During the host-only phase, only exact local `bridge100`
+interface. The profile also binds the inactive, addressless built-in
+Thunderbolt `bridge0` to its exact hardware-port members and member flags;
+missing, additional, substituted or altered members abort. During the
+host-only phase, only that passive bridge plus exact local `bridge100`
 reachability at `192.168.106.1` is permitted.
 The exact macOS-scoped IPv4 row `default link#N UCSIg bridge100 !` is also
 permitted only in that phase and remains topology-hashed; every gateway-bearing,
