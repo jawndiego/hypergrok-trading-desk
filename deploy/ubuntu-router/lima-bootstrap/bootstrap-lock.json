@@ -48,7 +48,7 @@
     "guest_package_apply_enabled": false,
     "hardened_recreate_apply_enabled": true,
     "router_activation_apply_enabled": false,
-    "proven_preboot_recovery_enabled": true
+    "proven_preboot_recovery_enabled": false
   },
   "proven_preboot_recovery": {
     "failed_controller_manifest_sha256": "2be6c3afc48917183e3a9752ef6dc2f38ceec4fcf3622087b56a4f29e90a1e87",
@@ -75,7 +75,7 @@
     "runtime": {"inode": 54411818, "pid": "26009", "pid_inode": 54411821, "pid_sha256": "8d65dfd431c8372588510f701bd6e7449020bc8c6f3af9735253b201b15764fd", "socket_inode": 54411822}
   },
   "pins": {
-    "airgap_session_id": "002cbc693a6abaf119c1ade5be0bcedb84bb4989f9758527ceb017d28428cdba",
+    "airgap_session_id": "91c455c4f6a2ebb670d9ea01b394158c0b48edbb92da55317b3c3e9ec7ffeda9",
     "hardened_cloud_template_sha256": "ee4d159bae33ba541ef1b32c0f15e96e39c8b251e28b1cebc15738dace2de225",
     "hardened_plan_sha256": "aea50ab9aeaf1022f1cf1fbd7055cb9d249e6c94cb5bbae96ff04944a67a9874",
     "hardened_vm_receipt_sha256": "8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6",
@@ -90,7 +90,7 @@
     "predecessor_plan_sha256": "00228f7b613418647ae9718989f7d9a2a9bb1493692ed832977294171b324150",
     "predecessor_vm_receipt_sha256": "1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601",
     "prestart_recovery_receipt_sha256": "b25195e99a9d03d7d650b5a77760aa5a8693c925370bac2936c0453f3c8255ec",
-    "proven_preboot_recovery_receipt_sha256": "RECOVERY_RECEIPT_REQUIRED",
+    "proven_preboot_recovery_receipt_sha256": "60ccd31bee112bec55f133c9231da14878223e88e1be0ed8f30037f241fa1990",
     "socket_vmnet_sha256": "b8a72a62237312f2f756027dea504a844edeb40014702d4a320292c026d282b0"
   },
   "review_status": "attended_airgap_hardened_recreate_and_one_boot_enabled",

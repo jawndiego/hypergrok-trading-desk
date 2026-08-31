@@ -33,7 +33,7 @@ class ProvenPrebootRecoveryTests(unittest.TestCase):
         self.assertEqual("91c455c4f6a2ebb670d9ea01b394158c0b48edbb92da55317b3c3e9ec7ffeda9", recovery["fresh_session_id"])
         self.assertEqual("2be6c3afc48917183e3a9752ef6dc2f38ceec4fcf3622087b56a4f29e90a1e87", recovery["failed_controller_manifest_sha256"])
         self.assertEqual(
-            "RECOVERY_RECEIPT_REQUIRED",
+            "60ccd31bee112bec55f133c9231da14878223e88e1be0ed8f30037f241fa1990",
             lock["pins"]["proven_preboot_recovery_receipt_sha256"],
         )
         self.assertEqual([54411931, 551, "3df15457ab4e82256a45459027e22976909e82c4f6ecd794d2e5e076cd518505"], recovery["files"]["start_stderr"])
@@ -82,11 +82,6 @@ class ProvenPrebootRecoveryTests(unittest.TestCase):
     def test_lock_accepts_only_pending_source_or_pinned_fresh_state(self):
         renderer = load_renderer()
         successor = json.loads(LOCK.read_text())
-        successor["pins"]["proven_preboot_recovery_receipt_sha256"] = "a" * 64
-        successor["pins"]["airgap_session_id"] = successor[
-            "proven_preboot_recovery"
-        ]["fresh_session_id"]
-        successor["phases"]["proven_preboot_recovery_enabled"] = False
         renderer._load_lock(renderer._canonical_json(successor))
         recovery_profile = json.loads(
             (
