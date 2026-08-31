@@ -312,6 +312,11 @@ retaining blocking artifacts, and grant no retry authority. A distinct
 successor MUST pin and revalidate that transaction and receipt before admitting
 a fresh air-gap session. Temporary sudoers readability for the router UID MUST
 be least-privilege, explicitly probed, and removed before retention.
+If the controller prestarts socket_vmnet, Lima MUST receive only temporary
+read-only access to the exact live PID file, verify the process identity, reuse
+that daemon, and lose the ACL immediately after the guarded start boundary.
+The VMNet runtime directory MUST NOT be made generally daemon-writable merely
+to bypass Lima's managed-daemon fallback.
 
 WireGuard private keys MUST be generated and retained on their owning machines
 outside repo, chat, cloud-init, argv and environment variables. Router-only key

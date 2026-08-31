@@ -104,5 +104,11 @@ runtime, base capture, hardware lock, and two start markers through five
 crash-resumable source-or-destination moves. A successor must pin the resulting
 receipt before using the fresh session.
 
+For the single guarded `limactl start`, UID 454 receives an exact read-only ACL
+on the already-live socket_vmnet PID file. A UID-454 probe must read that exact
+PID and observe the process before Lima runs, so Lima reuses the controller's
+validated daemon instead of attempting to create another. The ACL is removed
+immediately after start returns or during fail-stop cleanup.
+
 This does not authorize another guest boot. A later stopped migration must
 remove bootstrap passwordless sudo and per-boot provisioning first.

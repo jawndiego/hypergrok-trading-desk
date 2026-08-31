@@ -1327,8 +1327,10 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
                 "_start_hostonly_daemon": lambda *_args, **_kwargs: (
                     Process(),
                     (object(), object()),
-                    {"command_sha256": "3" * 64, "pid": 1234},
+                    {"command_sha256": "3" * 64, "pid": 1234, "pidfile": "/runtime/pid"},
                 ),
+                "_set_router_pid_read_acl": lambda *_args: None,
+                "_clear_router_pid_read_acl": lambda *_args: None,
                 "_run_watchdog_phase": lambda *_args, **_kwargs: {"sha256": "4" * 64},
                 "_spawn_watchdog": lambda *_args, **_kwargs: (Process(), 99),
                 "_run_lima_guarded": run_lima,

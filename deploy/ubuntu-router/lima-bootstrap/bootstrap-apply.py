@@ -2008,6 +2008,8 @@ def _quarantine_vmnet_after_success(
         raise BootstrapError("success cleanup residual set differs")
     socket_metadata = socket_path.lstat()
     pid_content = _read_bound(pid_path, uid=0, gid=0, mode=0o600, maximum=32)
+    _no_named_acl(socket_path)
+    _no_named_acl(pid_path)
     if (
         socket_path.is_symlink()
         or not stat.S_ISSOCK(socket_metadata.st_mode)
@@ -2147,6 +2149,88 @@ def _stop_hostonly_daemon(
         os.fsync(stream.fileno())
         stream.close()
     return {"forced": forced, "returncode": process.returncode}
+
+
+def _set_router_pid_read_acl(path: Path, expected_pid: int) -> None:
+    content = _read_bound(path, uid=0, gid=0, mode=0o600, maximum=32)
+    before = path.lstat()
+    if content != str(expected_pid).encode() or expected_pid <= 1:
+        raise BootstrapError("socket_vmnet PID file differs")
+    identity = (before.st_dev, before.st_ino, before.st_uid, before.st_gid, stat.S_IMODE(before.st_mode), before.st_nlink, before.st_size)
+    if identity[2:] != (0, 0, 0o600, 1, len(content)):
+        raise BootstrapError("socket_vmnet PID metadata differs")
+    entry = "user:trading-router-operator allow read,readattr"
+    result = subprocess.run(
+        ["/bin/chmod", "+a", entry, str(path)], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=10, check=False,
+    )
+    after = path.lstat()
+    if result.returncode != 0 or result.stdout or result.stderr or (
+        after.st_dev, after.st_ino, after.st_uid, after.st_gid,
+        stat.S_IMODE(after.st_mode), after.st_nlink, after.st_size,
+    ) != identity:
+        raise BootstrapError("socket_vmnet PID ACL install failed")
+    _assert_router_pid_read_acl(path)
+    program = (
+        "import os,sys;"
+        "f=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW);"
+        "d=os.read(f,33);os.close(f);p=int(d);"
+        "exec('try:\\n os.kill(p,0)\\nexcept PermissionError:\\n pass');"
+        "sys.stdout.buffer.write(d)"
+    )
+    probe = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", program, str(path)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        preexec_fn=_drop_preexec(454, 454),
+        timeout=10,
+        check=False,
+    )
+    if probe.returncode != 0 or probe.stderr or probe.stdout != content:
+        raise BootstrapError("UID454 socket_vmnet PID read probe failed")
+    try:
+        os.kill(expected_pid, 0)
+    except OSError as error:
+        raise BootstrapError("socket_vmnet PID is not live") from error
+
+
+def _assert_router_pid_read_acl(path: Path) -> None:
+    entry = "user:trading-router-operator allow read,readattr"
+    listing = subprocess.run(
+        ["/bin/ls", "-led", str(path)], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        encoding="utf-8", errors="strict",
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=10, check=False,
+    )
+    entries = [line.strip() for line in listing.stdout.splitlines()[1:] if re.match(r"^\s*[0-9]+:", line)]
+    if listing.returncode != 0 or listing.stderr or entries != [f"0: {entry}"]:
+        raise BootstrapError("socket_vmnet PID ACL differs")
+
+
+def _clear_router_pid_read_acl(path: Path) -> None:
+    before = path.lstat()
+    _assert_router_pid_read_acl(path)
+    result = subprocess.run(
+        ["/bin/chmod", "-N", str(path)], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=10, check=False,
+    )
+    after = path.lstat()
+    if result.returncode != 0 or result.stdout or result.stderr or (
+        before.st_dev, before.st_ino, before.st_uid, before.st_gid,
+        stat.S_IMODE(before.st_mode), before.st_nlink, before.st_size,
+    ) != (
+        after.st_dev, after.st_ino, after.st_uid, after.st_gid,
+        stat.S_IMODE(after.st_mode), after.st_nlink, after.st_size,
+    ):
+        raise BootstrapError("socket_vmnet PID ACL removal failed")
+    _no_named_acl(path)
 
 
 def _run_watchdog_phase(
@@ -3949,6 +4033,7 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
     caffeinate: subprocess.Popen[bytes] | None = None
     socket_process: subprocess.Popen[bytes] | None = None
     socket_streams: tuple[Any, Any] | None = None
+    pid_acl_path: Path | None = None
     watchdog: subprocess.Popen[bytes] | None = None
     watchdog_write_fd: int | None = None
     start_invoked = False
@@ -3962,6 +4047,13 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
         socket_process, socket_streams, socket_evidence = _start_hostonly_daemon(
             lock, state, attempt_id=attempt_id
         )
+        failure_stage = "host_only_capture"
+        pid_acl_path = Path(socket_evidence["pidfile"])
+        if socket_process.poll() is not None:
+            raise BootstrapError("socket_vmnet exited before PID reader probe")
+        _set_router_pid_read_acl(pid_acl_path, socket_process.pid)
+        if socket_process.poll() is not None:
+            raise BootstrapError("socket_vmnet exited during PID reader probe")
         failure_stage = "host_only_capture"
         host_only_capture = _run_watchdog_phase(
             lock, "capture-host-only", socket_vmnet_pid=socket_process.pid
@@ -4002,6 +4094,10 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
             raise BootstrapError("attended Lima first start failed")
         if watchdog.poll() is not None or caffeinate.poll() is not None:
             raise BootstrapError("air-gap guard process exited during VM start")
+        if pid_acl_path is None:
+            raise BootstrapError("socket_vmnet PID ACL path is absent")
+        _clear_router_pid_read_acl(pid_acl_path)
+        pid_acl_path = None
         failure_stage = "status_running"
         _status_guarded(
             lock,
@@ -4165,6 +4261,12 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
         if socket_process is not None and socket_streams is not None:
             try:
                 _stop_hostonly_daemon(socket_process, socket_streams)
+            except BaseException:
+                pass
+        if pid_acl_path is not None:
+            try:
+                _clear_router_pid_read_acl(pid_acl_path)
+                pid_acl_path = None
             except BaseException:
                 pass
         if start_invoked:

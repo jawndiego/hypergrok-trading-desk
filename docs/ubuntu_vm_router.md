@@ -397,6 +397,11 @@ until a successor pins and revalidates the recovery receipt, transaction and
 retained evidence. During the next attempt the temporary root-owned sudoers
 file grants only UID 454 an exact read ACL, verifies that read under UID 454,
 and removes the ACL before retaining the file.
+The controller similarly grants UID 454 temporary read-only access to the
+already-live socket_vmnet PID file only around `limactl start`. This lets Lima
+recognize and reuse the controller-validated daemon; the runtime directory
+remains root-owned and non-writable, and the PID ACL is removed before any
+later guest verification or retained-state qualification.
 
 Both capture passes run pinned macOS observers sequentially under one total
 deadline. The continuous watchdog retains concurrent sampling, but each child
