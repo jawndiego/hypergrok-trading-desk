@@ -407,6 +407,24 @@ for key in ("pre_change_bootout", "post_change_bootout", "post_status_bootout"):
     bootout = value.get(key)
     if not isinstance(bootout, dict) or bootout.get("raw_uid454_processes_absent") is not True:
         raise SystemExit("router home migration bootout evidence differs")
+if value.get("prior_runtime_retained_path") != "/private/var/db/trading-desk-router-bootstrap-v1/quarantine/router-operator-pre-home-migration-vmnet-runtime":
+    raise SystemExit("router home migration retained runtime path differs")
+runtime = value.get("prior_runtime_identity")
+if (
+    not isinstance(runtime, dict)
+    or set(runtime) != {"device", "inode", "mode", "pid", "pid_inode", "pid_sha256", "pid_size", "socket_inode"}
+    or runtime.get("mode") != 0o755
+    or runtime.get("pid_inode") != 55457432
+    or runtime.get("pid_size") != 5
+    or runtime.get("socket_inode") != 55457433
+    or not isinstance(runtime.get("device"), int)
+    or not isinstance(runtime.get("inode"), int)
+    or not isinstance(runtime.get("pid"), str)
+    or not runtime["pid"].isdigit()
+    or not isinstance(runtime.get("pid_sha256"), str)
+    or len(runtime["pid_sha256"]) != 64
+):
+    raise SystemExit("router home migration retained runtime identity differs")
 ' "$ROUTER_HOME_MIGRATION_RECEIPT" || die 'router home migration receipt contract differs'
 }
 
