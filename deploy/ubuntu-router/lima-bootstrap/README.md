@@ -128,6 +128,10 @@ publishes a no-retry quarantine receipt and, in the same invocation, recreates
 a fresh stopped VM from the pinned local image. The new receipt 08 binds that
 quarantine receipt. Air-gap check/apply remains blocked until a later controller
 pins both new receipts and rotates to the printed fresh session.
+If recovery resumes across controller bundles, an attended root-owned mode-0400
+authorization file must bind the immutable predecessor transaction, its exact
+initiating manifest, and the one completing manifest; the quarantine and new
+receipt 08 retain that lineage and reject a third controller.
 
 This does not authorize another guest boot. A later stopped migration must
 remove bootstrap passwordless sudo and per-boot provisioning first.

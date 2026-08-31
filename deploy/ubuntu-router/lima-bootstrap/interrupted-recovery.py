@@ -9,6 +9,9 @@ if SPEC is None or SPEC.loader is None: raise SystemExit("router_interrupted_rec
 C = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(C)
 SOURCE = "91c455c4f6a2ebb670d9ea01b394158c0b48edbb92da55317b3c3e9ec7ffeda9"; FRESH = "e33dbb26c0b91014f0748dd121d78d66627dd11c1fe8db4af0931d2254865999"
 FAILED_MANIFEST = "b8e7fd49e23fa4b988834764f97ffbb1c1e179c26f491b2f098ba04e887d0f4d"; OLD_RECEIPT = "8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6"
+PREDECESSOR_RECOVERY_MANIFEST = "51b0ac392c5588a41512cde239f096de8293d532f7c13bcccf45c38bea171e00"
+TRANSACTION_SHA256 = "e76da7a511d625dc4114cb0696a1ddc2e48029d351a3f8809c266fc7788eb2ef"
+STOPPED_PROOF_SHA256 = "62676d50371deab1de5ef8fbb58f4e87676a8ec9c550d2a3be1da9d4dc822f36"
 FILES = {
     "base": (54537718, 7578, "fa5d70ec9e4b79c177f06a1da4178e9d626212cc230119b12ad9e0999dec8860", 0o400),
     "hardware_lock": (54537798, 7050, "fc295a66b57489906715b2b697df406bf4650e8cbe39c73d0fea0b52a62aad32", 0o400),
@@ -140,6 +143,10 @@ def _stationary(state: dict[str, Path]) -> dict[str, str]:
     if b"for process 35850\n" not in _fixed(root / f"socket-vmnet-{SOURCE}.stderr", "socket_stderr"):
         raise C.BootstrapError("socket PID evidence differs")
     return values
+def _reject_final_pending(path: Path) -> None:
+    pending = path.parent / f".{path.name}.pending"
+    if (path.exists() or path.is_symlink()) and (pending.exists() or pending.is_symlink()):
+        raise C.BootstrapError("interrupted final/pending state is ambiguous")
 def _quiescent(lock: dict[str, Any], state: dict[str, Path]) -> None:
     C._assert_no_airgap_watchdog_process()
     if C._router_uid_processes():
@@ -161,11 +168,19 @@ def _quiescent(lock: dict[str, Any], state: dict[str, Path]) -> None:
     ]
     if any(path.exists() or path.is_symlink() for path in absent):
         raise C.BootstrapError("interrupted absence frontier differs")
+    for path in (
+        state["receipts"] / f"12-interrupted-first-boot-resume-authorization-{SOURCE}.json",
+        state["quarantine"] / f"interrupted-first-boot-transaction-{SOURCE}.json",
+        state["quarantine"] / f"interrupted-first-boot-stopped-proof-{SOURCE}.json",
+        state["receipts"] / f"12-interrupted-first-boot-quarantine-{SOURCE}.json",
+    ):
+        _reject_final_pending(path)
 def _fresh_absent(state: dict[str, Path]) -> None:
     receipt = state["receipts"] / f"12-interrupted-first-boot-quarantine-{FRESH}.json"
+    authorization = state["receipts"] / f"12-interrupted-first-boot-resume-authorization-{FRESH}.json"
     transaction = state["quarantine"] / f"interrupted-first-boot-transaction-{FRESH}.json"
     proof = state["quarantine"] / f"interrupted-first-boot-stopped-proof-{FRESH}.json"
-    paths = C._fresh_recovery_artifacts(state, FRESH) + [receipt, receipt.parent / f".{receipt.name}.pending", transaction, transaction.parent / f".{transaction.name}.pending", proof, proof.parent / f".{proof.name}.pending"]
+    paths = C._fresh_recovery_artifacts(state, FRESH) + [receipt, receipt.parent / f".{receipt.name}.pending", authorization, authorization.parent / f".{authorization.name}.pending", transaction, transaction.parent / f".{transaction.name}.pending", proof, proof.parent / f".{proof.name}.pending"]
     paths += [state["quarantine"] / f"interrupted-first-boot-{key}-{FRESH}" for key in ORDER]
     if any(path.exists() or path.is_symlink() for path in paths):
         raise C.BootstrapError("fresh interrupted-recovery namespace differs")
@@ -192,6 +207,62 @@ def _process_home(lock: dict[str, Any], transaction_exists: bool) -> dict[str, i
     C._rename_exclusive(pending, final)
     item = C._assert_real(final, kind="directory", uid=454, gid=454, mode=0o700)
     return {"device": item.st_dev, "inode": item.st_ino}
+def _empty_lima_store(lock: dict[str, Any], limactl: Path) -> None:
+    result = subprocess.run(
+        [str(limactl), "--log-level=error", "list", "--format=json"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=C._environment(lock), preexec_fn=C._drop_preexec(454, 454),
+        timeout=30, check=False,
+    )
+    if result.returncode != 0 or result.stdout or result.stderr:
+        raise C.BootstrapError("post-quarantine Lima store is not empty")
+def _installing(lock: dict[str, Any], state: dict[str, Path], completing_manifest: str) -> bool:
+    path = state["state"] / ".hardened-vm.INSTALLING.json"
+    if not path.exists() and not path.is_symlink():
+        return False
+    content = C._read_bound(path, uid=0, gid=0, mode=0o400, maximum=4096); C._no_named_acl(path)
+    expected = {
+        "controller_manifest_sha256": completing_manifest,
+        "hardened_plan_sha256": lock["pins"]["hardened_plan_sha256"],
+        "kind": "trading-desk.router-bootstrap.installing",
+        "networks_first_boot_sha256": lock["pins"]["networks_first_boot_sha256"],
+        "phase": "hardened-vm",
+        "predecessor_vm_receipt_sha256": lock["pins"]["predecessor_vm_receipt_sha256"],
+        "schema_version": 1,
+    }
+    if content != C._canonical_json(expected):
+        raise C.BootstrapError("recreated VM INSTALLING marker differs")
+    return True
+def _resume_authorization(lock: dict[str, Any], state: dict[str, Path], completing_manifest: str, transaction_sha256: str) -> tuple[str, str, dict[str, Any]]:
+    if C.SHA256_RE.fullmatch(TRANSACTION_SHA256) is None or transaction_sha256 != TRANSACTION_SHA256:
+        raise C.BootstrapError("predecessor transaction digest is not authorized")
+    stop_line = {
+        "executor_started": False, "mainnet_authorized": False,
+        "network_reconnect_authorized": False,
+        "router_key_generation_authorized": False,
+        "unconstrained_vm_start_authorized": False,
+        "venue_credentials_authorized": False, "venue_writes_authorized": False,
+    }
+    if lock.get("stop_line") != stop_line:
+        raise C.BootstrapError("resume authorization stop line differs")
+    path = state["receipts"] / f"12-interrupted-first-boot-resume-authorization-{SOURCE}.json"
+    _reject_final_pending(path)
+    content = C._read_bound(path, uid=0, gid=0, mode=0o400, maximum=4096); C._no_named_acl(path)
+    expected = {
+        "completing_recovery_controller_manifest_sha256": completing_manifest,
+        "initiating_recovery_controller_manifest_sha256": PREDECESSOR_RECOVERY_MANIFEST,
+        "kind": "trading-desk.router-bootstrap.interrupted-first-boot-resume-authorization",
+        "mainnet_authorized": False,
+        "network_changes_authorized": False,
+        "recreation_authorized": True,
+        "schema_version": 1, "source_session_id": SOURCE,
+        "stop_line": stop_line,
+        "transaction_sha256": transaction_sha256,
+        "venue_writes_authorized": False,
+    }
+    if content != C._canonical_json(expected):
+        raise C.BootstrapError("interrupted recovery resume authorization differs")
+    return str(path), C._sha256_bytes(content), expected
 def _transaction(lock: dict[str, Any], state: dict[str, Path], content: bytes) -> dict[str, Any]:
     value = C._load_json_bytes(content, "interrupted transaction")
     paths = _paths(lock, state)
@@ -201,7 +272,7 @@ def _transaction(lock: dict[str, Any], state: dict[str, Path], content: bytes) -
         "moves": [{"destination": str(paths[key][1]), "key": key, "source": str(paths[key][0])} for key in ORDER],
         "schema_version": 1, "source_session_id": SOURCE,
     }
-    if set(value) != set(fixed) | {"instance", "library", "old_receipt08", "recovery_controller_manifest_sha256", "runtime", "stationary_logs", "sudoers"} or {key: value.get(key) for key in fixed} != fixed or C.SHA256_RE.fullmatch(value.get("recovery_controller_manifest_sha256", "")) is None:
+    if set(value) != set(fixed) | {"instance", "library", "old_receipt08", "recovery_controller_manifest_sha256", "runtime", "stationary_logs", "sudoers"} or {key: value.get(key) for key in fixed} != fixed or value.get("recovery_controller_manifest_sha256") != PREDECESSOR_RECOVERY_MANIFEST:
         raise C.BootstrapError("interrupted transaction differs")
     return value
 def _retained(lock: dict[str, Any], state: dict[str, Path], value: dict[str, Any]) -> None:
@@ -223,7 +294,10 @@ def _retained(lock: dict[str, Any], state: dict[str, Path], value: dict[str, Any
             raise C.BootstrapError("interrupted source evidence reappeared")
 def _proof(lock: dict[str, Any], state: dict[str, Path], transaction_sha256: str) -> tuple[dict[str, Any], bytes]:
     source = state["quarantine"] / f"interrupted-first-boot-stopped-proof-{SOURCE}.json"
+    _reject_final_pending(source)
     proof_content = C._read_bound(source, uid=0, gid=0, mode=0o400, maximum=64 * 1024); C._no_named_acl(source)
+    if C._sha256_bytes(proof_content) != STOPPED_PROOF_SHA256:
+        raise C.BootstrapError("predecessor stopped proof digest differs")
     proof = C._load_json_bytes(proof_content, "interrupted stopped proof")
     home = C._assert_real(Path(lock["paths"]["lima_process_home"]), kind="directory", uid=454, gid=454, mode=0o700)
     proof_expected = {
@@ -236,8 +310,9 @@ def _proof(lock: dict[str, Any], state: dict[str, Path], transaction_sha256: str
     if proof != proof_expected or C.SHA256_RE.fullmatch(proof.get("status_sha256", "")) is None:
         raise C.BootstrapError("interrupted stopped proof differs")
     return proof, proof_content
-def _receipt(lock: dict[str, Any], state: dict[str, Path], value: dict[str, Any], transaction_sha256: str) -> tuple[dict[str, Any], str]:
+def _receipt(lock: dict[str, Any], state: dict[str, Path], value: dict[str, Any], transaction_sha256: str, completing_manifest: str) -> tuple[dict[str, Any], str]:
     _proof_value, proof_content = _proof(lock, state, transaction_sha256)
+    authorization_path, authorization_sha256, authorization = _resume_authorization(lock, state, completing_manifest, transaction_sha256)
     home = Path(lock["paths"]["lima_process_home"]).stat()
     transaction_path = state["quarantine"] / f"interrupted-first-boot-transaction-{SOURCE}.json"
     expected = {
@@ -248,7 +323,11 @@ def _receipt(lock: dict[str, Any], state: dict[str, Path], value: dict[str, Any]
         "mainnet_authorized": False, "network_changes_performed": False,
         "process_home_device": home.st_dev, "process_home_inode": home.st_ino,
         "quarantined_paths": [item["destination"] for item in value["moves"]],
-        "recovery_controller_manifest_sha256": value["recovery_controller_manifest_sha256"],
+        "resume_authorization": authorization,
+        "resume_authorization_path": authorization_path,
+        "resume_authorization_sha256": authorization_sha256,
+        "initiating_recovery_controller_manifest_sha256": PREDECESSOR_RECOVERY_MANIFEST,
+        "completing_recovery_controller_manifest_sha256": completing_manifest,
         "recreation_authorized": True, "schema_version": 1,
         "source_session_id": SOURCE, "source_vm_status": "Stopped", "start_invoked": True,
         "stopped_proof_sha256": C._sha256_bytes(proof_content),
@@ -256,21 +335,30 @@ def _receipt(lock: dict[str, Any], state: dict[str, Path], value: dict[str, Any]
         "venue_writes_authorized": False, "vm_boot_observed": True,
     }
     path = state["receipts"] / f"12-interrupted-first-boot-quarantine-{SOURCE}.json"
+    _reject_final_pending(path)
     content = C._read_bound(path, uid=0, gid=0, mode=0o400, maximum=128 * 1024); C._no_named_acl(path)
     actual = C._load_json_bytes(content, "interrupted quarantine receipt")
     if actual != expected:
         raise C.BootstrapError("interrupted quarantine receipt differs")
     return actual, C._sha256_bytes(content)
-def _handoff(lock: dict[str, Any], state: dict[str, Path], digest: str) -> None:
+def _handoff(lock: dict[str, Any], state: dict[str, Path], digest: str, completing_manifest: str) -> None:
     path = state["quarantine"] / f"interrupted-first-boot-transaction-{SOURCE}.json"
+    _reject_final_pending(path)
     content = C._read_bound(path, uid=0, gid=0, mode=0o400, maximum=256 * 1024); C._no_named_acl(path)
     transaction = _transaction(lock, state, content)
     _retained(lock, state, transaction)
-    _value, observed = _receipt(lock, state, transaction, C._sha256_bytes(content))
-    if observed != digest or any(path.exists() or path.is_symlink() for path, _destination in _paths(lock, state).values()):
+    _value, observed = _receipt(lock, state, transaction, C._sha256_bytes(content), completing_manifest)
+    sources = {key: source.exists() or source.is_symlink() for key, (source, _destination) in _paths(lock, state).items()}
+    installing = _installing(lock, state, completing_manifest)
+    if (
+        observed != digest or any(present for key, present in sources.items() if key not in {"instance", "receipt08"})
+        or (sources["instance"] and not installing)
+        or (sources["receipt08"] and (not installing or _new_receipt(lock, state, digest, completing_manifest, C._sha256_bytes(content), route_installing=False) is None))
+    ):
         raise C.BootstrapError("interrupted recreate handoff differs")
     _quiescent(lock, state); _fresh_absent(state)
-def _new_receipt(lock: dict[str, Any], digest: str) -> tuple[Path, str] | None:
+def _new_receipt(lock: dict[str, Any], state: dict[str, Path], digest: str, completing_manifest: str, transaction_sha256: str, *, route_installing: bool = True) -> tuple[Path, str] | None:
+    _resume_authorization(lock, state, completing_manifest, transaction_sha256)
     path = Path(lock["paths"]["hardened_vm_receipt"])
     instance = Path(lock["paths"]["lima_home"]) / lock["guest"]["instance_name"]
     if not path.exists() and not path.is_symlink():
@@ -279,6 +367,7 @@ def _new_receipt(lock: dict[str, Any], digest: str) -> tuple[Path, str] | None:
     value = C._load_json_bytes(content, "recreated receipt08")
     if (
         value.get("interrupted_first_boot_quarantine_receipt_sha256") != digest
+        or value.get("active_controller_manifest_sha256") != completing_manifest
         or value.get("disk_sha256") != lock["pins"]["predecessor_disk_sha256"]
         or value.get("vm_status") != "Stopped" or value.get("vm_started") is not False
         or (value.get("ready_for_attended_airgapped_start"), value.get("network_changes_performed"), value.get("network_reconnect_authorized"), value.get("venue_writes_authorized"), value.get("mainnet_authorized")) != (True, False, False, False, False)
@@ -286,6 +375,8 @@ def _new_receipt(lock: dict[str, Any], digest: str) -> tuple[Path, str] | None:
     ):
         raise C.BootstrapError("recreated receipt08 differs")
     C._hardened_instance_evidence(lock, value, allow_runtime_files=False)
+    if _installing(lock, state, completing_manifest) and route_installing:
+        return None
     return path, C._sha256_bytes(content)
 def recover(args: argparse.Namespace) -> int:
     C._verify_bundle(args.expected_controller_manifest_sha256)
@@ -300,48 +391,18 @@ def recover(args: argparse.Namespace) -> int:
     receipt_path = state["receipts"] / f"12-interrupted-first-boot-quarantine-{SOURCE}.json"
     _quiescent(lock, state); _fresh_absent(state)
     transaction_exists = transaction_path.exists() or transaction_path.is_symlink()
+    _reject_final_pending(transaction_path)
     if not transaction_exists:
-        process_home = Path(lock["paths"]["lima_process_home"])
-        process_pending = process_home.parent / f".{process_home.name}-{SOURCE}.pending"
-        if any(path.exists() or path.is_symlink() for path in [process_home, process_pending, *[item[1] for item in paths.values()]]) or any(not item[0].exists() or item[0].is_symlink() for item in paths.values()):
-            raise C.BootstrapError("interrupted initial namespace differs")
-        markers = {
-            "attempt_id": SOURCE, "controller_manifest_sha256": FAILED_MANIFEST,
-            "hardened_vm_receipt_sha256": OLD_RECEIPT,
-            "kind": "trading-desk.router-bootstrap.installing", "phase": "airgap-first-boot",
-            "physical_airgap_attested": True, "schema_version": 1,
-            "start_invocation_limit": 1, "state": "PREPARING",
-        }
-        if _fixed(paths["preparing"][0], "preparing") != C._canonical_json(markers):
-            raise C.BootstrapError("PREPARING marker differs")
-        starting = {**markers, "start_argv_sha256": C._sha256_bytes(C._canonical_json(list(C.AIRGAP_START_ARGUMENTS))), "state": "STARTING"}
-        if _fixed(paths["starting"][0], "starting") != C._canonical_json(starting):
-            raise C.BootstrapError("STARTING marker differs")
-        for key in ("base", "hardware_lock"):
-            if C._load_json_bytes(_fixed(paths[key][0], key), key).get("capture_session_id") != SOURCE:
-                raise C.BootstrapError("capture session differs")
-        receipt08, receipt_spec = _old_receipt(lock, paths["receipt08"][0])
-        transaction = {
-            "failed_controller_manifest_sha256": FAILED_MANIFEST, "fresh_session_id": FRESH,
-            "instance": _opaque_instance(paths["instance"][0], receipt08),
-            "kind": "trading-desk.router-bootstrap.interrupted-first-boot-transaction",
-            "library": _library(paths["library"][0]),
-            "moves": [{"destination": str(paths[key][1]), "key": key, "source": str(paths[key][0])} for key in ORDER],
-            "old_receipt08": receipt_spec,
-            "recovery_controller_manifest_sha256": args.expected_controller_manifest_sha256,
-            "runtime": _runtime(paths["runtime"][0], cleared=False), "schema_version": 1,
-            "source_session_id": SOURCE, "stationary_logs": _stationary(state),
-            "sudoers": _sudoers(paths["sudoers"][0], cleared=False),
-        }
-        C._atomic_receipt(state["quarantine"], transaction_path.name, transaction)
+        raise C.BootstrapError("predecessor recovery transaction is absent")
     transaction_content = C._read_bound(transaction_path, uid=0, gid=0, mode=0o400, maximum=256 * 1024); C._no_named_acl(transaction_path)
     transaction = _transaction(lock, state, transaction_content)
     transaction_sha256 = C._sha256_bytes(transaction_content)
-    if transaction["recovery_controller_manifest_sha256"] != args.expected_controller_manifest_sha256:
-        raise C.BootstrapError("recovery controller differs")
+    if args.expected_controller_manifest_sha256 == PREDECESSOR_RECOVERY_MANIFEST:
+        raise C.BootstrapError("completing recovery controller did not advance")
+    authorization_path, authorization_sha256, authorization = _resume_authorization(lock, state, args.expected_controller_manifest_sha256, transaction_sha256)
     if receipt_path.exists() or receipt_path.is_symlink():
         _retained(lock, state, transaction)
-        _receipt_value, digest = _receipt(lock, state, transaction, transaction_sha256)
+        _receipt_value, digest = _receipt(lock, state, transaction, transaction_sha256, args.expected_controller_manifest_sha256)
     else:
         current = {key: C._recovery_current_path(*move) for key, move in paths.items()}
         for key in ("base", "hardware_lock", "preparing", "starting"):
@@ -394,12 +455,8 @@ def recover(args: argparse.Namespace) -> int:
             if key not in {"library", "instance", "runtime", "sudoers"}:
                 C._resume_recovery_moves((paths[key],))
         _quiescent(lock, state)
-        empty = subprocess.run(
-            [str(limactl), "list", "--format=json"], stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=C._environment(lock),
-            preexec_fn=C._drop_preexec(454, 454), timeout=30, check=False,
-        )
-        if empty.returncode or empty.stdout or empty.stderr or any(path.exists() or path.is_symlink() for path, _destination in paths.values()):
+        _empty_lima_store(lock, limactl)
+        if any(path.exists() or path.is_symlink() for path, _destination in paths.values()):
             raise C.BootstrapError("live Lima instance remains")
         _retained(lock, state, transaction)
         receipt = {
@@ -410,7 +467,11 @@ def recover(args: argparse.Namespace) -> int:
             "mainnet_authorized": False, "network_changes_performed": False,
             "process_home_device": home["device"], "process_home_inode": home["inode"],
             "quarantined_paths": [item["destination"] for item in transaction["moves"]],
-            "recovery_controller_manifest_sha256": args.expected_controller_manifest_sha256,
+            "resume_authorization": authorization,
+            "resume_authorization_path": authorization_path,
+            "resume_authorization_sha256": authorization_sha256,
+            "initiating_recovery_controller_manifest_sha256": PREDECESSOR_RECOVERY_MANIFEST,
+            "completing_recovery_controller_manifest_sha256": args.expected_controller_manifest_sha256,
             "recreation_authorized": True, "schema_version": 1,
             "source_session_id": SOURCE, "source_vm_status": "Stopped", "start_invoked": True,
             "stopped_proof_sha256": C._sha256_bytes(proof_content),
@@ -421,15 +482,15 @@ def recover(args: argparse.Namespace) -> int:
         if C._network_snapshot() != before_network:
             raise C.BootstrapError("network changed during quarantine")
         _path, digest = C._atomic_receipt(state["receipts"], receipt_path.name, receipt)
-        _receipt(lock, state, transaction, transaction_sha256)
-    recreated = _new_receipt(lock, digest)
+        _receipt(lock, state, transaction, transaction_sha256, args.expected_controller_manifest_sha256)
+    recreated = _new_receipt(lock, state, digest, args.expected_controller_manifest_sha256, transaction_sha256)
     if recreated is None:
         os.close(state["lock_descriptor"])
         state["lock_descriptor"] = -1
         setattr(args, "_interrupted_quarantine_receipt_sha256", digest)
-        setattr(args, "_interrupted_authorization_validator", _handoff)
+        setattr(args, "_interrupted_authorization_validator", lambda lock, state, digest: _handoff(lock, state, digest, args.expected_controller_manifest_sha256))
         C._apply_hardened_vm(args)
-        recreated = _new_receipt(lock, digest)
+        recreated = _new_receipt(lock, state, digest, args.expected_controller_manifest_sha256, transaction_sha256)
         if recreated is None:
             raise C.BootstrapError("recreated receipt08 is absent")
     print(f"interrupted_first_boot_quarantine_receipt_sha256={digest}")

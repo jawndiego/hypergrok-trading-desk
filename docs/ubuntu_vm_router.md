@@ -419,6 +419,9 @@ after a durable stopped proof may the failed instance move. The same command
 then recreates a stopped VM from pinned local media, and the new receipt 08 must
 bind the quarantine receipt. A later successor must pin both receipts and a new
 session before any air-gap check or start can be admitted.
+Cross-controller resume additionally requires an attended root-owned immutable
+authorization binding the exact predecessor transaction and the sole completing
+controller; both identities are carried into the quarantine/new-receipt chain.
 
 Both capture passes run pinned macOS observers sequentially under one total
 deadline. The continuous watchdog retains concurrent sampling, but each child

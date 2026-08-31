@@ -2,6 +2,7 @@ import argparse
 import importlib.util
 import inspect
 from pathlib import Path
+import subprocess
 import tempfile
 import types
 import unittest
@@ -38,6 +39,8 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
             "ce00dc50bc7e299d831dc8bd05afabd5b291fa7ecca234c7c1f7713d06134d46",
             module.CORE["disk"][2],
         )
+        self.assertEqual("e76da7a511d625dc4114cb0696a1ddc2e48029d351a3f8809c266fc7788eb2ef", module.TRANSACTION_SHA256)
+        self.assertEqual("62676d50371deab1de5ef8fbb58f4e87676a8ec9c550d2a3be1da9d4dc822f36", module.STOPPED_PROOF_SHA256)
         self.assertEqual(
             (
                 "library", "instance", "runtime", "sudoers", "base",
@@ -46,6 +49,17 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
             module.ORDER,
         )
         self.assertNotIn("delete", RECOVERY.read_text().lower())
+
+    def test_wrong_stopped_proof_digest_is_rejected_before_parsing(self):
+        module = self.recovery
+        with tempfile.TemporaryDirectory() as temporary:
+            state = {"quarantine": Path(temporary)}
+            with (
+                mock.patch.object(module.C, "_read_bound", return_value=b"wrong-proof"),
+                mock.patch.object(module.C, "_no_named_acl"),
+            ):
+                with self.assertRaisesRegex(module.C.BootstrapError, "proof digest"):
+                    module._proof({}, state, module.TRANSACTION_SHA256)
 
     def test_library_and_instance_extras_are_opaque(self):
         library = inspect.getsource(self.recovery._library)
@@ -57,7 +71,7 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
 
     def test_transaction_and_stopped_proof_precede_moves_and_recreate(self):
         source = inspect.getsource(self.recovery.recover)
-        transaction = source.index("_atomic_receipt(state[\"quarantine\"], transaction_path.name")
+        transaction = source.index("transaction = _transaction(lock, state, transaction_content)")
         library_move = source.index("_rename_exclusive(*paths[\"library\"])")
         proof = source.index("_atomic_receipt(state[\"quarantine\"], proof_path.name")
         instance_move = source.index("_resume_recovery_moves((paths[\"instance\"],))")
@@ -68,6 +82,34 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
         self.assertLess(proof, instance_move)
         self.assertLess(instance_move, final_receipt)
         self.assertLess(final_receipt, recreate)
+        self.assertIn("_empty_lima_store(lock, limactl)", source)
+        self.assertIn("predecessor recovery transaction is absent", source)
+
+    def test_empty_store_uses_error_only_logging_and_strict_empty_result(self):
+        module = self.recovery
+        success = subprocess.CompletedProcess([], 0, b"", b"")
+        with (
+            mock.patch.object(module.C, "_environment", return_value={}),
+            mock.patch.object(module.C, "_drop_preexec", return_value=None),
+            mock.patch.object(module.subprocess, "run", return_value=success) as run,
+        ):
+            module._empty_lima_store({}, Path("/pinned/limactl"))
+        self.assertEqual(
+            ["/pinned/limactl", "--log-level=error", "list", "--format=json"],
+            run.call_args.args[0],
+        )
+        for result in (
+            subprocess.CompletedProcess([], 2, b"", b""),
+            subprocess.CompletedProcess([], 0, b"{}\n", b""),
+            subprocess.CompletedProcess([], 0, b"", b"warning\n"),
+        ):
+            with (
+                mock.patch.object(module.C, "_environment", return_value={}),
+                mock.patch.object(module.C, "_drop_preexec", return_value=None),
+                mock.patch.object(module.subprocess, "run", return_value=result),
+            ):
+                with self.assertRaises(module.C.BootstrapError):
+                    module._empty_lima_store({}, Path("/pinned/limactl"))
 
     def test_transaction_rejects_any_move_drift(self):
         module = self.recovery
@@ -96,7 +138,7 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
                 for key in module.ORDER
             ],
             "old_receipt08": [],
-            "recovery_controller_manifest_sha256": "a" * 64,
+            "recovery_controller_manifest_sha256": module.PREDECESSOR_RECOVERY_MANIFEST,
             "runtime": {},
             "schema_version": 1,
             "source_session_id": module.SOURCE,
@@ -105,9 +147,219 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
         }
         content = module.C._canonical_json(value)
         self.assertEqual(value, module._transaction(lock, state, content))
+        value["recovery_controller_manifest_sha256"] = "b" * 64
+        with self.assertRaises(module.C.BootstrapError):
+            module._transaction(lock, state, module.C._canonical_json(value))
+        value["recovery_controller_manifest_sha256"] = module.PREDECESSOR_RECOVERY_MANIFEST
         value["moves"][0]["destination"] += "-drift"
         with self.assertRaises(module.C.BootstrapError):
             module._transaction(lock, state, module.C._canonical_json(value))
+
+    def test_receipt_binds_predecessor_and_exact_completing_controller(self):
+        module = self.recovery
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            home.mkdir()
+            state = {"quarantine": root / "quarantine", "receipts": root / "receipts"}
+            for path in state.values():
+                path.mkdir()
+            lock = {"paths": {"lima_process_home": str(home)}}
+            transaction = {
+                "moves": [{"destination": "/retained"}],
+                "recovery_controller_manifest_sha256": module.PREDECESSOR_RECOVERY_MANIFEST,
+            }
+            current = "c" * 64
+            transaction_sha = "d" * 64
+            authorization = {"sealed": True}
+            home_stat = home.stat()
+            expected = {
+                "automatic_retry_authorized": False,
+                "credentials_accessed": False,
+                "disk_reuse_authorized": False,
+                "failed_controller_manifest_sha256": module.FAILED_MANIFEST,
+                "fresh_session_id": module.FRESH,
+                "kind": "trading-desk.router-bootstrap.interrupted-first-boot-quarantine",
+                "mainnet_authorized": False,
+                "network_changes_performed": False,
+                "process_home_device": home_stat.st_dev,
+                "process_home_inode": home_stat.st_ino,
+                "quarantined_paths": ["/retained"],
+                "resume_authorization": authorization,
+                "resume_authorization_path": "/authorization",
+                "resume_authorization_sha256": "a" * 64,
+                "initiating_recovery_controller_manifest_sha256": module.PREDECESSOR_RECOVERY_MANIFEST,
+                "completing_recovery_controller_manifest_sha256": current,
+                "recreation_authorized": True,
+                "schema_version": 1,
+                "source_session_id": module.SOURCE,
+                "source_vm_status": "Stopped",
+                "start_invoked": True,
+                "stopped_proof_sha256": module.C._sha256_bytes(b"proof"),
+                "transaction_path": str(state["quarantine"] / f"interrupted-first-boot-transaction-{module.SOURCE}.json"),
+                "transaction_sha256": transaction_sha,
+                "venue_writes_authorized": False,
+                "vm_boot_observed": True,
+            }
+            content = module.C._canonical_json(expected)
+            with (
+                mock.patch.object(module, "_proof", return_value=({}, b"proof")),
+                mock.patch.object(module, "_resume_authorization", return_value=("/authorization", "a" * 64, authorization)),
+                mock.patch.object(module.C, "_read_bound", return_value=content),
+                mock.patch.object(module.C, "_no_named_acl"),
+            ):
+                receipt, _digest = module._receipt(lock, state, transaction, transaction_sha, current)
+                self.assertEqual(expected, receipt)
+                with self.assertRaises(module.C.BootstrapError):
+                    module._receipt(lock, state, transaction, transaction_sha, "e" * 64)
+
+    def test_external_resume_authorization_rejects_wrong_transaction_or_completer(self):
+        module = self.recovery
+        with tempfile.TemporaryDirectory() as temporary:
+            receipts = Path(temporary)
+            state = {"receipts": receipts}
+            current = "c" * 64
+            transaction_sha = "d" * 64
+            path = receipts / f"12-interrupted-first-boot-resume-authorization-{module.SOURCE}.json"
+            stop_line = {
+                "executor_started": False,
+                "mainnet_authorized": False,
+                "network_reconnect_authorized": False,
+                "router_key_generation_authorized": False,
+                "unconstrained_vm_start_authorized": False,
+                "venue_credentials_authorized": False,
+                "venue_writes_authorized": False,
+            }
+            lock = {"stop_line": stop_line}
+            expected = {
+                "completing_recovery_controller_manifest_sha256": current,
+                "initiating_recovery_controller_manifest_sha256": module.PREDECESSOR_RECOVERY_MANIFEST,
+                "kind": "trading-desk.router-bootstrap.interrupted-first-boot-resume-authorization",
+                "mainnet_authorized": False,
+                "network_changes_authorized": False,
+                "recreation_authorized": True,
+                "schema_version": 1,
+                "source_session_id": module.SOURCE,
+                "stop_line": stop_line,
+                "transaction_sha256": transaction_sha,
+                "venue_writes_authorized": False,
+            }
+            content = module.C._canonical_json(expected)
+            with (
+                mock.patch.object(module, "TRANSACTION_SHA256", transaction_sha),
+                mock.patch.object(module.C, "_read_bound", return_value=content),
+                mock.patch.object(module.C, "_no_named_acl"),
+            ):
+                self.assertEqual((str(path), module.C._sha256_bytes(content), expected), module._resume_authorization(lock, state, current, transaction_sha))
+                with self.assertRaises(module.C.BootstrapError):
+                    module._resume_authorization(lock, state, "e" * 64, transaction_sha)
+                with self.assertRaises(module.C.BootstrapError):
+                    module._resume_authorization(lock, state, current, "f" * 64)
+                with self.assertRaises(module.C.BootstrapError):
+                    module._resume_authorization({"stop_line": {**stop_line, "executor_started": True}}, state, current, transaction_sha)
+
+    def test_new_receipt_routes_exact_installing_marker_through_apply_cleanup(self):
+        module = self.recovery
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            receipt = root / "08.json"
+            instance = root / "instance"
+            receipt.touch()
+            instance.mkdir()
+            lock = {
+                "paths": {"hardened_vm_receipt": str(receipt), "lima_home": str(root)},
+                "guest": {"instance_name": "instance"},
+                "pins": {"predecessor_disk_sha256": "p" * 64},
+            }
+            current = "c" * 64
+            value = {
+                "active_controller_manifest_sha256": current,
+                "disk_sha256": "p" * 64,
+                "interrupted_first_boot_quarantine_receipt_sha256": "q" * 64,
+                "mainnet_authorized": False,
+                "network_changes_performed": False,
+                "network_reconnect_authorized": False,
+                "ready_for_attended_airgapped_start": True,
+                "venue_writes_authorized": False,
+                "vm_started": False,
+                "vm_status": "Stopped",
+            }
+            content = module.C._canonical_json(value)
+            with (
+                mock.patch.object(module, "_resume_authorization"),
+                mock.patch.object(module.C, "_read_bound", return_value=content),
+                mock.patch.object(module.C, "_no_named_acl"),
+                mock.patch.object(module.C, "_hardened_instance_evidence"),
+                mock.patch.object(module, "_installing", return_value=True),
+            ):
+                self.assertIsNone(module._new_receipt(lock, {"state": root}, "q" * 64, current, "t" * 64))
+                self.assertIsNotNone(module._new_receipt(lock, {"state": root}, "q" * 64, current, "t" * 64, route_installing=False))
+                value["active_controller_manifest_sha256"] = "e" * 64
+                with mock.patch.object(module.C, "_load_json_bytes", return_value=value):
+                    with self.assertRaises(module.C.BootstrapError):
+                        module._new_receipt(lock, {"state": root}, "q" * 64, current, "t" * 64)
+
+    def test_installing_marker_exactly_binds_completing_controller(self):
+        module = self.recovery
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            marker = root / ".hardened-vm.INSTALLING.json"
+            marker.touch()
+            state = {"state": root}
+            current = "c" * 64
+            lock = {"pins": {
+                "hardened_plan_sha256": "h" * 64,
+                "networks_first_boot_sha256": "n" * 64,
+                "predecessor_vm_receipt_sha256": "p" * 64,
+            }}
+            expected = module.C._canonical_json({
+                "controller_manifest_sha256": current,
+                "hardened_plan_sha256": "h" * 64,
+                "kind": "trading-desk.router-bootstrap.installing",
+                "networks_first_boot_sha256": "n" * 64,
+                "phase": "hardened-vm",
+                "predecessor_vm_receipt_sha256": "p" * 64,
+                "schema_version": 1,
+            })
+            with (
+                mock.patch.object(module.C, "_read_bound", return_value=expected),
+                mock.patch.object(module.C, "_no_named_acl"),
+            ):
+                self.assertTrue(module._installing(lock, state, current))
+            with (
+                mock.patch.object(module.C, "_read_bound", return_value=b"{}\n"),
+                mock.patch.object(module.C, "_no_named_acl"),
+            ):
+                with self.assertRaises(module.C.BootstrapError):
+                    module._installing(lock, state, current)
+
+    def test_handoff_allows_only_exact_installing_partial_instance_source(self):
+        module = self.recovery
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            instance = root / "instance"
+            instance.touch()
+            runtime = root / "runtime"
+            paths = {"instance": (instance, root / "retained-instance"), "receipt08": (root / "receipt08", root / "retained-receipt"), "runtime": (runtime, root / "retained-runtime")}
+            state = {"quarantine": root, "state": root, "receipts": root}
+            def invoke():
+                with (
+                    mock.patch.object(module.C, "_read_bound", return_value=b"transaction"),
+                    mock.patch.object(module.C, "_no_named_acl"),
+                    mock.patch.object(module.C, "_sha256_bytes", return_value="d" * 64),
+                    mock.patch.object(module, "_transaction", return_value={}),
+                    mock.patch.object(module, "_retained"),
+                    mock.patch.object(module, "_receipt", return_value=({}, "d" * 64)),
+                    mock.patch.object(module, "_paths", return_value=paths),
+                    mock.patch.object(module, "_installing", return_value=True),
+                    mock.patch.object(module, "_quiescent"),
+                    mock.patch.object(module, "_fresh_absent"),
+                ):
+                    return module._handoff({}, state, "d" * 64, "c" * 64)
+            invoke()
+            runtime.touch()
+            with self.assertRaises(module.C.BootstrapError):
+                invoke()
 
     def test_each_move_has_source_xor_destination_resume_semantics(self):
         helper = self.recovery.C._recovery_current_path
@@ -222,15 +474,16 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
                 mock.patch.object(module, "_paths", return_value={"instance": (source, Path(temporary) / "retained")}),
             ):
                 with self.assertRaises(module.C.BootstrapError):
-                    module._handoff({}, state, "d" * 64)
+                    module._handoff({}, state, "d" * 64, "c" * 64)
 
     def test_source_absence_frontier_rejects_every_pending_and_check_path(self):
         module = self.recovery
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            state = {"state": root / "state", "receipts": root / "receipts"}
+            state = {"state": root / "state", "receipts": root / "receipts", "quarantine": root / "quarantine"}
             (state["state"] / "airgap-watchdog-results").mkdir(parents=True)
             state["receipts"].mkdir()
+            state["quarantine"].mkdir()
             receipt09 = state["receipts"] / "09-airgap-first-boot-stopped.json"
             lock = {"paths": {"airgap_first_boot_receipt": str(receipt09)}}
             paths = [
@@ -259,6 +512,37 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
                         module._quiescent(lock, state)
                     path.unlink()
 
+    def test_source_final_pending_ambiguity_rejects_all_four_lineage_artifacts(self):
+        module = self.recovery
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = {"state": root / "state", "receipts": root / "receipts", "quarantine": root / "quarantine"}
+            (state["state"] / "airgap-watchdog-results").mkdir(parents=True)
+            state["receipts"].mkdir()
+            state["quarantine"].mkdir()
+            receipt09 = state["receipts"] / "09-airgap-first-boot-stopped.json"
+            lock = {"paths": {"airgap_first_boot_receipt": str(receipt09)}}
+            finals = (
+                state["receipts"] / f"12-interrupted-first-boot-resume-authorization-{module.SOURCE}.json",
+                state["quarantine"] / f"interrupted-first-boot-transaction-{module.SOURCE}.json",
+                state["quarantine"] / f"interrupted-first-boot-stopped-proof-{module.SOURCE}.json",
+                state["receipts"] / f"12-interrupted-first-boot-quarantine-{module.SOURCE}.json",
+            )
+            with (
+                mock.patch.object(module.C, "_assert_no_airgap_watchdog_process"),
+                mock.patch.object(module.C, "_router_uid_processes", return_value=[]),
+                mock.patch.object(module.C, "_assert_no_vm_process"),
+            ):
+                for final in finals:
+                    pending = final.parent / f".{final.name}.pending"
+                    pending.touch()
+                    module._quiescent(lock, state)
+                    final.touch()
+                    with self.assertRaises(module.C.BootstrapError, msg=final.name):
+                        module._quiescent(lock, state)
+                    final.unlink()
+                    pending.unlink()
+
     def test_fresh_namespace_rejects_every_recovery_and_destination_collision(self):
         module = self.recovery
         with tempfile.TemporaryDirectory() as temporary:
@@ -268,10 +552,12 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
                 path.mkdir()
             generic = state["state"] / f"airgap-hardware-base-capture-{module.FRESH}.json"
             receipt = state["receipts"] / f"12-interrupted-first-boot-quarantine-{module.FRESH}.json"
+            authorization = state["receipts"] / f"12-interrupted-first-boot-resume-authorization-{module.FRESH}.json"
             transaction = state["quarantine"] / f"interrupted-first-boot-transaction-{module.FRESH}.json"
             proof = state["quarantine"] / f"interrupted-first-boot-stopped-proof-{module.FRESH}.json"
             paths = [
                 generic, receipt, receipt.parent / f".{receipt.name}.pending",
+                authorization, authorization.parent / f".{authorization.name}.pending",
                 transaction, transaction.parent / f".{transaction.name}.pending",
                 proof, proof.parent / f".{proof.name}.pending",
                 *[state["quarantine"] / f"interrupted-first-boot-{key}-{module.FRESH}" for key in module.ORDER],
@@ -293,6 +579,11 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
             recover.index('_atomic_receipt(state["receipts"], receipt_path.name'),
         )
         self.assertIn("_quiescent(lock, state); _fresh_absent(state)", handoff)
+        self.assertIn("completing_manifest", handoff)
+        self.assertIn(
+            "args.expected_controller_manifest_sha256",
+            recover[recover.index("_interrupted_authorization_validator") :],
+        )
 
     def test_launcher_renderer_and_new_receipt_are_bound(self):
         launcher = LAUNCHER.read_text()
