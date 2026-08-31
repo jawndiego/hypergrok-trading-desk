@@ -35,6 +35,8 @@ reachability at `192.168.106.1` is permitted.
 The fixed dormant Apple-local classes (`awdl0`, `llw0`, `ipsec0`) must first
 be taken down; their one canonical link-local is session-bound and only their
 exact local multicast/link-local route shapes are accepted.
+Each immutable base-capture filename is session-scoped, so a retained failed
+preflight cannot alias or overwrite evidence for a later authorized session.
 
 Do not start the replacement manually. From a local Terminal—not SSH, tmux or
 screen—disable all network services, turn Wi-Fi off, physically disconnect

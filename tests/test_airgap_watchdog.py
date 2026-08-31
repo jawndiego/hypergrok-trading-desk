@@ -634,7 +634,9 @@ Network interfaces: bridge100
             mock.patch.object(module, "_atomic_fixed_document", side_effect=atomic),
         ):
             module._capture_base("a" * 64)
-        base = captured[str(module.BASE_CAPTURE)]
+        base_path = module._base_capture_path("a" * 64)
+        base = captured[str(base_path)]
+        self.assertTrue(base_path.name.endswith(f"-{'a' * 64}.json"))
         candidate = base["hardware_lock_candidate"]
         self.assertIsNone(candidate["host_only"])
         self.assertEqual("a" * 64, candidate["capture_session_id"])

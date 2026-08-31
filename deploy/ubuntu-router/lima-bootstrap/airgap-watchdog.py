@@ -77,7 +77,6 @@ from typing import Any
 STATE_ROOT = Path("/private/var/db/trading-desk-router-bootstrap-v1")
 SCRIPT_DIR = Path(__file__).resolve().parent
 HARDWARE_PROFILE = SCRIPT_DIR / "airgap-hardware-profile.json"
-BASE_CAPTURE = STATE_ROOT / "airgap-hardware-base-capture.json"
 HARDWARE_LOCK = STATE_ROOT / "airgap-hardware-lock.json"
 RESULT_ROOT = STATE_ROOT / "airgap-watchdog-results"
 LIMA_HOME = Path("/private/var/db/trading-desk-lima")
@@ -157,6 +156,12 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _base_capture_path(session_id: str) -> Path:
+    if SESSION_RE.fullmatch(session_id) is None:
+        raise WatchdogError("base_capture_session")
+    return STATE_ROOT / f"airgap-hardware-base-capture-{session_id}.json"
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -1654,11 +1659,11 @@ def _capture_base(session_id: str) -> tuple[Path, str]:
         "sample_sha256": _sha256_bytes(_canonical_json(sample)),
         "schema_version": 1,
     }
-    return _atomic_fixed_document(BASE_CAPTURE, value)
+    return _atomic_fixed_document(_base_capture_path(session_id), value)
 
 
 def _read_base_capture(session_id: str) -> dict[str, Any]:
-    content = _safe_root_file(BASE_CAPTURE, 0o400)
+    content = _safe_root_file(_base_capture_path(session_id), 0o400)
     try:
         value = json.loads(content, object_pairs_hook=_unique_object)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
