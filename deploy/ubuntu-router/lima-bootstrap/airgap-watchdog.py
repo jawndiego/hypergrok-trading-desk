@@ -1628,29 +1628,29 @@ def _internet_sharing_disabled(
             raise WatchdogError("host_helper_process_probe")
         if after != command:
             return False, "", True
-    inventory_hash = _sha256_bytes(
+    helper_inventory_hash = _sha256_bytes(
         _canonical_json(
             [
-                {"command": command, "pid": pid, "uid": uid}
-                for pid, uid, command in sorted(inventory)
+                {"command": helpers[name], "pid": pid, "uid": 0}
+                for name, pid in sorted(helper_pids.items())
             ]
         )
     )
     if not NAT_PLIST.exists() and not NAT_PLIST.is_symlink():
-        return True, inventory_hash, bool(helper_pids)
+        return True, helper_inventory_hash, bool(helper_pids)
     if NAT_PLIST.is_symlink() or not NAT_PLIST.is_file():
-        return False, inventory_hash, bool(helper_pids)
+        return False, helper_inventory_hash, bool(helper_pids)
     metadata = NAT_PLIST.stat()
     if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022:
-        return False, inventory_hash, bool(helper_pids)
+        return False, helper_inventory_hash, bool(helper_pids)
     try:
         value = plistlib.loads(NAT_PLIST.read_bytes())
     except (plistlib.InvalidFileException, ValueError):
-        return False, inventory_hash, bool(helper_pids)
+        return False, helper_inventory_hash, bool(helper_pids)
     nat = value.get("NAT", {}) if isinstance(value, dict) else {}
     return (
         not bool(nat.get("Enabled", False)) if isinstance(nat, dict) else False,
-        inventory_hash,
+        helper_inventory_hash,
         bool(helper_pids),
     )
 
@@ -1830,7 +1830,7 @@ def _sample(
         raise WatchdogError("vpn_connected")
     if outputs["forward4"].strip() != "0" or outputs["forward6"].strip() != "0":
         raise WatchdogError("ip_forwarding_enabled")
-    sharing_disabled, processes_sha256, helpers_present = _internet_sharing_disabled(
+    sharing_disabled, helper_inventory_sha256, helpers_present = _internet_sharing_disabled(
         outputs["processes"], allow_host_only_helpers=allow_host_only
     )
     if not sharing_disabled:
@@ -1867,7 +1867,7 @@ def _sample(
         "ip_forwarding_disabled": True,
         "network_services_sha256": _sha256_bytes(_canonical_json(services)),
         "nwi_sha256": nwi_sha256,
-        "process_inventory_sha256": processes_sha256,
+        "host_network_helper_inventory_sha256": helper_inventory_sha256,
         "route_ipv4_sha256": route4,
         "route_ipv6_sha256": route6,
         "vpn_disconnected": True,

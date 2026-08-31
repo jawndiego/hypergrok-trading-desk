@@ -792,6 +792,37 @@ Network interfaces: bridge100
         self.assertFalse(sample["host_only_observed"])
         self.assertTrue(sample["host_network_helpers_present"])
 
+        with mock.patch.object(module, "NAT_PLIST", Path("/nonexistent/nat.plist")):
+            first = module._internet_sharing_disabled(
+                "1 0 /sbin/launchd\n40 501 /usr/bin/unrelated\n",
+                allow_host_only_helpers=True,
+            )
+            second = module._internet_sharing_disabled(
+                "9 0 /sbin/launchd\n99 501 /usr/bin/unrelated\n",
+                allow_host_only_helpers=True,
+            )
+        self.assertEqual(first[1], second[1])
+        self.assertFalse(first[2])
+
+        with (
+            mock.patch.object(module, "NAT_PLIST", Path("/nonexistent/nat.plist")),
+            mock.patch.object(
+                module,
+                "_proc_pid_path",
+                return_value="/usr/libexec/InternetSharing",
+            ),
+        ):
+            helper_first = module._internet_sharing_disabled(
+                "20 0 /usr/libexec/InternetSharing\n",
+                allow_host_only_helpers=True,
+            )
+            helper_second = module._internet_sharing_disabled(
+                "30 0 /usr/libexec/InternetSharing\n",
+                allow_host_only_helpers=True,
+            )
+        self.assertNotEqual(helper_first[1], helper_second[1])
+        self.assertTrue(helper_first[2])
+
     def test_failed_capture_does_not_consume_watch_result_path(self) -> None:
         module = _load()
         order: list[str] = []
