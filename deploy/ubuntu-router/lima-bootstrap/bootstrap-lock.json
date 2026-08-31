@@ -47,7 +47,29 @@
     "airgapped_start_apply_enabled": true,
     "guest_package_apply_enabled": false,
     "hardened_recreate_apply_enabled": true,
-    "router_activation_apply_enabled": false
+    "router_activation_apply_enabled": false,
+    "proven_preboot_recovery_enabled": true
+  },
+  "proven_preboot_recovery": {
+    "failed_controller_manifest_sha256": "d092f5e0226b011b29726e17c95d941ec21ae0281801cb39847fc6102b562aa1",
+    "fresh_session_id": "002cbc693a6abaf119c1ade5be0bcedb84bb4989f9758527ceb017d28428cdba",
+    "prior_profile_sha256": "c00a92eb5096fb3237786a1cf818d3f23300e2066e82309a72b5be5c83121fc7",
+    "prior_receipt_sha256": "b25195e99a9d03d7d650b5a77760aa5a8693c925370bac2936c0453f3c8255ec",
+    "source_session_id": "6d7d93fc3f480f6ad02035a4def8d73d371c20d5ca5c9ae18ee0d27fd2a55345",
+    "files": {
+      "base": [54164346, 7578, "77a512288a94ce67d9719baea4624c8f9a6d03fc8861b23ab3788996191fbffa"],
+      "hardware_lock": [54164418, 7050, "3bbc2091e4e90d437576ecf295d4a67834f15836bdce47e9f0aa0b078c9e12a9"],
+      "incident": [54164587, 473, "1d18bbe37b81cc549e52c660431cef446148c4614317ef07f2286f58a5ab82a6"],
+      "preparing": [54164347, 487, "8303cb06020f9db2eb62d2126ee5dd517574195ed1fb21598b2266de66585113"],
+      "starting": [54164461, 577, "c6c5f57ae9790fb7eb1c30f01e18723b051f71dc355320f4083738c4556aec23"],
+      "start_stdout": [54164462, 0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
+      "start_stderr": [54164463, 478, "a85bfe136c6494f58a135d0a08e4cbf1de63efaa3cf5c2add590417d02bc9453"],
+      "socket_stdout": [54164350, 0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
+      "socket_stderr": [54164351, 554, "f29469d3dee7f124a81ac4dc8a3b56fa8def7397ee831546ce554074740fcfc8"],
+      "sudoers": [54164348, 714, "fb36f1a319cc6bff643c11582ff08afe7564e7c47c309a4a702cf6f4e5b50e35"],
+      "watchdog": [54164539, 1930, "3b6ac8f1a0d14e05f37078201ea52947dc1d2c74e3f5d1bbbb0c1de7044cbe13"]
+    },
+    "runtime": {"inode": 54164349, "pid": "8095", "pid_inode": 54164352, "pid_sha256": "c40b15ca508f04649d16db6256bcbe09f2dd2fea63824d4e812a787d26c67ecd", "socket_inode": 54164353}
   },
   "pins": {
     "airgap_session_id": "6d7d93fc3f480f6ad02035a4def8d73d371c20d5ca5c9ae18ee0d27fd2a55345",
@@ -65,6 +87,7 @@
     "predecessor_plan_sha256": "00228f7b613418647ae9718989f7d9a2a9bb1493692ed832977294171b324150",
     "predecessor_vm_receipt_sha256": "1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601",
     "prestart_recovery_receipt_sha256": "b25195e99a9d03d7d650b5a77760aa5a8693c925370bac2936c0453f3c8255ec",
+    "proven_preboot_recovery_receipt_sha256": "RECOVERY_RECEIPT_REQUIRED",
     "socket_vmnet_sha256": "b8a72a62237312f2f756027dea504a844edeb40014702d4a320292c026d282b0"
   },
   "review_status": "attended_airgap_hardened_recreate_and_one_boot_enabled",

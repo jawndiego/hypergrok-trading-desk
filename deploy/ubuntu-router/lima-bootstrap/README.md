@@ -97,5 +97,12 @@ For a post-start `UNKNOWN`, this output remains reconnect-only: automatic retry,
 VM reuse, guest reconnect and venue writes stay false because the disk may have
 changed.
 
+`recover-proven-preboot` is a one-off phase for the exact pinned attempt whose
+`limactl start` failed before guest boot. It cannot start the VM or mutate the
+network. It writes a durable transaction, then retains only the inactive VMNet
+runtime, base capture, hardware lock, and two start markers through five
+crash-resumable source-or-destination moves. A successor must pin the resulting
+receipt before using the fresh session.
+
 This does not authorize another guest boot. A later stopped migration must
 remove bootstrap passwordless sudo and per-boot provisioning first.

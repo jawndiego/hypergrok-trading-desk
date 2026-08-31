@@ -65,7 +65,7 @@ loads=$("$otool" -L "$python" | /usr/bin/sed '1d' | /usr/bin/awk '{print $1}' | 
 /usr/lib/libSystem.B.dylib' ] || die 'sealed Python load closure differs'
 
 case "${1-}" in
-    apply-hardened-vm|check-airgap|apply-airgapped-first-boot|verify-stopped-after-airgap|recover-failed-prestart) ;;
+    apply-hardened-vm|check-airgap|apply-airgapped-first-boot|verify-stopped-after-airgap|recover-failed-prestart|recover-proven-preboot) ;;
     *) die 'launcher accepts only reviewed stopped-create/airgap phases' ;;
 esac
 

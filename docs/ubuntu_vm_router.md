@@ -388,6 +388,16 @@ and marker without deleting them. A separately rendered successor pins the
 resulting receipt and the same profile before fresh `check-airgap` or apply can
 run; the old incident never becomes retry authority.
 
+The one-off `recover-proven-preboot` phase is narrower than generic UNKNOWN
+reconciliation. It is enabled only for the sealed attempt whose exact Lima
+fatal output proves the VZ guest was not entered and whose receipt-08 disk
+identity remains unchanged. A write-ahead transaction retains the five
+blocking artifacts without deleting them; a fresh session remains disabled
+until a successor pins and revalidates the recovery receipt, transaction and
+retained evidence. During the next attempt the temporary root-owned sudoers
+file grants only UID 454 an exact read ACL, verifies that read under UID 454,
+and removes the ACL before retaining the file.
+
 Both capture passes run pinned macOS observers sequentially under one total
 deadline. The continuous watchdog retains concurrent sampling, but each child
 uses file-backed output, a dedicated process group, bounded reap and group

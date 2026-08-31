@@ -154,9 +154,7 @@ def _load_lock(content: bytes) -> dict[str, Any]:
             "source_session_id": "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1",
             "target_session_id": "0fbd65f00cd16cd949c15df3147249a35d8034ef3f052a441ba0246ccb8183d1",
         }
-        or value.get("pins", {}).get("airgap_session_id")
-        != "6d7d93fc3f480f6ad02035a4def8d73d371c20d5ca5c9ae18ee0d27fd2a55345"
-        or value.get("phases")
+        or {key: item for key, item in value.get("phases", {}).items() if key != "proven_preboot_recovery_enabled"}
         != {
             "airgapped_start_apply_enabled": True,
             "guest_package_apply_enabled": False,
@@ -180,6 +178,22 @@ def _load_lock(content: bytes) -> dict[str, Any]:
         }
     ):
         raise ValueError("bootstrap lock authorization boundary differs")
+    recovery = value.get("proven_preboot_recovery")
+    if (
+        not isinstance(recovery, dict)
+        or hashlib.sha256(_canonical_json(recovery)).hexdigest() != "83ce3977889b94afcc1c7b76f0b9a5ee097e9980d975500de474746efdc6e39e"
+        or recovery.get("prior_receipt_sha256") != value["pins"]["prestart_recovery_receipt_sha256"]
+        or set(recovery.get("files", {})) != {"base", "hardware_lock", "incident", "preparing", "starting", "start_stdout", "start_stderr", "socket_stdout", "socket_stderr", "sudoers", "watchdog"}
+        or any(not isinstance(item, list) or len(item) != 3 for item in recovery.get("files", {}).values())
+    ):
+        raise ValueError("bootstrap proven-preboot recovery differs")
+    recovery_pin = value["pins"].get("proven_preboot_recovery_receipt_sha256")
+    pending = recovery_pin == "RECOVERY_RECEIPT_REQUIRED"
+    if (
+        (pending and (value["pins"]["airgap_session_id"] != recovery["source_session_id"] or value["phases"]["proven_preboot_recovery_enabled"] is not True))
+        or (not pending and (not isinstance(recovery_pin, str) or SHA256_RE.fullmatch(recovery_pin) is None or value["pins"]["airgap_session_id"] != recovery["fresh_session_id"] or value["phases"]["proven_preboot_recovery_enabled"] is not False))
+    ):
+        raise ValueError("bootstrap proven-preboot controller state differs")
     _validate_system_tool_contract(value)
     return value
 

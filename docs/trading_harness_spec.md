@@ -304,6 +304,15 @@ passive bridge remains distinct from the temporary host-only `bridge100`, whose
 sole permitted member is the exact addressless `vmenet0`; any additional,
 missing, substituted or altered bridge member aborts before VM start.
 
+A post-start UNKNOWN may be rotated only when a sealed one-off recovery proves
+the exact Lima fatal occurred before guest entry, the complete receipt-08 VM
+identity is unchanged, and all VM/router processes are absent. Recovery MUST
+preserve `start_invoked=true`, publish a write-ahead transaction before
+retaining blocking artifacts, and grant no retry authority. A distinct
+successor MUST pin and revalidate that transaction and receipt before admitting
+a fresh air-gap session. Temporary sudoers readability for the router UID MUST
+be least-privilege, explicitly probed, and removed before retention.
+
 WireGuard private keys MUST be generated and retained on their owning machines
 outside repo, chat, cloud-init, argv and environment variables. Router-only key
 generation, preparation and read-only qualification MUST occur before venue
