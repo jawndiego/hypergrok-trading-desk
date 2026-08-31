@@ -769,6 +769,56 @@ def _validate_prestart_incident(
     return incident
 
 
+def _validate_reconnect_incident(
+    content: bytes, attempt_id: str, quarantine: Path
+) -> tuple[dict[str, Any], str]:
+    incident = _load_json_bytes(content, "current failed incident")
+    expected_keys = {
+        "attempt_id", "automatic_retry_authorized", "disposition", "error_type",
+        "failure_stage", "kind", "mainnet_authorized", "phase", "schema_version",
+        "start_invoked", "temporary_vmnet_artifacts", "venue_writes_authorized",
+    }
+    shared = (
+        set(incident) == expected_keys
+        and incident.get("attempt_id") == attempt_id
+        and incident.get("kind")
+        == "trading-desk.router-bootstrap.airgap-first-boot-incident"
+        and incident.get("schema_version") == 1
+        and incident.get("phase") == "airgap-first-boot"
+        and incident.get("automatic_retry_authorized") is False
+        and incident.get("mainnet_authorized") is False
+        and incident.get("venue_writes_authorized") is False
+    )
+    if not shared:
+        raise BootstrapError("reconnect incident authority differs")
+    prestart = (
+        incident.get("disposition") == "FAILED"
+        and incident.get("error_type") == "BootstrapError"
+        and incident.get("failure_stage") == "host_only_capture"
+        and incident.get("start_invoked") is False
+        and incident.get("temporary_vmnet_artifacts") is None
+    )
+    expected_cleanup = {
+        "retained_sudoers": str(quarantine / f"first-boot-sudoers-{attempt_id}"),
+        "retained_vmnet_runtime": str(
+            quarantine / f"first-boot-vmnet-runtime-{attempt_id}"
+        ),
+    }
+    poststart = (
+        incident.get("disposition") == "UNKNOWN"
+        and incident.get("error_type") in {"BootstrapError", "TimeoutExpired"}
+        and incident.get("failure_stage") == "vm_start"
+        and incident.get("start_invoked") is True
+        and incident.get("temporary_vmnet_artifacts")
+        in (None, expected_cleanup)
+    )
+    if prestart:
+        return incident, "prestart"
+    if poststart:
+        return incident, "poststart"
+    raise BootstrapError("reconnect incident state differs")
+
+
 def _fresh_recovery_artifacts(state: dict[str, Path], session: str) -> list[Path]:
     return [
         state["receipts"] / f"09-airgap-first-boot-incident-{session}.json",
@@ -3269,28 +3319,20 @@ def _verify_stopped_after_airgap(args: argparse.Namespace) -> int:
         mode=0o400,
         maximum=4096,
     )
-    incident = _load_json_bytes(incident_content, "current failed incident")
+    _incident, incident_state = _validate_reconnect_incident(
+        incident_content,
+        attempt_id,
+        Path(lock["paths"]["quarantine_parent"]),
+    )
+    receipt09 = Path(lock["paths"]["airgap_first_boot_receipt"])
+    receipt09_pending = receipt09.parent / f".{receipt09.name}.pending"
     if (
-        set(incident)
-        != {
-            "attempt_id", "automatic_retry_authorized", "disposition", "error_type",
-            "failure_stage", "kind", "mainnet_authorized", "phase", "schema_version",
-            "start_invoked", "temporary_vmnet_artifacts", "venue_writes_authorized",
-        }
-        or incident.get("attempt_id") != attempt_id
-        or incident.get("kind") != "trading-desk.router-bootstrap.airgap-first-boot-incident"
-        or incident.get("schema_version") != 1
-        or incident.get("phase") != "airgap-first-boot"
-        or incident.get("disposition") != "FAILED"
-        or incident.get("error_type") != "BootstrapError"
-        or incident.get("failure_stage") != "host_only_capture"
-        or incident.get("automatic_retry_authorized") is not False
-        or incident.get("start_invoked") is not False
-        or incident.get("temporary_vmnet_artifacts") is not None
-        or incident.get("mainnet_authorized") is not False
-        or incident.get("venue_writes_authorized") is not False
+        receipt09.exists()
+        or receipt09.is_symlink()
+        or receipt09_pending.exists()
+        or receipt09_pending.is_symlink()
     ):
-        raise BootstrapError("current failed incident differs")
+        raise BootstrapError("reconnect proof conflicts with receipt09")
     limactl = _limactl(lock)
     def prove_stopped() -> None:
         _status(lock, limactl)
@@ -3302,6 +3344,20 @@ def _verify_stopped_after_airgap(args: argparse.Namespace) -> int:
     sudoers = Path(lock["paths"]["vmnet_sudoers"])
     runtime = Path(lock["paths"]["vmnet_runtime"])
     inactive_residual = runtime.exists() or runtime.is_symlink()
+    cleanup = _incident["temporary_vmnet_artifacts"]
+    if cleanup is not None:
+        if inactive_residual:
+            raise BootstrapError("cleanup receipt conflicts with live residual")
+        retained_sudoers = Path(cleanup["retained_sudoers"])
+        retained_runtime = Path(cleanup["retained_vmnet_runtime"])
+        sudoers_content = _read_bound(
+            retained_sudoers, uid=0, gid=0, mode=0o400, maximum=64 * 1024
+        )
+        if _sha256_bytes(sudoers_content) != lock["pins"]["lima_first_boot_sudoers_sha256"]:
+            raise BootstrapError("retained cleanup sudoers differs")
+        _assert_real(
+            retained_runtime, kind="directory", uid=0, gid=0, mode=0o755
+        )
 
     def inspect_inactive_residual() -> tuple[Any, ...] | None:
         prove_stopped()
@@ -3366,6 +3422,7 @@ def _verify_stopped_after_airgap(args: argparse.Namespace) -> int:
             pid_metadata.st_size, _sha256_bytes(pid_content),
         )
 
+    prove_stopped()
     before_identity = inspect_inactive_residual()
     after_identity = inspect_inactive_residual()
     if before_identity != after_identity:
@@ -3377,6 +3434,7 @@ def _verify_stopped_after_airgap(args: argparse.Namespace) -> int:
         raise BootstrapError("VMNet runtime presence changed during proof")
     print("vm_status=Stopped")
     print("router_uid_processes=absent")
+    print(f"incident_state={incident_state}")
     print(f"inactive_residual={str(inactive_residual).lower()}")
     print(
         "temporary_vmnet_authority="
@@ -3384,6 +3442,9 @@ def _verify_stopped_after_airgap(args: argparse.Namespace) -> int:
     )
     print("host_uplink_restore_safe_while_vm_stopped=true")
     print("guest_network_reconnect_authorized=false")
+    print("automatic_retry_authorized=false")
+    print("vm_reuse_authorized=false")
+    print("venue_writes_authorized=false")
     return 0
 
 

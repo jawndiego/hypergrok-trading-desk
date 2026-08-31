@@ -87,6 +87,9 @@ PID proofs; it grants no guest reconnect or retry authority. Restore networking
 only if the phase prints the same literal
 `host_uplink_restore_safe_while_vm_stopped=true`. Host-only capture failures
 print only a fixed allowlisted reason code.
+For a post-start `UNKNOWN`, this output remains reconnect-only: automatic retry,
+VM reuse, guest reconnect and venue writes stay false because the disk may have
+changed.
 
 This does not authorize another guest boot. A later stopped migration must
 remove bootstrap passwordless sudo and per-boot provisioning first.

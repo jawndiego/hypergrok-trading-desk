@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stderr
 import importlib.util
 import inspect
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -206,6 +208,65 @@ class PrestartRecoveryProfileTests(unittest.TestCase):
         ):
             self.assertIn(required, combined)
 
+    def test_reconnect_incident_accepts_only_exact_pre_or_post_start(self) -> None:
+        controller = load(
+            BOOTSTRAP / "bootstrap-apply.py", "reconnect_incident_contract_test"
+        )
+        session = "a" * 64
+        quarantine = Path("/fixed/quarantine")
+        base = {
+            "attempt_id": session,
+            "automatic_retry_authorized": False,
+            "disposition": "FAILED",
+            "error_type": "BootstrapError",
+            "failure_stage": "host_only_capture",
+            "kind": "trading-desk.router-bootstrap.airgap-first-boot-incident",
+            "mainnet_authorized": False,
+            "phase": "airgap-first-boot",
+            "schema_version": 1,
+            "start_invoked": False,
+            "temporary_vmnet_artifacts": None,
+            "venue_writes_authorized": False,
+        }
+        _, state = controller._validate_reconnect_incident(
+            controller._canonical_json(base), session, quarantine
+        )
+        self.assertEqual("prestart", state)
+        post = {
+            **base,
+            "disposition": "UNKNOWN",
+            "failure_stage": "vm_start",
+            "start_invoked": True,
+        }
+        for cleanup in (
+            None,
+            {
+                "retained_sudoers": str(
+                    quarantine / f"first-boot-sudoers-{session}"
+                ),
+                "retained_vmnet_runtime": str(
+                    quarantine / f"first-boot-vmnet-runtime-{session}"
+                ),
+            },
+        ):
+            post["temporary_vmnet_artifacts"] = cleanup
+            _, state = controller._validate_reconnect_incident(
+                controller._canonical_json(post), session, quarantine
+            )
+            self.assertEqual("poststart", state)
+        for key, value in (
+            ("disposition", "FAILED"),
+            ("failure_stage", "host_only_capture"),
+            ("start_invoked", False),
+            ("mainnet_authorized", True),
+            ("automatic_retry_authorized", True),
+        ):
+            changed = {**post, key: value}
+            with self.subTest(key=key), self.assertRaises(controller.BootstrapError):
+                controller._validate_reconnect_incident(
+                    controller._canonical_json(changed), session, quarantine
+                )
+
     def test_successor_receipt_selection_is_profile_bound(self) -> None:
         controller = load(
             BOOTSTRAP / "bootstrap-apply.py", "recovery_successor_selection_test"
@@ -215,6 +276,38 @@ class PrestartRecoveryProfileTests(unittest.TestCase):
         self.assertIn("recovery_profile['old_session_id']", source)
         self.assertIn("recovery_profile_sha256", source)
         self.assertNotIn("46e7c23627c9e4a1207f86a5a3f186", source)
+
+    def test_apply_failure_reason_is_allowlisted_or_redacted(self) -> None:
+        controller = load(
+            BOOTSTRAP / "bootstrap-apply.py", "apply_failure_redaction_test"
+        )
+        argv = [
+            "apply-airgapped-first-boot",
+            "--expected-controller-manifest-sha256",
+            "a" * 64,
+            "--expected-prestart-recovery-receipt-sha256",
+            "b" * 64,
+        ]
+        for reason, expected in (
+            (
+                "capture_core_nwi_command_timeout",
+                "host_only_capture_reason=capture_core_nwi_command_timeout",
+            ),
+            ("path=/private/secret", "host_only_capture_reason=redacted"),
+        ):
+            with (
+                mock.patch.object(
+                    controller,
+                    "_apply_airgapped_first_boot",
+                    side_effect=controller.BootstrapError(
+                        f"host_only_capture_reason={reason}"
+                    ),
+                ),
+                redirect_stderr(io.StringIO()) as stderr,
+            ):
+                self.assertEqual(2, controller.main(argv))
+            self.assertIn(expected, stderr.getvalue())
+            self.assertNotIn("/private/secret", stderr.getvalue())
 
 
 if __name__ == "__main__":

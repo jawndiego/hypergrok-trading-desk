@@ -757,6 +757,8 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             lock = {
                 "paths": {
                     "hardened_vm_receipt": str(root / "receipts" / "08.json"),
+                    "airgap_first_boot_receipt": str(root / "receipts" / "09.json"),
+                    "quarantine_parent": str(root / "quarantine"),
                     "vmnet_runtime": str(runtime),
                     "vmnet_sudoers": str(sudoers),
                 },
@@ -878,6 +880,8 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             lock = {
                 "paths": {
                     "hardened_vm_receipt": str(root / "receipts" / "08.json"),
+                    "airgap_first_boot_receipt": str(root / "receipts" / "09.json"),
+                    "quarantine_parent": str(root / "quarantine"),
                     "vmnet_runtime": str(runtime),
                     "vmnet_sudoers": str(root / "sudoers"),
                 },

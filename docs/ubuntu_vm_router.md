@@ -361,6 +361,11 @@ UID process proofs. That exception authorizes only Mac uplink restoration, not
 guest reconnect or retry. Do not reconnect unless the phase prints the same
 literal safe-to-restore line. A host-only capture failure exposes only one
 fixed allowlisted diagnostic code; arbitrary exception text remains redacted.
+If the single start was invoked, the same verifier may authorize only host
+uplink restoration after an exact current-session `UNKNOWN` incident and the
+same repeated containment proofs. It explicitly leaves retry, VM reuse, guest
+reconnect and venue writes false; the potentially changed disk requires a
+separate retained-instance reconciliation or recreation path.
 
 A failure before `limactl start` uses the narrower
 `recover-failed-prestart` transaction. The renderer seals a reviewed,
