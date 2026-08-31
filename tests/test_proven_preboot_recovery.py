@@ -32,7 +32,10 @@ class ProvenPrebootRecoveryTests(unittest.TestCase):
         self.assertEqual("6d7d93fc3f480f6ad02035a4def8d73d371c20d5ca5c9ae18ee0d27fd2a55345", recovery["source_session_id"])
         self.assertEqual("002cbc693a6abaf119c1ade5be0bcedb84bb4989f9758527ceb017d28428cdba", recovery["fresh_session_id"])
         self.assertEqual("d092f5e0226b011b29726e17c95d941ec21ae0281801cb39847fc6102b562aa1", recovery["failed_controller_manifest_sha256"])
-        self.assertEqual("RECOVERY_RECEIPT_REQUIRED", lock["pins"]["proven_preboot_recovery_receipt_sha256"])
+        self.assertEqual(
+            "f1c6a255a02a363b813adf879462a63e3855a327b01d17c22aef8f69d67120a6",
+            lock["pins"]["proven_preboot_recovery_receipt_sha256"],
+        )
         self.assertEqual([54164463, 478, "a85bfe136c6494f58a135d0a08e4cbf1de63efaa3cf5c2add590417d02bc9453"], recovery["files"]["start_stderr"])
         module = load_apply()
         self.assertEqual(478, len(module.PROVEN_PREBOOT_START_STDERR))
@@ -63,23 +66,44 @@ class ProvenPrebootRecoveryTests(unittest.TestCase):
             "83ce3977889b94afcc1c7b76f0b9a5ee097e9980d975500de474746efdc6e39e",
             module._sha256_bytes(module._canonical_json(lock["proven_preboot_recovery"])),
         )
+        pending = json.loads(LOCK.read_text())
+        pending["pins"]["proven_preboot_recovery_receipt_sha256"] = (
+            "RECOVERY_RECEIPT_REQUIRED"
+        )
+        pending["pins"]["airgap_session_id"] = pending[
+            "proven_preboot_recovery"
+        ]["source_session_id"]
+        pending["phases"]["proven_preboot_recovery_enabled"] = True
         with self.assertRaisesRegex(module.BootstrapError, "receipt is required"):
-            module._validate_proven_preboot_successor(lock, {})
+            module._validate_proven_preboot_successor(pending, {})
         preconditions = APPLY.read_text().split("def _airgap_preconditions(", 1)[1].split("\ndef _check_airgap", 1)[0]
         self.assertIn("_validate_proven_preboot_successor(lock, state)", preconditions)
 
     def test_lock_accepts_only_pending_source_or_pinned_fresh_state(self):
         renderer = load_renderer()
-        pending = json.loads(LOCK.read_text())
-        renderer._load_lock(renderer._canonical_json(pending))
         successor = json.loads(LOCK.read_text())
-        successor["pins"]["proven_preboot_recovery_receipt_sha256"] = "a" * 64
-        successor["pins"]["airgap_session_id"] = successor["proven_preboot_recovery"]["fresh_session_id"]
-        successor["phases"]["proven_preboot_recovery_enabled"] = False
         renderer._load_lock(renderer._canonical_json(successor))
-        for key, value in (("airgap_session_id", pending["proven_preboot_recovery"]["fresh_session_id"]),):
-            invalid = json.loads(LOCK.read_text())
-            invalid["pins"][key] = value
+        pending = json.loads(LOCK.read_text())
+        pending["pins"]["proven_preboot_recovery_receipt_sha256"] = (
+            "RECOVERY_RECEIPT_REQUIRED"
+        )
+        pending["pins"]["airgap_session_id"] = pending[
+            "proven_preboot_recovery"
+        ]["source_session_id"]
+        pending["phases"]["proven_preboot_recovery_enabled"] = True
+        renderer._load_lock(renderer._canonical_json(pending))
+        invalid_states = []
+        pending_with_fresh = json.loads(json.dumps(pending))
+        pending_with_fresh["pins"]["airgap_session_id"] = pending[
+            "proven_preboot_recovery"
+        ]["fresh_session_id"]
+        invalid_states.append(pending_with_fresh)
+        successor_with_source = json.loads(json.dumps(successor))
+        successor_with_source["pins"]["airgap_session_id"] = successor[
+            "proven_preboot_recovery"
+        ]["source_session_id"]
+        invalid_states.append(successor_with_source)
+        for invalid in invalid_states:
             with self.assertRaises(ValueError):
                 renderer._load_lock(renderer._canonical_json(invalid))
 
