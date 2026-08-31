@@ -118,5 +118,16 @@ All Lima subprocesses use the dedicated UID-454 mode-0700
 remains the separate instance namespace. Failure cleanup contains the VM first,
 then reaps the watchdog process group with bounded TERM/KILL waits.
 
+`recover-interrupted-first-boot` handles only the sealed session `91c455...`,
+whose retained start log proves VZ reached `running` and whose disk no longer
+matches receipt 08. From a local Terminal it first writes a durable transaction,
+then atomically retains the tainted `Library` tree and VM as opaque directories,
+the temporary VMNet authority, markers, hardware evidence, and old receipt 08.
+It never deletes or reuses the changed disk. After a durable stopped proof it
+publishes a no-retry quarantine receipt and, in the same invocation, recreates
+a fresh stopped VM from the pinned local image. The new receipt 08 binds that
+quarantine receipt. Air-gap check/apply remains blocked until a later controller
+pins both new receipts and rotates to the printed fresh session.
+
 This does not authorize another guest boot. A later stopped migration must
 remove bootstrap passwordless sudo and per-boot provisioning first.

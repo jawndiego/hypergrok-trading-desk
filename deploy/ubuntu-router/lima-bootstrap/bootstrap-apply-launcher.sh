@@ -29,7 +29,11 @@ case "$0" in /*) ;; *) die 'launcher path must be absolute' ;; esac
 launcher=$(/bin/realpath "$0")
 [ "$launcher" = "$0" ] || die 'launcher path is noncanonical'
 controller=$(/usr/bin/dirname "$launcher")
-script=$controller/bootstrap-apply.py
+case "${1-}" in
+    recover-interrupted-first-boot) script=$controller/interrupted-recovery.py ;;
+    apply-hardened-vm|check-airgap|apply-airgapped-first-boot|verify-stopped-after-airgap|recover-failed-prestart|recover-proven-preboot) script=$controller/bootstrap-apply.py ;;
+    *) die 'launcher accepts only reviewed stopped-create/airgap phases' ;;
+esac
 runtime=/opt/trading-desk/runtime/python-3.11.16
 python=$runtime/bin/python3.11
 otool=/Library/Developer/CommandLineTools/usr/bin/llvm-otool
@@ -63,11 +67,6 @@ assert_root_chain "$runtime"
 loads=$("$otool" -L "$python" | /usr/bin/sed '1d' | /usr/bin/awk '{print $1}' | LC_ALL=C /usr/bin/sort)
 [ "$loads" = '/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation
 /usr/lib/libSystem.B.dylib' ] || die 'sealed Python load closure differs'
-
-case "${1-}" in
-    apply-hardened-vm|check-airgap|apply-airgapped-first-boot|verify-stopped-after-airgap|recover-failed-prestart|recover-proven-preboot) ;;
-    *) die 'launcher accepts only reviewed stopped-create/airgap phases' ;;
-esac
 
 exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C \
     "$python" -I -B "$script" "$@"

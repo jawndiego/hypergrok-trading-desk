@@ -65,6 +65,7 @@ SOURCE_FILES: dict[str, int] = {
     "cloud-config-first-boot.yaml.example": 0o600,
     "finalize-first-boot.sh": 0o700,
     "first-boot-hardening.sh": 0o700,
+    "interrupted-recovery.py": 0o700,
     "lima-first-boot.yaml.example": 0o600,
     "lima-first-boot.sudoers": 0o600,
     "networks-first-boot.yaml": 0o600,

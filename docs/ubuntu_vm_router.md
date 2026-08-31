@@ -410,6 +410,15 @@ Lima's writable per-user `HOME` is a separate UID-454 mode-0700 directory
 outside `LIMA_HOME`; this prevents macOS `Library` state from being enumerated
 as a VM. On failure, independent stopped/no-process containment precedes every
 bounded watchdog process-group reap or escalation.
+For the exact interrupted session `91c455...`, the retained Lima log proves VZ
+entered `running` and the receipt-08 disk changed. Its one-off attended recovery
+therefore grants no retry or disk reuse: a write-ahead, source-XOR-destination
+transaction retains the failed VM and the accidental `LIMA_HOME/Library` tree
+as opaque directories, plus all live VMNet authority and start markers. Only
+after a durable stopped proof may the failed instance move. The same command
+then recreates a stopped VM from pinned local media, and the new receipt 08 must
+bind the quarantine receipt. A later successor must pin both receipts and a new
+session before any air-gap check or start can be admitted.
 
 Both capture passes run pinned macOS observers sequentially under one total
 deadline. The continuous watchdog retains concurrent sampling, but each child

@@ -312,6 +312,14 @@ retaining blocking artifacts, and grant no retry authority. A distinct
 successor MUST pin and revalidate that transaction and receipt before admitting
 a fresh air-gap session. Temporary sudoers readability for the router UID MUST
 be least-privilege, explicitly probed, and removed before retention.
+When exact evidence instead proves that VZ entered `running` and the receipt-08
+disk changed, the old instance MUST NOT be retried or reused. An attended,
+write-ahead recovery MAY atomically retain that instance and accidental Lima
+process-home state as opaque objects, clear and retain the temporary VMNet
+authority, and authorize creation of a new stopped instance from pinned local
+media. The recreated receipt 08 MUST bind the quarantine receipt; no air-gap
+phase is admitted until a later successor pins both receipts and a fresh
+session.
 If the controller prestarts socket_vmnet, Lima MUST receive only temporary
 read-only access to the exact live PID file, verify the process identity, reuse
 that daemon, and lose the ACL immediately after the guarded start boundary.

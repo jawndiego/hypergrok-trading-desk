@@ -1004,6 +1004,7 @@ def _verify_bundle(expected_manifest_sha256: str) -> dict[str, Any]:
         "bootstrap-apply.py",
         "finalize-first-boot.sh",
         "first-boot-hardening.sh",
+        "interrupted-recovery.py",
         "verify-first-boot.py",
     }
     for name, digest in files.items():
@@ -3260,6 +3261,23 @@ def _apply_hardened_vm(args: argparse.Namespace) -> int:
     state = _initialize(lock)
     if not lock["phases"]["hardened_recreate_apply_enabled"]:
         raise BootstrapError("hardened VM recreation is disabled")
+    quarantine_sha256 = getattr(args, "_interrupted_quarantine_receipt_sha256", None)
+    interrupted_validator = getattr(args, "_interrupted_authorization_validator", None)
+    receipts = list(state["receipts"].glob("12-interrupted-first-boot-quarantine-*.json"))
+    interrupted = list(state["quarantine"].glob("interrupted-first-boot-transaction-*.json")) + receipts
+    interrupted += [path for path in (
+        state["state"] / ".airgap-first-boot.PREPARING.json",
+        state["state"] / ".airgap-first-boot.STARTING.json",
+    ) if path.exists() or path.is_symlink()]
+    if interrupted and quarantine_sha256 is None:
+        raise BootstrapError("interrupted first boot requires bound recovery")
+    if quarantine_sha256 is not None and (
+        len(receipts) != 1 or _sha256_file(receipts[0]) != quarantine_sha256
+        or not callable(interrupted_validator)
+    ):
+        raise BootstrapError("interrupted quarantine authorization differs")
+    if quarantine_sha256 is not None:
+        interrupted_validator(lock, state, quarantine_sha256)
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise BootstrapError("host OS/architecture differs")
     if platform.mac_ver()[0] != lock["host"]["product_version"]:
@@ -3506,6 +3524,7 @@ def _apply_hardened_vm(args: argparse.Namespace) -> int:
         "free_bytes_after": free_after,
         "free_bytes_before": free_before,
         "hardened_plan_sha256": evidence["plan_sha256"],
+        **({"interrupted_first_boot_quarantine_receipt_sha256": quarantine_sha256} if quarantine_sha256 is not None else {}),
         "instance_device": evidence["instance_device"],
         "instance_inode": evidence["instance_inode"],
         "instance_path": str(instance),
