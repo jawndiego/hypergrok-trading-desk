@@ -340,6 +340,8 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         self.assertNotIn('"delete"', source)
         self.assertNotIn("shutil.rmtree", source)
         self.assertIn("predecessor_instance_retained", source)
+        self.assertIn("failed reason={match.group(1)}", source)
+        self.assertIn("watchdog timed out", source)
         launcher = (BOOTSTRAP / "bootstrap-apply-launcher.sh").read_text()
         self.assertIn("apply-hardened-vm", launcher)
         self.assertIn("apply-airgapped-first-boot", launcher)

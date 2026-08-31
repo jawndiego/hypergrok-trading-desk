@@ -2628,12 +2628,8 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as error:
             reason = error.code if isinstance(error, WatchdogError) else "internal_failure"
             socket_stop = _stop_socket_vmnet(socket_vmnet_pid)
-            force_stop = _force_stop()
             print(f"airgap_capture_failed: {reason}", file=sys.stderr)
-            print(
-                f"force_stop_invoked={str(force_stop['invoked']).lower()}",
-                file=sys.stderr,
-            )
+            print("force_stop_invoked=false", file=sys.stderr)
             print(
                 f"socket_vmnet_terminated={str(socket_stop['terminated']).lower()}",
                 file=sys.stderr,

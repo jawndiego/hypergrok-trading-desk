@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -695,11 +696,6 @@ Network interfaces: bridge100
             ),
             mock.patch.object(
                 module,
-                "_force_stop",
-                side_effect=lambda: order.append("vm") or {"invoked": True},
-            ),
-            mock.patch.object(
-                module,
                 "_stop_socket_vmnet",
                 side_effect=lambda _pid: order.append("socket")
                 or {"terminated": False},
@@ -709,13 +705,18 @@ Network interfaces: bridge100
                 "_atomic_result",
                 side_effect=AssertionError("capture must not publish watch result"),
             ),
-            redirect_stderr(io.StringIO()),
+            redirect_stderr(io.StringIO()) as stderr,
         ):
             result = module.main(
                 ["capture-base", "--session-id", "a" * 64]
             )
         self.assertEqual(2, result)
-        self.assertEqual(["socket", "vm"], order)
+        self.assertEqual(["socket"], order)
+        self.assertIn("force_stop_invoked=false", stderr.getvalue())
+        capture_source = inspect.getsource(module.main).split(
+            'if mode in {"capture-base", "capture-host-only"}:', 1
+        )[1].split('reason = "none"', 1)[0]
+        self.assertNotIn("_force_stop()", capture_source)
 
     def test_watch_accepts_only_exact_parent_pipe_completion(self) -> None:
         module = _load()

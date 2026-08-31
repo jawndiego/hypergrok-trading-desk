@@ -1705,17 +1705,33 @@ def _run_watchdog_phase(
         if socket_vmnet_pid is None:
             raise BootstrapError("socket_vmnet PID is required for host-only capture")
         command.extend(["--socket-vmnet-pid", str(socket_vmnet_pid)])
-    result = subprocess.run(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
-        timeout=30,
-        check=False,
-    )
-    if result.returncode != 0 or result.stderr or len(result.stdout) > 64 * 1024:
-        raise BootstrapError(f"air-gap {mode} failed")
+    try:
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise BootstrapError(f"air-gap {mode} watchdog timed out") from error
+    if result.returncode != 0:
+        try:
+            error_lines = result.stderr.decode("utf-8", errors="strict").splitlines()
+        except UnicodeDecodeError as error:
+            raise BootstrapError(f"air-gap {mode} failure output differs") from error
+        match = (
+            re.fullmatch(r"airgap_capture_failed: ([a-z0-9_]+)", error_lines[0])
+            if error_lines
+            else None
+        )
+        if match is None or len(error_lines) != 3:
+            raise BootstrapError(f"air-gap {mode} failure output differs")
+        raise BootstrapError(f"air-gap {mode} failed reason={match.group(1)}")
+    if result.stderr or len(result.stdout) > 64 * 1024:
+        raise BootstrapError(f"air-gap {mode} output differs")
     lines = result.stdout.decode("utf-8", errors="strict").splitlines()
     expected_prefixes = (
         ("airgap_base_capture=", "airgap_base_capture_sha256=")
