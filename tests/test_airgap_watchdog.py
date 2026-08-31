@@ -187,6 +187,38 @@ utun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380
     return lock, outputs
 
 
+def _host_only_ifconfig(
+    *,
+    bridge_flags: str = (
+        "UP,BROADCAST,SMART,RUNNING,PROMISC,ALLMULTI,SIMPLEX,MULTICAST"
+    ),
+    member_flags: str = "LEARNING,DISCOVER",
+    member_name: str = "vmenet0",
+    vmenet_flags: str = (
+        "UP,BROADCAST,SMART,RUNNING,PROMISC,SIMPLEX,MULTICAST"
+    ),
+) -> str:
+    return f"""bridge100: flags=8b63<{bridge_flags}> mtu 1500
+\toptions=63<RXCSUM,TXCSUM,TSO4,TSO6>
+\tether 52:54:00:12:34:56
+\tinet 192.168.106.1 netmask 0xffffff00 broadcast 192.168.106.255
+\tConfiguration:
+\t\tid 0:0:0:0:0:0 priority 0 hellotime 0 fwddelay 0
+\t\tmaxage 0 holdcnt 0 proto stp maxaddr 100 timeout 1200
+\t\troot id 0:0:0:0:0:0 priority 0 ifcost 0 port 0
+\t\tipfilter disabled flags 0x0
+\tmember: {member_name} flags=3<{member_flags}>
+\t\t\tifmaxaddr 0 port 24 priority 0 path cost 0
+\tnd6 options=201<PERFORMNUD,DAD>
+\tmedia: autoselect
+\tstatus: active
+{member_name}: flags=8963<{vmenet_flags}> mtu 1500
+\tether 5a:11:22:33:44:55
+\tmedia: autoselect
+\tstatus: active
+"""
+
+
 class AirgapWatchdogTests(unittest.TestCase):
     def test_manifest_hardware_profile_is_exact_and_parseable(self) -> None:
         module = _load()
@@ -509,11 +541,7 @@ Network interfaces: bridge100
         module = _load()
         lock, outputs = _fixtures(module)
         host_outputs = dict(outputs)
-        host_outputs["ifconfig"] += (
-            "bridge100: flags=8863<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST>\n"
-            "\tinet 192.168.106.1 netmask 0xffffff00 broadcast 192.168.106.255\n"
-            "\tstatus: active\n"
-        )
+        host_outputs["ifconfig"] += _host_only_ifconfig()
         host_outputs["routes4"] += (
             "default link#20 UCSIg bridge100 !\n"
             "192.168.106/24 link#20 UCS bridge100\n"
@@ -624,6 +652,213 @@ Network interfaces: bridge100
         ):
             module._sample(lock, allow_host_only=True)
 
+    def test_host_only_vmenet_is_one_exact_addressless_bridge_member(self) -> None:
+        module = _load()
+        _, outputs = _fixtures(module)
+
+        parsed = module._parse_ifconfig(
+            outputs["ifconfig"] + _host_only_ifconfig()
+        )
+        self.assertEqual(
+            [
+                {
+                    "flags": ["DISCOVER", "LEARNING"],
+                    "interface": "vmenet0",
+                }
+            ],
+            parsed["bridge100"]["members"],
+        )
+        self.assertEqual(
+            "vmenet0",
+            module._validate_host_only_vmenet(
+                parsed, allow_host_only=True
+            ),
+        )
+
+        optional = module._parse_ifconfig(
+            outputs["ifconfig"]
+            + _host_only_ifconfig(
+                member_flags="LEARNING,DISCOVER,PRIVATE,CSUM,VIRTIO",
+                vmenet_flags=(
+                    "UP,BROADCAST,SMART,RUNNING,PROMISC,ALLMULTI,"
+                    "SIMPLEX,MULTICAST"
+                ),
+            )
+        )
+        self.assertEqual(
+            "vmenet0",
+            module._validate_host_only_vmenet(
+                optional, allow_host_only=True
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            module.WatchdogError, "unexpected_vmenet_interface"
+        ):
+            module._validate_host_only_vmenet(
+                parsed, allow_host_only=False
+            )
+        dormant_vmenet = module._parse_ifconfig(
+            outputs["ifconfig"]
+            + "vmenet9: flags=8822<BROADCAST,SMART,SIMPLEX,MULTICAST> "
+            "mtu 1500\n\tstatus: inactive\n"
+        )
+        with self.assertRaisesRegex(
+            module.WatchdogError, "unexpected_vmenet_interface"
+        ):
+            module._validate_host_only_vmenet(
+                dormant_vmenet, allow_host_only=False
+            )
+
+    def test_host_only_vmenet_rejects_link_and_membership_drift(self) -> None:
+        module = _load()
+        _, outputs = _fixtures(module)
+
+        changes = (
+            (
+                _host_only_ifconfig().replace(
+                    "bridge100: flags=8b63<UP,BROADCAST,SMART,",
+                    "bridge100: flags=8b63<UP,BROADCAST,",
+                ),
+                "host_only_bridge_link_drift",
+            ),
+            (
+                _host_only_ifconfig().replace(
+                    "vmenet0: flags=8963<UP,BROADCAST,SMART,",
+                    "vmenet0: flags=8963<UP,BROADCAST,",
+                ),
+                "host_only_vmenet_interface_drift",
+            ),
+            (
+                _host_only_ifconfig().replace(
+                    "vmenet0: flags=8963<",
+                    "vmenet0: flags=8963<POINTOPOINT,",
+                ),
+                "host_only_vmenet_interface_drift",
+            ),
+            (
+                _host_only_ifconfig().replace(
+                    "vmenet0: flags=8963<UP,BROADCAST,SMART,RUNNING,"
+                    "PROMISC,SIMPLEX,MULTICAST> mtu 1500",
+                    "vmenet0: flags=8963<UP,BROADCAST,SMART,RUNNING,"
+                    "PROMISC,SIMPLEX,MULTICAST> mtu 1400",
+                ),
+                "host_only_vmenet_interface_drift",
+            ),
+            (
+                _host_only_ifconfig().replace(
+                    "\tether 5a:11:22:33:44:55\n\tmedia: autoselect",
+                    "\tether 5a:11:22:33:44:55\n"
+                    "\tinet 192.0.2.1 netmask 0xffffff00\n"
+                    "\tmedia: autoselect",
+                ),
+                "host_only_vmenet_interface_drift",
+            ),
+            (
+                _host_only_ifconfig().replace(
+                    "\tether 5a:11:22:33:44:55\n\tmedia: autoselect",
+                    "\tether 5a:11:22:33:44:55\n"
+                    "\tinet6 fe80::1%vmenet0 prefixlen 64 scopeid 0x19\n"
+                    "\tmedia: autoselect",
+                ),
+                "host_only_vmenet_interface_drift",
+            ),
+            (
+                _host_only_ifconfig().rsplit("\tstatus: active", 1)[0]
+                + "\tstatus: inactive\n",
+                "host_only_vmenet_interface_drift",
+            ),
+            (
+                _host_only_ifconfig().replace(
+                    "member: vmenet0 flags=3<LEARNING,DISCOVER>",
+                    "member: vmenet0 flags=3<LEARNING>",
+                ),
+                "host_only_bridge_member_drift",
+            ),
+            (
+                _host_only_ifconfig().replace(
+                    "member: vmenet0 flags=3<LEARNING,DISCOVER>",
+                    "member: en0 flags=3<LEARNING,DISCOVER>",
+                ),
+                "host_only_bridge_member_drift",
+            ),
+            (
+                _host_only_ifconfig().replace(
+                    "\tmember: vmenet0 flags=3<LEARNING,DISCOVER>\n",
+                    "\tmember: vmenet0 flags=3<LEARNING,DISCOVER>\n"
+                    "\tmember: en0 flags=3<LEARNING,DISCOVER>\n",
+                ),
+                "host_only_bridge_member_drift",
+            ),
+            (
+                _host_only_ifconfig().replace(
+                    "member: vmenet0 flags=3<LEARNING,DISCOVER>",
+                    "member: vmenet0 flags=3<LEARNING,DISCOVER,STP>",
+                ),
+                "host_only_bridge_member_drift",
+            ),
+            (
+                _host_only_ifconfig()
+                + "vmenet1: flags=8963<UP,BROADCAST,SMART,RUNNING,"
+                "PROMISC,SIMPLEX,MULTICAST> mtu 1500\n"
+                "\tstatus: active\n",
+                "host_only_vmenet_inventory_drift",
+            ),
+            (
+                _host_only_ifconfig(member_name="vmenet27"),
+                "host_only_vmenet_inventory_drift",
+            ),
+            (
+                _host_only_ifconfig().split("vmenet0: flags=", 1)[0],
+                "host_only_vmenet_inventory_drift",
+            ),
+        )
+        for changed, error in changes:
+            with self.subTest(error=error):
+                parsed = module._parse_ifconfig(outputs["ifconfig"] + changed)
+                with self.assertRaisesRegex(module.WatchdogError, error):
+                    module._validate_host_only_vmenet(
+                        parsed, allow_host_only=True
+                    )
+
+        malformed = (
+            outputs["ifconfig"]
+            + _host_only_ifconfig().replace(
+                "member: vmenet0 flags=3<LEARNING,DISCOVER>",
+                "member: vmenet0 flags=3<>",
+            )
+        )
+        with self.assertRaisesRegex(module.WatchdogError, "bridge_member_shape"):
+            module._parse_ifconfig(malformed)
+
+    def test_vmenet_routes_are_never_part_of_airgap_topology(self) -> None:
+        module = _load()
+        lock, outputs = _fixtures(module)
+        for routes, options in (
+            (
+                outputs["routes4"]
+                + "192.168.106.2 link#21 UCS vmenet0\n",
+                {},
+            ),
+            (
+                outputs["routes6"]
+                + "fe80::%vmenet0/64 link#21 UcI vmenet0\n",
+                {
+                    "inert_utun_interfaces": lock["inert_utun_interfaces"],
+                    "dormant_apple_interfaces": lock[
+                        "dormant_apple_interfaces"
+                    ],
+                },
+            ),
+        ):
+            with self.subTest(routes=routes.splitlines()[-1]):
+                with self.assertRaisesRegex(
+                    module.WatchdogError, "unexpected_vmenet_route"
+                ):
+                    module._canonical_routes(
+                        routes, allow_host_only=True, **options
+                    )
+
     def test_hardware_lock_schema_rejects_enabled_service(self) -> None:
         module = _load()
         lock, _ = _fixtures(module)
@@ -686,11 +921,7 @@ Network interfaces: bridge100
         )
 
         host_outputs = dict(outputs)
-        host_outputs["ifconfig"] += (
-            "bridge100: flags=8863<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST>\n"
-            "\tinet 192.168.106.1 netmask 0xffffff00 broadcast 192.168.106.255\n"
-            "\tstatus: active\n"
-        )
+        host_outputs["ifconfig"] += _host_only_ifconfig()
         host_outputs["routes4"] += "192.168.106/24 link#20 UCS bridge100\n"
         host_outputs["nwi"] = """Network information
 IPv4 network interface information

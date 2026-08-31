@@ -114,7 +114,20 @@ ROUTER_GUEST_MAC = "02:74:64:00:00:01"
 SESSION_RE = re.compile(r"[0-9a-f]{64}")
 INTERFACE_RE = re.compile(r"[a-z][a-z0-9]{0,14}")
 UTUN_INTERFACE_RE = re.compile(r"utun[0-9]{1,3}")
+VMENET_INTERFACE_RE = re.compile(r"vmenet[0-9]+")
+HOST_ONLY_VMNET_INTERFACE = "vmenet0"
 INERT_UTUN_FLAGS = ["MULTICAST", "POINTOPOINT", "RUNNING", "UP"]
+HOST_ONLY_LINK_REQUIRED_FLAGS = {
+    "BROADCAST",
+    "MULTICAST",
+    "RUNNING",
+    "SIMPLEX",
+    "SMART",
+    "UP",
+}
+HOST_ONLY_LINK_OPTIONAL_FLAGS = {"ALLMULTI", "PROMISC"}
+HOST_ONLY_MEMBER_REQUIRED_FLAGS = {"DISCOVER", "LEARNING"}
+HOST_ONLY_MEMBER_OPTIONAL_FLAGS = {"CSUM", "PRIVATE", "VIRTIO"}
 DORMANT_APPLE_PROFILES = [
     {"flags": ["BROADCAST", "MULTICAST", "SIMPLEX", "SMART"], "interface": "awdl0", "mtu": 1500, "route_class": "multicast_link", "status": "inactive"},
     {"flags": ["MULTICAST", "POINTOPOINT", "RUNNING"], "interface": "ipsec0", "mtu": 1500, "route_class": "scoped_linklocal_multicast", "status": None},
@@ -560,6 +573,8 @@ def _canonical_routes(
         if ignore_host_only_neighbors and _is_host_only_neighbor_route(fields):
             continue
         destination, gateway, flags, interface = fields[:4]
+        if VMENET_INTERFACE_RE.fullmatch(interface) is not None:
+            raise WatchdogError("unexpected_vmenet_route")
         if interface in dormant:
             item = dormant[interface]
             address = item["ipv6_link_local_address"]
@@ -792,6 +807,7 @@ def _parse_ifconfig(content: str) -> dict[str, dict[str, Any]]:
             result[current] = {
                 "flags": sorted(flags),
                 "mtu": int(mtu_match.group(1)) if mtu_match else None,
+                "members": [],
                 "up": "UP" in flags,
                 "status": None,
                 "ipv4": [],
@@ -802,7 +818,29 @@ def _parse_ifconfig(content: str) -> dict[str, dict[str, Any]]:
         if current is None:
             continue
         stripped = line.strip()
-        if stripped.startswith("status: "):
+        if stripped.startswith("member:"):
+            member = re.fullmatch(
+                r"member:\s+([a-z][a-z0-9]{0,14})\s+"
+                r"flags=[0-9a-fA-F]+<([^>]*)>",
+                stripped,
+            )
+            if member is None or not current.startswith("bridge"):
+                raise WatchdogError("bridge_member_shape")
+            flags = [item.strip() for item in member.group(2).split(",")]
+            if (
+                not flags
+                or any(not item for item in flags)
+                or len(set(flags)) != len(flags)
+                or any(
+                    existing["interface"] == member.group(1)
+                    for existing in result[current]["members"]
+                )
+            ):
+                raise WatchdogError("bridge_member_shape")
+            result[current]["members"].append(
+                {"flags": sorted(flags), "interface": member.group(1)}
+            )
+        elif stripped.startswith("status: "):
             result[current]["status"] = stripped.split(": ", 1)[1]
         elif stripped.startswith("inet "):
             address = stripped.split()[1]
@@ -817,6 +855,8 @@ def _parse_ifconfig(content: str) -> dict[str, dict[str, Any]]:
                 raise WatchdogError("interface_ipv6_prefix_invalid")
             result[current]["ipv6"].append(address)
             result[current]["ipv6_prefixlen"].append(int(fields[prefix_index]))
+    for value in result.values():
+        value["members"].sort(key=lambda item: item["interface"])
     if "lo0" not in result:
         raise WatchdogError("loopback_absent")
     return result
@@ -1656,11 +1696,92 @@ def _internet_sharing_disabled(
     )
 
 
+def _validate_host_only_vmenet(
+    interfaces: dict[str, dict[str, Any]], *, allow_host_only: bool
+) -> str | None:
+    vmenets = sorted(
+        name
+        for name in interfaces
+        if VMENET_INTERFACE_RE.fullmatch(name) is not None
+    )
+    member_parents = sorted(
+        name for name, value in interfaces.items() if value["members"]
+    )
+    if not allow_host_only:
+        if vmenets:
+            raise WatchdogError("unexpected_vmenet_interface")
+        if member_parents:
+            raise WatchdogError("unexpected_bridge_member")
+        return None
+
+    bridge = interfaces.get("bridge100")
+    bridge_active = bool(
+        bridge is not None
+        and (
+            bridge["up"]
+            or bridge["status"] == "active"
+            or bridge["ipv4"]
+            or bridge["ipv6"]
+            or bridge["members"]
+        )
+    )
+    if not bridge_active:
+        if vmenets or member_parents:
+            raise WatchdogError("host_only_vmenet_phase_drift")
+        return None
+    if bridge is None:  # Kept explicit for type narrowing and fail-closed review.
+        raise WatchdogError("host_only_bridge_member_drift")
+
+    bridge_flags = set(bridge["flags"])
+    if (
+        bridge["mtu"] != 1500
+        or not HOST_ONLY_LINK_REQUIRED_FLAGS.issubset(bridge_flags)
+        or not bridge_flags.issubset(
+            HOST_ONLY_LINK_REQUIRED_FLAGS | HOST_ONLY_LINK_OPTIONAL_FLAGS
+        )
+    ):
+        raise WatchdogError("host_only_bridge_link_drift")
+    if vmenets != [HOST_ONLY_VMNET_INTERFACE]:
+        raise WatchdogError("host_only_vmenet_inventory_drift")
+    vmenet_name = HOST_ONLY_VMNET_INTERFACE
+    vmenet = interfaces[vmenet_name]
+    vmenet_flags = set(vmenet["flags"])
+    if (
+        vmenet["mtu"] != 1500
+        or vmenet["status"] != "active"
+        or vmenet["ipv4"]
+        or vmenet["ipv6"]
+        or vmenet["ipv6_prefixlen"]
+        or vmenet["members"]
+        or not HOST_ONLY_LINK_REQUIRED_FLAGS.issubset(vmenet_flags)
+        or not vmenet_flags.issubset(
+            HOST_ONLY_LINK_REQUIRED_FLAGS | HOST_ONLY_LINK_OPTIONAL_FLAGS
+        )
+    ):
+        raise WatchdogError("host_only_vmenet_interface_drift")
+    if member_parents != ["bridge100"] or len(bridge["members"]) != 1:
+        raise WatchdogError("host_only_bridge_member_drift")
+    member = bridge["members"][0]
+    member_flags = set(member["flags"])
+    if (
+        member["interface"] != vmenet_name
+        or not HOST_ONLY_MEMBER_REQUIRED_FLAGS.issubset(member_flags)
+        or not member_flags.issubset(
+            HOST_ONLY_MEMBER_REQUIRED_FLAGS | HOST_ONLY_MEMBER_OPTIONAL_FLAGS
+        )
+    ):
+        raise WatchdogError("host_only_bridge_member_drift")
+    return vmenet_name
+
+
 def _validate_addresses(
     interfaces: dict[str, dict[str, Any]],
     lock: dict[str, Any],
     allow_host_only: bool,
 ) -> bool:
+    host_only_vmenet = _validate_host_only_vmenet(
+        interfaces, allow_host_only=allow_host_only
+    )
     hardware = {item["device"] for item in lock["hardware_ports"]}
     loopback = interfaces.get("lo0")
     if (
@@ -1730,6 +1851,7 @@ def _validate_addresses(
             or name in passive
             or name in dormant_apple
             or name in inert_utuns
+            or name == host_only_vmenet
         ):
             continue
         if UTUN_INTERFACE_RE.fullmatch(name) is not None:
