@@ -349,6 +349,7 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         self.assertIn("recover-failed-prestart", launcher)
         for forbidden in ("apply-guest-package", "apply-router"):
             self.assertNotIn(forbidden, launcher)
+        self.assertNotIn("probe-base", launcher)
 
     def test_host_only_failure_reason_is_exactly_allowlisted(self) -> None:
         source = HOST_APPLY.read_text(encoding="utf-8")
@@ -522,7 +523,7 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             mock.patch.object(controller, "_assert_host_identity"),
             mock.patch.object(
                 controller,
-                "_initialize",
+                "_require_existing_state",
                 return_value={"receipts": Path("/fixed/receipts")},
             ),
             mock.patch.object(
@@ -538,7 +539,7 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(controller.BootstrapError, "not pinned"),
         ):
-            controller._airgap_preconditions(successor_args)
+            controller._airgap_preconditions(successor_args, operation="check")
         with mock.patch.object(controller, "_darwin_listxattr", return_value=[]):
             controller._verify_recovery_xattrs(probe, "pidfile")
             with self.assertRaises(controller.BootstrapError):
@@ -1128,28 +1129,99 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         self.assertIn("_host_helpers_active", teardown_source)
         self.assertIn("bridge_active and not helpers_active", teardown_source)
 
-    def test_recovery_base_selector_is_incident_specific_and_fresh_checks_both(self) -> None:
-        controller = _load_module(HOST_APPLY, "bootstrap_recovery_base_v2_test")
+    def test_recovery_base_and_fresh_artifacts_use_original_session_path(self) -> None:
+        controller = _load_module(HOST_APPLY, "bootstrap_recovery_base_test")
         state = {
             "state": Path("/private/var/db/trading-desk-router-bootstrap-v1"),
             "receipts": Path("/fixed/receipts"),
             "quarantine": Path("/fixed/quarantine"),
         }
-        legacy = "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1"
         other = "c" * 64
-        self.assertTrue(
-            controller._recovery_base_capture_path(state, legacy).name.endswith(
-                "-v2.json"
-            )
-        )
-        self.assertEqual(
-            f"airgap-hardware-base-capture-{other}.json",
-            controller._recovery_base_capture_path(state, other).name,
-        )
         fresh = {path.name for path in controller._fresh_recovery_artifacts(state, other)}
         self.assertIn(f"airgap-hardware-base-capture-{other}.json", fresh)
         self.assertIn(f"airgap-hardware-base-capture-{other}-v2.json", fresh)
-        self.assertIn(f".airgap-hardware-base-capture-{other}-v2.json.pending", fresh)
+
+    def test_check_only_rotation_is_read_only_and_exhaustively_absent(self) -> None:
+        controller = _load_module(HOST_APPLY, "bootstrap_rotation_test")
+        source = "b" * 64
+        target = "0" * 64
+        source_value = {
+            "capture_session_id": source,
+            "hardware_lock_candidate": {},
+            "hardware_profile_sha256": "c" * 64,
+            "kind": "trading-desk.router-bootstrap.airgap-base-capture",
+            "sample_sha256": "d" * 64,
+            "schema_version": 1,
+        }
+        source_content = controller._canonical_json(source_value)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = {
+                "state": root / "state",
+                "receipts": root / "receipts",
+                "quarantine": root / "quarantine",
+            }
+            for path in state.values():
+                path.mkdir()
+            lock = {
+                "check_only_rotation": {
+                    "source_base_capture_sha256": controller._sha256_bytes(
+                        source_content
+                    ),
+                    "source_session_id": source,
+                    "target_session_id": target,
+                },
+                "pins": {"airgap_session_id": target},
+                "paths": {
+                    "airgap_first_boot_receipt": str(
+                        state["receipts"] / "09-airgap-first-boot-stopped.json"
+                    ),
+                    "vmnet_runtime": str(root / "runtime"),
+                    "vmnet_sudoers": str(root / "sudoers"),
+                },
+            }
+            recovery = {"fresh_session_id": source}
+
+            def validate() -> None:
+                with (
+                    mock.patch.object(
+                        controller, "_read_bound", return_value=source_content
+                    ),
+                    mock.patch.object(controller, "_no_named_acl"),
+                    mock.patch.object(controller, "_assert_no_vm_process"),
+                    mock.patch.object(controller, "_assert_no_airgap_watchdog_process"),
+                    mock.patch.object(controller, "_router_uid_processes", return_value=[]),
+                ):
+                    controller._validate_check_only_rotation(lock, state, recovery)
+
+            validate()
+            artifacts = [
+                state["state"] / ".airgap-first-boot.PREPARING.json",
+                state["receipts"] / "09-airgap-first-boot-stopped.json",
+                state["state"] / "airgap-hardware-lock.json",
+                Path(lock["paths"]["vmnet_runtime"]),
+                Path(lock["paths"]["vmnet_sudoers"]),
+                state["receipts"] / f"09-airgap-first-boot-incident-{source}.json",
+                state["state"] / f"airgap-hardware-base-capture-{target}.json",
+                state["state"] / f"airgap-hardware-base-capture-{target}-v2.json",
+                state["quarantine"] / f"first-boot-sudoers-{source}",
+                state["quarantine"] / f"prestart-vmnet-runtime-{target}-123",
+            ]
+            for artifact in artifacts:
+                with self.subTest(artifact=artifact.name):
+                    artifact.parent.mkdir(parents=True, exist_ok=True)
+                    artifact.write_bytes(b"unexpected")
+                    with self.assertRaisesRegex(
+                        controller.BootstrapError, "attempt artifact exists"
+                    ):
+                        validate()
+                    artifact.unlink()
+
+        apply_source = inspect.getsource(controller._apply_airgapped_first_boot)
+        self.assertLess(
+            apply_source.index('_run_watchdog_phase(lock, "capture-base")'),
+            apply_source.index("_write_exact(\n        preparing_marker"),
+        )
         recovery_source = inspect.getsource(controller._recover_failed_prestart)
         self.assertIn('base.parent / f".{base.name}.pending"', recovery_source)
 
@@ -1232,7 +1304,7 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
                 return path, hashlib.sha256(content).hexdigest()
 
             patches = {
-                "_airgap_preconditions": lambda _args: (
+                "_airgap_preconditions": lambda _args, **_kwargs: (
                     lock,
                     {"state": state, "receipts": receipts, "quarantine": root},
                     Path("/limactl"),

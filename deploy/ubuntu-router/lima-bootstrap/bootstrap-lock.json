@@ -38,6 +38,11 @@
     "vmnet_runtime": "/private/var/db/trading-desk-router-vmnet-runtime",
     "vmnet_sudoers": "/private/etc/sudoers.d/trading-desk-router-lima"
   },
+  "check_only_rotation": {
+    "source_base_capture_sha256": "a39b3d2c7951696306b3279a9cc854fdcc281612d32544a59c3e3e7abd07b002",
+    "source_session_id": "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1",
+    "target_session_id": "0fbd65f00cd16cd949c15df3147249a35d8034ef3f052a441ba0246ccb8183d1"
+  },
   "phases": {
     "airgapped_start_apply_enabled": true,
     "guest_package_apply_enabled": false,
@@ -45,7 +50,7 @@
     "router_activation_apply_enabled": false
   },
   "pins": {
-    "airgap_session_id": "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1",
+    "airgap_session_id": "0fbd65f00cd16cd949c15df3147249a35d8034ef3f052a441ba0246ccb8183d1",
     "hardened_cloud_template_sha256": "ee4d159bae33ba541ef1b32c0f15e96e39c8b251e28b1cebc15738dace2de225",
     "hardened_plan_sha256": "aea50ab9aeaf1022f1cf1fbd7055cb9d249e6c94cb5bbae96ff04944a67a9874",
     "hardened_vm_receipt_sha256": "8ea55aa7a05534b91e40d42e70034162575f2dae3d568be06f6c8433ee1d39b6",

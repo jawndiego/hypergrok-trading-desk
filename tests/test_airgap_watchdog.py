@@ -729,150 +729,31 @@ Network interfaces: bridge100
             final_lock["host_only"]["route_topology_sha256"]["ipv4"],
         )
 
-    def test_incident_specific_legacy_base_migration_is_exact(self) -> None:
+    def test_probe_base_validates_without_publishing(self) -> None:
         module = _load()
-        self.assertEqual(
-            "a39b3d2c7951696306b3279a9cc854fdcc281612d32544a59c3e3e7abd07b002",
-            module.LEGACY_BASE_ADOPTION_SHA256,
-        )
-        self.assertEqual(
-            "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1",
-            module.LEGACY_BASE_ADOPTION_SESSION,
-        )
-        bootstrap_lock = json.loads(
-            (WATCHDOG.parent / "bootstrap-lock.json").read_text(encoding="utf-8")
-        )
-        self.assertEqual(
-            bootstrap_lock["pins"]["airgap_session_id"],
-            module.LEGACY_BASE_ADOPTION_SESSION,
-        )
-        candidate = {
-            "exact": "freshly-observed",
-            "nwi_sha256": "2" * 64,
-            "route_topology_sha256": {"ipv4": "3" * 64, "ipv6": "4" * 64},
-        }
-        stored_candidate = {
-            **candidate,
-            "nwi_sha256": "5" * 64,
-            "route_topology_sha256": {"ipv4": "6" * 64, "ipv6": "7" * 64},
-        }
-        stored = {
-            "capture_session_id": module.LEGACY_BASE_ADOPTION_SESSION,
-            "hardware_lock_candidate": stored_candidate,
-            "hardware_profile_sha256": "b" * 64,
-            "kind": "trading-desk.router-bootstrap.airgap-base-capture",
-            "sample_sha256": "1" * 64,
-            "schema_version": 1,
-        }
-        current = {
-            **stored,
-            "hardware_lock_candidate": candidate,
-            "sample_sha256": "2" * 64,
-        }
-        content = module._canonical_json(stored)
-        digest = module._sha256_bytes(content)
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "legacy-base.json"
-            path.write_bytes(content)
-            with (
-                mock.patch.object(module, "_base_capture_path", return_value=path),
-                mock.patch.object(module, "_safe_root_file", return_value=content),
-                mock.patch.object(module, "_assert_root_directory"),
-                mock.patch.object(module, "LEGACY_BASE_ADOPTION_SHA256", digest),
-                mock.patch.object(
-                    module,
-                    "_atomic_fixed_document",
-                    return_value=(path, "9" * 64),
-                ) as atomic,
-            ):
-                self.assertEqual(
-                    (path, "9" * 64),
-                    module._migrate_exact_legacy_base_capture(path, current),
-                )
-                for changed in (
-                    {**current, "capture_session_id": "c" * 64},
-                    {
-                        **current,
-                        "hardware_lock_candidate": {
-                            **candidate,
-                            "exact": "drifted",
-                        },
-                    },
-                ):
-                    if (
-                        changed["capture_session_id"]
-                        != module.LEGACY_BASE_ADOPTION_SESSION
-                    ):
-                        self.assertIsNone(
-                            module._migrate_exact_legacy_base_capture(path, changed)
-                        )
-                    else:
-                        with self.assertRaisesRegex(
-                            module.WatchdogError, "legacy_base_capture_candidate"
-                        ):
-                            module._migrate_exact_legacy_base_capture(path, changed)
-                atomic.assert_called_with(path, current)
-            with (
-                mock.patch.object(module, "_base_capture_path", return_value=path),
-                mock.patch.object(module, "_safe_root_file", return_value=content),
-                mock.patch.object(module, "_assert_root_directory"),
-                mock.patch.object(module, "LEGACY_BASE_ADOPTION_SHA256", digest),
-                mock.patch.object(
-                    module,
-                    "_atomic_fixed_document",
-                    side_effect=module.WatchdogError(
-                        "fixed_document_pending_differs"
-                    ),
-                ),
-                self.assertRaisesRegex(
-                    module.WatchdogError, "fixed_document_pending_differs"
-                ),
-            ):
-                module._migrate_exact_legacy_base_capture(path, current)
-
-            with (
-                mock.patch.object(module, "_base_capture_path", return_value=path),
-                mock.patch.object(
-                    module,
-                    "_safe_root_file",
-                    return_value=module._canonical_json(current),
-                ) as read_v2,
-            ):
-                self.assertEqual(
-                    current,
-                    module._read_base_capture(module.LEGACY_BASE_ADOPTION_SESSION),
-                )
-            read_v2.assert_called_once_with(path, 0o400)
-            with (
-                mock.patch.object(module, "_base_capture_path", return_value=path),
-                mock.patch.object(module, "_safe_root_file", return_value=content),
-                mock.patch.object(module, "_assert_root_directory"),
-                self.assertRaisesRegex(
-                    module.WatchdogError, "legacy_base_capture_digest"
-                ),
-            ):
-                module._migrate_exact_legacy_base_capture(path, current)
-
+        value = {"validated": True}
         with (
-            mock.patch.object(
-                module,
-                "_load_hardware_profile",
-                return_value=({"host": {"exact": True}}, "b" * 64),
-            ),
-            mock.patch.object(module, "_observed_host", return_value={"exact": True}),
-            mock.patch.object(module, "_run_core_snapshot_commands", return_value={}),
-            mock.patch.object(module, "_candidate_from_outputs", return_value=candidate),
-            mock.patch.object(
-                module,
-                "_sample",
-                side_effect=module.WatchdogError("current_sample_failed"),
-            ),
-            mock.patch.object(module, "_migrate_exact_legacy_base_capture") as migrate,
-            self.assertRaisesRegex(module.WatchdogError, "current_sample_failed"),
+            mock.patch.object(module, "_build_base_capture", return_value=value),
+            mock.patch.object(module, "_atomic_fixed_document") as publish,
         ):
-            module._capture_base(module.LEGACY_BASE_ADOPTION_SESSION)
-        migrate.assert_not_called()
+            self.assertEqual(
+                module._sha256_bytes(module._canonical_json(value)),
+                module._probe_base("a" * 64),
+            )
+        publish.assert_not_called()
 
+    def test_capture_base_publishes_target_once(self) -> None:
+        module = _load()
+        value = {"validated": True}
+        path = module._base_capture_path("a" * 64)
+        with (
+            mock.patch.object(module, "_build_base_capture", return_value=value),
+            mock.patch.object(
+                module, "_atomic_fixed_document", return_value=(path, "b" * 64)
+            ) as publish,
+        ):
+            self.assertEqual((path, "b" * 64), module._capture_base("a" * 64))
+        publish.assert_called_once_with(path, value)
     def test_host_helpers_are_exact_root_singletons_only_in_host_phase(self) -> None:
         module = _load()
         processes = (
@@ -998,7 +879,7 @@ Network interfaces: bridge100
         self.assertEqual(["socket"], order)
         self.assertIn("force_stop_invoked=false", stderr.getvalue())
         capture_source = inspect.getsource(module.main).split(
-            'if mode in {"capture-base", "capture-host-only"}:', 1
+            'if mode in {"probe-base", "capture-base", "capture-host-only"}:', 1
         )[1].split('reason = "none"', 1)[0]
         self.assertNotIn("_force_stop()", capture_source)
 

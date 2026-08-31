@@ -667,7 +667,8 @@ def _load_prestart_recovery_profile(lock: dict[str, Any]) -> tuple[dict[str, Any
         set(value) != expected
         or value.get("schema_version") != 1
         or value.get("kind") != "trading-desk.router-bootstrap.prestart-recovery-profile"
-        or value.get("fresh_session_id") != lock["pins"]["airgap_session_id"]
+        or value.get("fresh_session_id")
+        != lock["check_only_rotation"]["source_session_id"]
         or any(
             not isinstance(value.get(key), str) or SHA256_RE.fullmatch(value[key]) is None
             for key in ("old_session_id", "failed_controller_manifest_sha256")
@@ -844,16 +845,6 @@ def _fresh_recovery_artifacts(state: dict[str, Path], session: str) -> list[Path
     ]
 
 
-def _recovery_base_capture_path(state: dict[str, Path], session: str) -> Path:
-    suffix = (
-        "-v2"
-        if session
-        == "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1"
-        else ""
-    )
-    return state["state"] / f"airgap-hardware-base-capture-{session}{suffix}.json"
-
-
 def _assert_recovery_stopped_instance(
     lock: dict[str, Any],
     limactl: Path,
@@ -896,6 +887,14 @@ def _load_lock() -> dict[str, Any]:
         lock.get("schema_version") != 1
         or lock.get("review_status")
         != "attended_airgap_hardened_recreate_and_one_boot_enabled"
+        or lock.get("check_only_rotation")
+        != {
+            "source_base_capture_sha256": "a39b3d2c7951696306b3279a9cc854fdcc281612d32544a59c3e3e7abd07b002",
+            "source_session_id": "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1",
+            "target_session_id": "0fbd65f00cd16cd949c15df3147249a35d8034ef3f052a441ba0246ccb8183d1",
+        }
+        or lock.get("pins", {}).get("airgap_session_id")
+        != lock.get("check_only_rotation", {}).get("target_session_id")
         or lock.get("phases")
         != {
             "airgapped_start_apply_enabled": True,
@@ -2113,6 +2112,16 @@ def _run_watchdog_phase(
     if result.stderr or len(result.stdout) > 64 * 1024:
         raise BootstrapError(f"air-gap {mode} output differs")
     lines = result.stdout.decode("utf-8", errors="strict").splitlines()
+    if mode == "probe-base":
+        if (
+            len(lines) != 1
+            or not lines[0].startswith("airgap_base_probe_sha256=")
+        ):
+            raise BootstrapError("air-gap probe-base output differs")
+        digest = lines[0].split("=", 1)[1]
+        if SHA256_RE.fullmatch(digest) is None:
+            raise BootstrapError("air-gap probe-base evidence differs")
+        return {"path": "", "sha256": digest}
     expected_prefixes = (
         ("airgap_base_capture=", "airgap_base_capture_sha256=")
         if mode == "capture-base"
@@ -3299,7 +3308,89 @@ def _apply_hardened_vm(args: argparse.Namespace) -> int:
     return 0
 
 
-def _airgap_preconditions(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, Path], Path, dict[str, Any]]:
+def _validate_check_only_rotation(
+    lock: dict[str, Any], state: dict[str, Path], recovery: dict[str, Any]
+) -> None:
+    rotation = lock["check_only_rotation"]
+    source = rotation["source_session_id"]
+    target = rotation["target_session_id"]
+    if (
+        lock["pins"]["airgap_session_id"] != target
+        or recovery.get("fresh_session_id") != source
+    ):
+        raise BootstrapError("check-only rotation lineage differs")
+    _assert_no_airgap_watchdog_process()
+    if _router_uid_processes():
+        raise BootstrapError("check-only rotation router process remains")
+    _assert_no_vm_process()
+    source_base = state["state"] / f"airgap-hardware-base-capture-{source}.json"
+    _no_named_acl(source_base)
+    source_content = _read_bound(
+        source_base, uid=0, gid=0, mode=0o400, maximum=128 * 1024
+    )
+    source_value = _load_json_bytes(source_content, "rotation source base capture")
+    if (
+        _sha256_bytes(source_content) != rotation["source_base_capture_sha256"]
+        or set(source_value)
+        != {
+            "capture_session_id",
+            "hardware_lock_candidate",
+            "hardware_profile_sha256",
+            "kind",
+            "sample_sha256",
+            "schema_version",
+        }
+        or source_value.get("capture_session_id") != source
+        or source_value.get("kind")
+        != "trading-desk.router-bootstrap.airgap-base-capture"
+        or source_value.get("schema_version") != 1
+    ):
+        raise BootstrapError("check-only rotation source differs")
+    source_absent = [
+        state["state"] / ".airgap-first-boot.PREPARING.json",
+        state["state"] / ".airgap-first-boot.STARTING.json",
+        Path(lock["paths"]["airgap_first_boot_receipt"]),
+        Path(lock["paths"]["airgap_first_boot_receipt"]).parent
+        / f".{Path(lock['paths']['airgap_first_boot_receipt']).name}.pending",
+        state["state"] / "airgap-hardware-lock.json",
+        state["state"] / ".airgap-hardware-lock.json.pending",
+        Path(lock["paths"]["vmnet_runtime"]),
+        Path(lock["paths"]["vmnet_sudoers"]),
+    ]
+    source_absent.extend(
+        path
+        for path in _fresh_recovery_artifacts(state, source)
+        if path != source_base
+    )
+    source_absent.extend(_fresh_recovery_artifacts(state, target))
+    for session in (source, target):
+        source_absent.extend(
+            [
+                state["quarantine"] / f"first-boot-sudoers-{session}",
+                state["quarantine"] / f"first-boot-vmnet-runtime-{session}",
+                state["quarantine"] / f"prestart-base-capture-{session}",
+                state["quarantine"] / f"prestart-preparing-{session}",
+                state["quarantine"] / f"prestart-recovery-transaction-{session}.json",
+                state["quarantine"]
+                / f".prestart-recovery-transaction-{session}.json.pending",
+            ]
+        )
+        source_absent.extend(
+            path
+            for path in state["quarantine"].iterdir()
+            if path.name.startswith(f"prestart-vmnet-runtime-{session}-")
+        )
+    if any(path.exists() or path.is_symlink() for path in source_absent):
+        raise BootstrapError("check-only rotation attempt artifact exists")
+    _assert_no_airgap_watchdog_process()
+    if _router_uid_processes():
+        raise BootstrapError("check-only rotation router process appeared")
+    _assert_no_vm_process()
+
+
+def _airgap_preconditions(
+    args: argparse.Namespace, *, operation: str
+) -> tuple[dict[str, Any], dict[str, Path], Path, dict[str, Any]]:
     _verify_bundle(args.expected_controller_manifest_sha256)
     lock = _load_lock()
     if not lock["phases"]["airgapped_start_apply_enabled"]:
@@ -3309,7 +3400,7 @@ def _airgap_preconditions(args: argparse.Namespace) -> tuple[dict[str, Any], dic
     _verify_system_tools(lock)
     local_tty = _assert_attended_root_tty()
     _assert_host_identity(lock)
-    state = _initialize(lock)
+    state = _require_existing_state(lock)
     recovery_profile, recovery_profile_sha256 = _load_prestart_recovery_profile(lock)
     expected_recovery = args.expected_prestart_recovery_receipt_sha256
     if not isinstance(expected_recovery, str) or SHA256_RE.fullmatch(expected_recovery) is None:
@@ -3328,7 +3419,8 @@ def _airgap_preconditions(args: argparse.Namespace) -> tuple[dict[str, Any], dic
         or recovery.get("kind") != "trading-desk.router-bootstrap.prestart-recovery"
         or recovery.get("old_session_id") != recovery_profile["old_session_id"]
         or recovery.get("fresh_session_id") != recovery_profile["fresh_session_id"]
-        or recovery.get("fresh_session_id") != lock["pins"]["airgap_session_id"]
+        or recovery.get("fresh_session_id")
+        != lock["check_only_rotation"]["source_session_id"]
         or recovery.get("recovery_profile_sha256") != recovery_profile_sha256
         or recovery.get("schema_version") != 1
         or recovery.get("phase") != "prestart-recovery"
@@ -3338,12 +3430,15 @@ def _airgap_preconditions(args: argparse.Namespace) -> tuple[dict[str, Any], dic
         or recovery.get("vm_status") != "Stopped"
     ):
         raise BootstrapError("prestart recovery receipt differs")
+    _validate_check_only_rotation(lock, state, recovery)
     _assert_no_vm_process()
     limactl = _limactl(lock)
     receipt = _hardened_vm_receipt(lock)
     _status(lock, limactl)
     _hardened_instance_evidence(lock, receipt, allow_runtime_files=False)
-    base = _run_watchdog_phase(lock, "capture-base")
+    if operation not in {"check", "apply"}:
+        raise BootstrapError("air-gap precondition operation differs")
+    base = _run_watchdog_phase(lock, "probe-base") if operation == "check" else None
     return lock, state, limactl, {
         "receipt": receipt,
         "base_capture": base,
@@ -3353,10 +3448,12 @@ def _airgap_preconditions(args: argparse.Namespace) -> tuple[dict[str, Any], dic
 
 
 def _check_airgap(args: argparse.Namespace) -> int:
-    lock, _state, _limactl_path, evidence = _airgap_preconditions(args)
+    lock, _state, _limactl_path, evidence = _airgap_preconditions(
+        args, operation="check"
+    )
     print("airgap_preflight=PASS")
     print(f"airgap_session_id={lock['pins']['airgap_session_id']}")
-    print(f"airgap_base_capture_sha256={evidence['base_capture']['sha256']}")
+    print(f"airgap_base_probe_sha256={evidence['base_capture']['sha256']}")
     print("vm_status=Stopped")
     print("network_reconnect_authorized=false")
     return 0
@@ -3712,7 +3809,7 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
     adopted = _adopt_completed_airgap_first_boot(args)
     if adopted is not None:
         return adopted
-    lock, state, limactl, preflight = _airgap_preconditions(args)
+    lock, state, limactl, preflight = _airgap_preconditions(args, operation="apply")
     receipt08 = preflight["receipt"]
     final_path = Path(lock["paths"]["airgap_first_boot_receipt"])
     if final_path.exists() or final_path.is_symlink():
@@ -3727,6 +3824,7 @@ def _apply_airgapped_first_boot(args: argparse.Namespace) -> int:
     ):
         raise BootstrapError("prior air-gapped first-boot attempt requires review")
     attempt_id = lock["pins"]["airgap_session_id"]
+    preflight["base_capture"] = _run_watchdog_phase(lock, "capture-base")
     marker_value = {
         "attempt_id": attempt_id,
         "controller_manifest_sha256": args.expected_controller_manifest_sha256,
@@ -4016,7 +4114,7 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
         if any(path.exists() or path.is_symlink() for path in fresh_absent):
             raise BootstrapError("fresh recovery session already has artifacts")
         runtime = Path(lock["paths"]["vmnet_runtime"])
-        base = _recovery_base_capture_path(state, old_session)
+        base = state["state"] / f"airgap-hardware-base-capture-{old_session}.json"
         preparing = state["state"] / ".airgap-first-boot.PREPARING.json"
         moves = (
             (runtime, state["quarantine"] / f"prestart-vmnet-runtime-{old_session}-{profile['runtime']['inode']}"),

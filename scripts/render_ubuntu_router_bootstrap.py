@@ -148,6 +148,14 @@ def _load_lock(content: bytes) -> dict[str, Any]:
         or value.get("guest", {}).get("instance_name") != "trading-desk-router"
         or value.get("pins", {}).get("predecessor_vm_receipt_sha256")
         != "1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601"
+        or value.get("check_only_rotation")
+        != {
+            "source_base_capture_sha256": "a39b3d2c7951696306b3279a9cc854fdcc281612d32544a59c3e3e7abd07b002",
+            "source_session_id": "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1",
+            "target_session_id": "0fbd65f00cd16cd949c15df3147249a35d8034ef3f052a441ba0246ccb8183d1",
+        }
+        or value.get("pins", {}).get("airgap_session_id")
+        != value.get("check_only_rotation", {}).get("target_session_id")
         or value.get("phases")
         != {
             "airgapped_start_apply_enabled": True,
@@ -359,7 +367,8 @@ def _validate_recovery_profile(
         or set(value) != expected
         or value.get("schema_version") != 1
         or value.get("kind") != "trading-desk.router-bootstrap.prestart-recovery-profile"
-        or value.get("fresh_session_id") != lock["pins"]["airgap_session_id"]
+        or value.get("fresh_session_id")
+        != lock["check_only_rotation"]["source_session_id"]
     ):
         raise ValueError("prestart recovery profile schema differs")
     for key in ("failed_controller_manifest_sha256", "old_session_id"):

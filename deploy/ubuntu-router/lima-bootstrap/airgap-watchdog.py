@@ -10,8 +10,9 @@ timeout, sample delay, or any air-gap drift cuts the exact host-only daemon,
 terminates exact dedicated UID-454 Lima sessions, and persistently retries the
 fixed ``limactl stop --force`` flow until stopped state is proven.
 
-``capture-base`` first validates the manifest-bound sibling hardware profile
-and writes a non-authoritative base capture. After the controller manually
+``probe-base`` validates the manifest-bound sibling hardware profile without
+writing. ``capture-base`` repeats that validation and writes a non-authoritative
+base exactly once for the single apply invocation. After the controller manually
 starts the exact host-only socket_vmnet daemon, ``capture-host-only`` validates
 that state and atomically publishes the hardware lock.
 
@@ -137,12 +138,6 @@ CAPTURE_MODE_MAX_SECONDS = (
     + CAPTURE_TOTAL_SECONDS
     + CAPTURE_STOP_BUDGET_SECONDS
 )
-LEGACY_BASE_ADOPTION_SESSION = (
-    "bca4e4c2df5880c5f20e1d17630b653fafce37aeddb7e9f424d419911f4e66b1"
-)
-LEGACY_BASE_ADOPTION_SHA256 = (
-    "a39b3d2c7951696306b3279a9cc854fdcc281612d32544a59c3e3e7abd07b002"
-)
 NAT_PLIST = Path(
     "/Library/Preferences/SystemConfiguration/com.apple.nat.plist"
 )
@@ -182,14 +177,7 @@ def _sha256_file(path: Path) -> str:
 def _base_capture_path(session_id: str) -> Path:
     if SESSION_RE.fullmatch(session_id) is None:
         raise WatchdogError("base_capture_session")
-    suffix = "-v2" if session_id == LEGACY_BASE_ADOPTION_SESSION else ""
-    return STATE_ROOT / f"airgap-hardware-base-capture-{session_id}{suffix}.json"
-
-
-def _legacy_base_capture_path() -> Path:
-    return STATE_ROOT / (
-        f"airgap-hardware-base-capture-{LEGACY_BASE_ADOPTION_SESSION}.json"
-    )
+    return STATE_ROOT / f"airgap-hardware-base-capture-{session_id}.json"
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -429,74 +417,6 @@ def _atomic_fixed_document(path: Path, value: dict[str, Any]) -> tuple[Path, str
     _resync_exact_root_file(pending, content)
     _rename_exclusive(pending, path)
     return path, digest
-
-
-def _migrate_exact_legacy_base_capture(
-    current_path: Path, current: dict[str, Any]
-) -> tuple[Path, str] | None:
-    if current.get("capture_session_id") != LEGACY_BASE_ADOPTION_SESSION:
-        return None
-    if current_path != _base_capture_path(LEGACY_BASE_ADOPTION_SESSION):
-        raise WatchdogError("legacy_base_capture_path")
-    _assert_root_directory(STATE_ROOT)
-    legacy_path = _legacy_base_capture_path()
-    content = _safe_root_file(legacy_path, 0o400)
-    if _sha256_bytes(content) != LEGACY_BASE_ADOPTION_SHA256:
-        raise WatchdogError("legacy_base_capture_digest")
-    try:
-        stored = json.loads(content, object_pairs_hook=_unique_object)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise WatchdogError("legacy_base_capture_json") from error
-    keys = {
-        "capture_session_id",
-        "hardware_lock_candidate",
-        "hardware_profile_sha256",
-        "kind",
-        "sample_sha256",
-        "schema_version",
-    }
-    if (
-        not isinstance(stored, dict)
-        or set(stored) != keys
-        or set(current) != keys
-        or stored.get("schema_version") != 1
-        or current.get("schema_version") != 1
-        or stored.get("kind")
-        != "trading-desk.router-bootstrap.airgap-base-capture"
-        or current.get("kind") != stored.get("kind")
-        or stored.get("capture_session_id") != LEGACY_BASE_ADOPTION_SESSION
-        or current.get("capture_session_id") != stored.get("capture_session_id")
-        or stored.get("hardware_profile_sha256")
-        != current.get("hardware_profile_sha256")
-        or not isinstance(stored.get("sample_sha256"), str)
-        or SHA256_RE.fullmatch(stored["sample_sha256"]) is None
-        or not isinstance(current.get("sample_sha256"), str)
-        or SHA256_RE.fullmatch(current["sample_sha256"]) is None
-    ):
-        raise WatchdogError("legacy_base_capture_binding")
-    stored_candidate = stored["hardware_lock_candidate"]
-    current_candidate = current["hardware_lock_candidate"]
-    if not isinstance(stored_candidate, dict) or not isinstance(
-        current_candidate, dict
-    ):
-        raise WatchdogError("legacy_base_capture_candidate")
-    permitted_drift = {"nwi_sha256", "route_topology_sha256"}
-    if (
-        set(stored_candidate) != set(current_candidate)
-        or not permitted_drift.issubset(stored_candidate)
-        or {
-            key: value
-            for key, value in stored_candidate.items()
-            if key not in permitted_drift
-        }
-        != {
-            key: value
-            for key, value in current_candidate.items()
-            if key not in permitted_drift
-        }
-    ):
-        raise WatchdogError("legacy_base_capture_candidate")
-    return _atomic_fixed_document(current_path, current)
 
 
 def _parse_hardware_ports(content: str) -> list[dict[str, str]]:
@@ -2026,7 +1946,7 @@ def _candidate_from_outputs(
     }
 
 
-def _capture_base(session_id: str) -> tuple[Path, str]:
+def _build_base_capture(session_id: str) -> dict[str, Any]:
     deadline = time.monotonic() + CAPTURE_TOTAL_SECONDS
     profile, profile_sha256 = _load_hardware_profile()
     if _observed_host() != profile["host"]:
@@ -2039,7 +1959,7 @@ def _capture_base(session_id: str) -> tuple[Path, str]:
         candidate, allow_host_only=False, capture_deadline=deadline
     )
     sample.pop("duration_ns", None)
-    value = {
+    return {
         "capture_session_id": session_id,
         "hardware_lock_candidate": candidate,
         "hardware_profile_sha256": profile_sha256,
@@ -2047,11 +1967,16 @@ def _capture_base(session_id: str) -> tuple[Path, str]:
         "sample_sha256": _sha256_bytes(_canonical_json(sample)),
         "schema_version": 1,
     }
-    path = _base_capture_path(session_id)
-    migrated = _migrate_exact_legacy_base_capture(path, value)
-    if migrated is not None:
-        return migrated
-    return _atomic_fixed_document(path, value)
+
+
+def _probe_base(session_id: str) -> str:
+    return _sha256_bytes(_canonical_json(_build_base_capture(session_id)))
+
+
+def _capture_base(session_id: str) -> tuple[Path, str]:
+    return _atomic_fixed_document(
+        _base_capture_path(session_id), _build_base_capture(session_id)
+    )
 
 
 def _read_base_capture(session_id: str) -> dict[str, Any]:
@@ -2967,7 +2892,7 @@ def _watch(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fail-closed macOS air-gap watchdog")
     subparsers = parser.add_subparsers(dest="mode", required=True)
-    for mode in ("capture-base", "capture-host-only", "check", "watch"):
+    for mode in ("probe-base", "capture-base", "capture-host-only", "check", "watch"):
         item = subparsers.add_parser(mode)
         item.add_argument("--session-id", required=True)
     for mode in ("check", "watch"):
@@ -2996,9 +2921,12 @@ def main(argv: list[str] | None = None) -> int:
     mode = args.mode
     allow_host_only = bool(getattr(args, "allow_host_only", False))
     socket_vmnet_pid = getattr(args, "socket_vmnet_pid", None)
-    if mode in {"capture-base", "capture-host-only"}:
+    if mode in {"probe-base", "capture-base", "capture-host-only"}:
         try:
-            if mode == "capture-base":
+            if mode == "probe-base":
+                digest = _probe_base(args.session_id)
+                print(f"airgap_base_probe_sha256={digest}")
+            elif mode == "capture-base":
                 path, digest = _capture_base(args.session_id)
                 print(f"airgap_base_capture={path}")
                 print(f"airgap_base_capture_sha256={digest}")

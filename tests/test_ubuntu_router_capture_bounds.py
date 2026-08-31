@@ -158,7 +158,7 @@ class CaptureBoundTests(unittest.TestCase):
 
     def test_capture_paths_do_not_use_thread_pool(self) -> None:
         watchdog = _load(WATCHDOG, "airgap_watchdog_capture_source_test")
-        for function in (watchdog._capture_base, watchdog._capture_host_only):
+        for function in (watchdog._build_base_capture, watchdog._capture_host_only):
             source = inspect.getsource(function)
             self.assertIn("CAPTURE_TOTAL_SECONDS", source)
             self.assertIn("capture_deadline=deadline", source)

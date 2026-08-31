@@ -38,8 +38,10 @@ physical, altered or non-host-only default still aborts.
 The fixed dormant Apple-local classes (`awdl0`, `llw0`, `ipsec0`) must first
 be taken down; their one canonical link-local is session-bound and only their
 exact local multicast/link-local route shapes are accepted.
-Each immutable base-capture filename is session-scoped, so a retained failed
-preflight cannot alias or overwrite evidence for a later authorized session.
+The current lock contains one exact check-only rotation from retained session
+`bca4e4...` to session `0fbd65...`. Check runs a write-free base probe. Apply
+publishes the target base once and immediately continues through PREPARING,
+host-only validation, watchdog arming and the single boot in the same call.
 
 The recovery profile is also host-local and ignored by Git. It contains no
 secret and no caller-selected path: it binds the exact prior/failed/fresh
@@ -56,10 +58,11 @@ reviewed profile by adding:
 Do not start the replacement manually. From a local Terminal—not SSH, tmux or
 screen—disable all network services, turn Wi-Fi off, physically disconnect
 Ethernet/USB/Thunderbolt uplinks, and close VPN/sharing software. Run the sealed
-controller's `check-airgap --attest-physical-airgap`, then
+controller's write-free `check-airgap --attest-physical-airgap`, then
 `apply-airgapped-first-boot --attest-physical-airgap` without reconnecting in
-between. The controller continuously monitors the complete topology, verifies
-the guest over vsock, and stops it again.
+between. Apply captures its own target-session base once and never reuses the
+check's dynamic observation. The controller continuously monitors the complete
+topology, verifies the guest over vsock, and stops it again.
 
 The sealed controller verifies its 15-tool ACL/network/process/privilege
 allowlist by exact System-volume device/flags, owner, mode (including setuid),

@@ -29,7 +29,7 @@ class PrestartRecoveryProfileTests(unittest.TestCase):
         profile = json.loads(
             (BOOTSTRAP / "prestart-recovery-profile.json.example").read_text()
         )
-        profile["fresh_session_id"] = lock["pins"]["airgap_session_id"]
+        profile["fresh_session_id"] = lock["check_only_rotation"]["source_session_id"]
         profile["old_session_id"] = "a" * 64
         profile["prior_recovery"] = {
             "old_session_id": "b" * 64,

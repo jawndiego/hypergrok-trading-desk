@@ -334,8 +334,12 @@ and one canonical /64 link-local IPv6 address captured into the session lock.
 Only their exact local multicast rows and IPsec's exact scoped link-local row
 are allowed and hash-bound; any default, global, ULA or other unicast route
 through those names aborts.
-Base-capture documents are immutable and session-scoped; retained preflight
-evidence from an older session cannot block, alias or authorize a fresh one.
+The current lock permits one exact check-only rotation from retained session
+`bca4e4...` to session `0fbd65...`. Check performs a write-free base probe.
+Apply requires exhaustive absence of source/target attempt artifacts, publishes
+the target base once, and continues through PREPARING, host-only validation,
+watchdog arming and the single boot in that same invocation. The check's
+dynamic observation is never reused as apply authority.
 
 The cycle's 15-tool ACL/network/process/privilege allowlist is bound to the
 current sealed System volume and checked by exact owner, special mode bits,
