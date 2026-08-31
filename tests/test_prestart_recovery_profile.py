@@ -30,6 +30,9 @@ class PrestartRecoveryProfileTests(unittest.TestCase):
             (BOOTSTRAP / "prestart-recovery-profile.json.example").read_text()
         )
         lock["pins"]["airgap_session_id"] = "1" * 64
+        lock["proven_preboot_recovery"]["source_session_id"] = lock["pins"][
+            "airgap_session_id"
+        ]
         profile["fresh_session_id"] = lock["pins"]["airgap_session_id"]
         profile["old_session_id"] = lock["check_only_rotation"]["target_session_id"]
         profile["prior_check_only_rotation"] = copy.deepcopy(

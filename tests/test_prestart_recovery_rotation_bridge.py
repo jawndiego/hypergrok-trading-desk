@@ -28,6 +28,7 @@ class RecoveryRotationBridgeTests(unittest.TestCase):
         profile = copy.deepcopy(self.profile)
         fresh = "1" * 64
         lock["pins"]["airgap_session_id"] = fresh
+        lock["proven_preboot_recovery"]["source_session_id"] = fresh
         profile["old_session_id"] = lock["check_only_rotation"]["target_session_id"]
         profile["fresh_session_id"] = fresh
         profile["prior_check_only_rotation"] = copy.deepcopy(lock["check_only_rotation"])

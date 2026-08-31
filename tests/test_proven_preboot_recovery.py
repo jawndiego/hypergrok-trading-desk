@@ -83,6 +83,32 @@ class ProvenPrebootRecoveryTests(unittest.TestCase):
         renderer = load_renderer()
         successor = json.loads(LOCK.read_text())
         renderer._load_lock(renderer._canonical_json(successor))
+        recovery_profile = json.loads(
+            (
+                ROOT
+                / "deploy/ubuntu-router/lima-bootstrap/"
+                "prestart-recovery-profile.json.example"
+            ).read_text()
+        )
+        recovery_profile["old_session_id"] = successor["check_only_rotation"][
+            "target_session_id"
+        ]
+        recovery_profile["fresh_session_id"] = successor[
+            "proven_preboot_recovery"
+        ]["source_session_id"]
+        recovery_profile["prior_check_only_rotation"] = successor[
+            "check_only_rotation"
+        ]
+        recovery_profile["prior_recovery"]["old_session_id"] = "b" * 64
+        for key in ("base_capture", "preparing"):
+            recovery_profile[key].update(inode=1, size=1)
+        recovery_profile["incident"]["size"] = 1
+        recovery_profile["runtime"]["inode"] = 1
+        recovery_profile["socket"]["inode"] = 2
+        recovery_profile["pidfile"]["inode"] = 3
+        renderer._validate_recovery_profile(
+            renderer._canonical_json(recovery_profile), successor
+        )
         pending = json.loads(LOCK.read_text())
         pending["pins"]["proven_preboot_recovery_receipt_sha256"] = (
             "RECOVERY_RECEIPT_REQUIRED"

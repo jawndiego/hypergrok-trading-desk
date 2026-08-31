@@ -428,7 +428,10 @@ def _validate_recovery_profile(
         )
         or (
             not allow_placeholder
-            and value.get("fresh_session_id") != lock["pins"]["airgap_session_id"]
+            and value.get("fresh_session_id")
+            != lock.get("proven_preboot_recovery", {}).get(
+                "source_session_id", lock["pins"]["airgap_session_id"]
+            )
         )
     ):
         raise ValueError("prestart recovery profile schema differs")
