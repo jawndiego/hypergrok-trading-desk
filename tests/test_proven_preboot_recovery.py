@@ -100,7 +100,7 @@ class ProvenPrebootRecoveryTests(unittest.TestCase):
         ]
         recovery_profile["fresh_session_id"] = successor[
             "proven_preboot_recovery"
-        ]["source_session_id"]
+        ]["prior_proven_source_session_id"]
         recovery_profile["prior_check_only_rotation"] = successor[
             "check_only_rotation"
         ]
