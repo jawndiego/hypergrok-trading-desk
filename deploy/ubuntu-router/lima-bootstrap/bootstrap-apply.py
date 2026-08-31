@@ -2026,7 +2026,11 @@ def _validate_interrupted_first_boot_successor(
     _no_named_acl(retained_pid)
     runtime_contract = transaction["runtime"]
     if (
-        {path.name for path in destinations["runtime"].iterdir()}
+        set(runtime_contract)
+        != {"device", "inode", "pid_inode", "socket_inode"}
+        or runtime_contract.get("device") != runtime_metadata.st_dev
+        or runtime_contract.get("inode") != runtime_metadata.st_ino
+        or {path.name for path in destinations["runtime"].iterdir()}
         != {retained_socket.name, retained_pid.name}
         or retained_socket.is_symlink()
         or not stat.S_ISSOCK(socket_metadata.st_mode)
@@ -2040,8 +2044,9 @@ def _validate_interrupted_first_boot_successor(
         )
         != (0, 454, 0o770, 1, 0, runtime_contract.get("socket_inode"))
         or retained_pid.stat().st_ino != runtime_contract.get("pid_inode")
-        or pid_content.decode("ascii") != runtime_contract.get("pid")
-        or _sha256_bytes(pid_content) != runtime_contract.get("pid_sha256")
+        or pid_content != b"35850"
+        or _sha256_bytes(pid_content)
+        != "ab83666a58d91d656197f872534927019ff049417ea87440d5294b6d33724ba4"
     ):
         raise BootstrapError("interrupted retained runtime differs")
     _verify_recovery_xattrs(destinations["runtime"], "runtime")

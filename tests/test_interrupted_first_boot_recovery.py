@@ -614,8 +614,12 @@ class InterruptedFirstBootRecoveryTests(unittest.TestCase):
             "prestart-base-capture-{fresh}",
             "prestart-preparing-{fresh}",
             "final air-gap session is not unused",
+            'pid_content != b"35850"',
+            "ab83666a58d91d656197f872534927019ff049417ea87440d5294b6d33724ba4",
         ):
             self.assertIn(required, successor)
+        self.assertNotIn('runtime_contract.get("pid")', successor)
+        self.assertNotIn('runtime_contract.get("pid_sha256")', successor)
 
     def test_retired_mutators_fail_before_state_acquisition(self):
         apply = load(APPLY, "final_disabled_mutators_test")
