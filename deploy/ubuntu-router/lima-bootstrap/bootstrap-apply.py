@@ -564,6 +564,27 @@ def _recovery_instance_identity(
     }
 
 
+def _assert_recovery_stopped_instance(
+    lock: dict[str, Any],
+    limactl: Path,
+    receipt08: dict[str, Any],
+    expected_identity: dict[str, Any],
+) -> None:
+    _assert_no_vm_process()
+    _assert_no_airgap_watchdog_process()
+    if _router_uid_processes():
+        raise BootstrapError("recovery router process remains")
+    _status(lock, limactl)
+    observed = _hardened_instance_evidence(
+        lock, receipt08, allow_runtime_files=False
+    )
+    if (
+        _recovery_instance_identity(observed, receipt08["instance_path"])
+        != expected_identity
+    ):
+        raise BootstrapError("recovery stopped instance differs")
+
+
 def _atomic_receipt(parent: Path, name: str, value: dict[str, Any]) -> tuple[Path, str]:
     content = _canonical_json(value)
     digest = _sha256_bytes(content)
@@ -2924,7 +2945,7 @@ def _airgap_preconditions(args: argparse.Namespace) -> tuple[dict[str, Any], dic
     if lock["pins"].get("prestart_recovery_receipt_sha256") != expected_recovery:
         raise BootstrapError("prestart recovery receipt is not pinned by this controller")
     recovery_path = state["receipts"] / (
-        "10-prestart-recovery-28de503250ad9a13f25d539c4119ec967c98e8a2feb624b6bc0496fccd6dd5a8.json"
+        "10-prestart-recovery-46e7c23627c9e4a1207f86a5a3f186cfee63f302e6940dfd90f1422097cd4e4d.json"
     )
     recovery_content = _read_bound(
         recovery_path, uid=0, gid=0, mode=0o400, maximum=64 * 1024
@@ -2935,7 +2956,7 @@ def _airgap_preconditions(args: argparse.Namespace) -> tuple[dict[str, Any], dic
         or recovery.get("kind") != "trading-desk.router-bootstrap.prestart-recovery"
         or recovery.get("fresh_session_id") != lock["pins"]["airgap_session_id"]
         or recovery.get("old_session_id")
-        != "28de503250ad9a13f25d539c4119ec967c98e8a2feb624b6bc0496fccd6dd5a8"
+        != "46e7c23627c9e4a1207f86a5a3f186cfee63f302e6940dfd90f1422097cd4e4d"
         or recovery.get("start_invoked") is not False
         or recovery.get("vm_status") != "Stopped"
     ):
@@ -3484,17 +3505,52 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
         _assert_attended_root_tty()
         _assert_host_identity(lock)
         state = _require_existing_state(lock)
-        old_session = "28de503250ad9a13f25d539c4119ec967c98e8a2feb624b6bc0496fccd6dd5a8"
-        old_manifest = "b509a0262e4ea530fd64fbc3c1406b3c52dd36507e490a515f49c656c788278c"
-        fresh_session = "46e7c23627c9e4a1207f86a5a3f186cfee63f302e6940dfd90f1422097cd4e4d"
+        prior_session = "28de503250ad9a13f25d539c4119ec967c98e8a2feb624b6bc0496fccd6dd5a8"
+        prior_recovery_sha256 = (
+            "a6ffb13d74513e0dfe021a04dbddf85119763925b58e5af6c94320d624c0f493"
+        )
+        old_session = "46e7c23627c9e4a1207f86a5a3f186cfee63f302e6940dfd90f1422097cd4e4d"
+        old_manifest = "041c8f7907016decc31d082a31f9a092eb42a6dba2262ed4e29edb214bb84594"
+        fresh_session = "a1236507cb844686ba3d4a97ca11788cb5fbe63a5aedafa729a7ad22a68fb24b"
         runtime = Path(lock["paths"]["vmnet_runtime"])
-        base = Path("/private/var/db/trading-desk-router-bootstrap-v1/airgap-hardware-base-capture.json")
+        base = Path(
+            "/private/var/db/trading-desk-router-bootstrap-v1/"
+            f"airgap-hardware-base-capture-{old_session}.json"
+        )
         preparing = state["state"] / ".airgap-first-boot.PREPARING.json"
         moves = (
-            (runtime, state["quarantine"] / f"prestart-vmnet-runtime-{old_session}-52264260"),
+            (runtime, state["quarantine"] / f"prestart-vmnet-runtime-{old_session}-52628148"),
             (base, state["quarantine"] / f"prestart-base-capture-{old_session}"),
             (preparing, state["quarantine"] / f"prestart-preparing-{old_session}"),
         )
+
+        stage = "prior_recovery_lineage"
+        prior_recovery_content = _read_bound(
+            state["receipts"] / f"10-prestart-recovery-{prior_session}.json",
+            uid=0,
+            gid=0,
+            mode=0o400,
+            maximum=64 * 1024,
+        )
+        prior_recovery = _load_json_bytes(
+            prior_recovery_content, "prior prestart recovery"
+        )
+        if (
+            _sha256_bytes(prior_recovery_content) != prior_recovery_sha256
+            or prior_recovery.get("schema_version") != 1
+            or prior_recovery.get("kind")
+            != "trading-desk.router-bootstrap.prestart-recovery"
+            or prior_recovery.get("old_session_id") != prior_session
+            or prior_recovery.get("fresh_session_id") != old_session
+            or prior_recovery.get("hardened_vm_receipt_sha256")
+            != lock["pins"]["hardened_vm_receipt_sha256"]
+            or prior_recovery.get("start_invoked") is not False
+            or prior_recovery.get("postmove_processes_absent") is not True
+            or prior_recovery.get("vm_status") != "Stopped"
+            or prior_recovery.get("mainnet_authorized") is not False
+            or prior_recovery.get("venue_writes_authorized") is not False
+        ):
+            raise BootstrapError("prior prestart recovery lineage differs")
 
         stage = "never_started"
         preparing_current = _recovery_current_path(*moves[2])
@@ -3503,8 +3559,9 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
         )
         if (
             len(preparing_content) != 487
+            or preparing_current.stat().st_ino != 52628146
             or _sha256_bytes(preparing_content)
-            != "bf3e6c9c6ce3a514c20a6c5f8a44f5c083d08c9212807cc4e2096ca9c1a7529e"
+            != "f8a65887de36d8f80a4fc0274bc65261977ecb915961762d178bb58f07dad76d"
         ):
             raise BootstrapError("preparing marker differs")
         expected_marker = {
@@ -3530,7 +3587,12 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             Path(lock["paths"]["vmnet_sudoers"]),
             Path("/private/var/db/trading-desk-router-bootstrap-v1/airgap-hardware-lock.json"),
             Path("/private/var/db/trading-desk-router-bootstrap-v1/.airgap-hardware-lock.json.pending"),
-            Path("/private/var/db/trading-desk-router-bootstrap-v1/.airgap-hardware-base-capture.json.pending"),
+            Path("/private/var/db/trading-desk-router-bootstrap-v1")
+            / f".airgap-hardware-base-capture-{old_session}.json.pending",
+            Path("/private/var/db/trading-desk-router-bootstrap-v1")
+            / f"airgap-hardware-base-capture-{fresh_session}.json",
+            Path("/private/var/db/trading-desk-router-bootstrap-v1")
+            / f".airgap-hardware-base-capture-{fresh_session}.json.pending",
             Path("/private/var/db/trading-desk-router-bootstrap-v1/airgap-watchdog-results")
             / f"{old_session}-watch.json",
             Path("/private/var/db/trading-desk-router-bootstrap-v1/airgap-watchdog-results")
@@ -3550,6 +3612,7 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
                 "automatic_retry_authorized",
                 "disposition",
                 "error_type",
+                "failure_stage",
                 "kind",
                 "mainnet_authorized",
                 "phase",
@@ -3559,13 +3622,16 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
                 "venue_writes_authorized",
             }
             or
-            len(incident_content) != 442
+            len(incident_content) != 482
             or _sha256_bytes(incident_content)
-            != "57f30e5c90dde65de96bbc8a94bab869bd61c59c58f3b65f11fbfd863ec38047"
+            != "efe2706ef92f8ffc03c82692f69d06df9741dc6f0b1f637e77cecdd4ee058277"
             or incident.get("attempt_id") != old_session
             or incident.get("kind")
             != "trading-desk.router-bootstrap.airgap-first-boot-incident"
             or incident.get("disposition") != "FAILED"
+            or incident.get("error_type") != "TimeoutExpired"
+            or incident.get("failure_stage") != "host_only_capture"
+            or incident.get("automatic_retry_authorized") is not False
             or incident.get("start_invoked") is not False
             or incident.get("temporary_vmnet_artifacts") is not None
         ):
@@ -3595,7 +3661,6 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
         )
         if (
             len(sudoers_content) != 714
-            or retained_sudoers.stat().st_ino != 52264258
             or _sha256_bytes(sudoers_content)
             != lock["pins"]["lima_first_boot_sudoers_sha256"]
         ):
@@ -3603,7 +3668,7 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
         stage = "residual_runtime_identity"
         runtime_current = _recovery_current_path(*moves[0])
         runtime_meta = _assert_real(runtime_current, kind="directory", uid=0, gid=0, mode=0o755)
-        if runtime_meta.st_ino != 52264260:
+        if runtime_meta.st_ino != 52628148:
             raise BootstrapError("runtime identity differs")
         stage = "residual_runtime_xattr"
         _verify_recovery_xattrs(runtime_current, "runtime")
@@ -3623,35 +3688,42 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             or socket_path.is_symlink()
             or not stat.S_ISSOCK(socket_meta.st_mode)
             or (socket_meta.st_uid, socket_meta.st_gid, stat.S_IMODE(socket_meta.st_mode), socket_meta.st_nlink, socket_meta.st_size, socket_meta.st_ino)
-            != (0, 454, 0o770, 1, 0, 52264264)
-            or pid_path.stat().st_ino != 52264263
-            or pid_content != b"81885"
+            != (0, 454, 0o770, 1, 0, 52628152)
+            or pid_path.stat().st_ino != 52628151
+            or pid_content != b"4313"
             or _sha256_bytes(pid_content)
-            != "321d9e6141cfc141be8ac517964335701be098e7fe9281737b2f55dec8fc51f8"
+            != "3c4dcf6dfc899bd68a7f7961e7ca5a61d2d71d500f9785ddb8d0cbdbb431bcfb"
         ):
             raise BootstrapError("runtime residual differs")
         stage = "residual_logs"
-        for suffix, inode, size, digest in (
-            ("stdout", 52264261, 0, _sha256_bytes(b"")),
-            ("stderr", 52264262, 176, "267ee3a87f9118555b35926702a83bfa760dfe2e752b7455fa81521c08f56659"),
+        for suffix, digest in (
+            ("stdout", _sha256_bytes(b"")),
+            ("stderr", "fad8cb653d031d0675d31145afee59cafcc9c5593ad65dde7ab81b8cded444f4"),
         ):
             path = state["state"] / f"socket-vmnet-{old_session}.{suffix}"
             content = _read_bound(
                 path, uid=0, gid=0, mode=0o600, maximum=4096, allow_empty=True
             )
-            if path.stat().st_ino != inode or len(content) != size or _sha256_bytes(content) != digest:
+            if _sha256_bytes(content) != digest:
                 raise BootstrapError("socket_vmnet log differs")
         stage = "quarantine"
         base_current = _recovery_current_path(*moves[1])
         base_content = _read_bound(
             base_current, uid=0, gid=0, mode=0o400, maximum=128 * 1024
         )
-        if _sha256_bytes(base_content) != "e99befe4cf60f34a70351263e3c672201018f5d2f5424f7f0ef34597936ca034":
+        if (
+            base_current.stat().st_ino != 52729819
+            or len(base_content) != 7033
+            or _sha256_bytes(base_content)
+            != "b4e7db0865fcefaaa94d0753e0fc22e519a8d2dd0456ee35d24d2e87aa00da2a"
+        ):
             raise BootstrapError("base capture differs")
         transaction = {
+            "base_capture_sha256": _sha256_bytes(base_content),
             "failed_controller_manifest_sha256": old_manifest,
             "fresh_session_id": fresh_session,
             "hardened_vm_receipt_sha256": lock["pins"]["hardened_vm_receipt_sha256"],
+            "incident_sha256": _sha256_bytes(incident_content),
             "instance_identity": instance_identity,
             "kind": "trading-desk.router-bootstrap.prestart-recovery-transaction",
             "moves": [
@@ -3659,6 +3731,8 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
                 for source, destination in moves
             ],
             "old_session_id": old_session,
+            "preparing_sha256": _sha256_bytes(preparing_content),
+            "prior_recovery_receipt_sha256": prior_recovery_sha256,
             "recovery_controller_manifest_sha256": args.expected_controller_manifest_sha256,
             "schema_version": 1,
         }
@@ -3667,7 +3741,17 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             f"prestart-recovery-transaction-{old_session}.json",
             transaction,
         )
-        _resume_recovery_moves(moves)
+        for index, move in enumerate(moves):
+            stage = f"move_{index}_preproof"
+            _assert_recovery_stopped_instance(
+                lock, limactl, receipt08, instance_identity
+            )
+            stage = f"move_{index}_rename"
+            _resume_recovery_moves((move,))
+            stage = f"move_{index}_postproof"
+            _assert_recovery_stopped_instance(
+                lock, limactl, receipt08, instance_identity
+            )
         retained_runtime, retained_base, retained_preparing = (
             destination for _, destination in moves
         )
@@ -3675,13 +3759,15 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             _assert_real(
                 retained_runtime, kind="directory", uid=0, gid=0, mode=0o755
             ).st_ino
-            != 52264260
+            != 52628148
             or _sha256_bytes(
                 _read_bound(
                     retained_base, uid=0, gid=0, mode=0o400, maximum=128 * 1024
                 )
             )
-            != "e99befe4cf60f34a70351263e3c672201018f5d2f5424f7f0ef34597936ca034"
+            != "b4e7db0865fcefaaa94d0753e0fc22e519a8d2dd0456ee35d24d2e87aa00da2a"
+            or retained_base.stat().st_ino != 52729819
+            or retained_base.stat().st_size != 7033
             or _sha256_bytes(
                 _read_bound(
                     retained_preparing,
@@ -3691,7 +3777,8 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
                     maximum=4096,
                 )
             )
-            != "bf3e6c9c6ce3a514c20a6c5f8a44f5c083d08c9212807cc4e2096ca9c1a7529e"
+            != "f8a65887de36d8f80a4fc0274bc65261977ecb915961762d178bb58f07dad76d"
+            or retained_preparing.stat().st_ino != 52628146
         ):
             raise BootstrapError("retained recovery evidence differs")
         stage = "postmove_proof"
@@ -3710,6 +3797,7 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             raise BootstrapError("postmove instance evidence differs")
         receipt = {
             "automatic_delete_performed": False,
+            "base_capture_sha256": _sha256_bytes(base_content),
             "failed_controller_manifest_sha256": old_manifest,
             "fresh_session_id": fresh_session,
             "hardened_vm_receipt_sha256": lock["pins"]["hardened_vm_receipt_sha256"],
@@ -3720,6 +3808,8 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
             "old_session_id": old_session,
             "phase": "prestart-recovery",
             "postmove_processes_absent": True,
+            "preparing_sha256": _sha256_bytes(preparing_content),
+            "prior_recovery_receipt_sha256": prior_recovery_sha256,
             "recovery_controller_manifest_sha256": args.expected_controller_manifest_sha256,
             "quarantined_paths": [str(destination) for _, destination in moves],
             "schema_version": 1,

@@ -354,8 +354,11 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             _load_module(HOST_APPLY, "bootstrap_apply_recovery_static_test")._recover_failed_prestart
         )
         for required in (
-            "bf3e6c9c6ce3a514c20a6c5f8a44f5c083d08c9212807cc4e2096ca9c1a7529e",
-            "57f30e5c90dde65de96bbc8a94bab869bd61c59c58f3b65f11fbfd863ec38047",
+            "f8a65887de36d8f80a4fc0274bc65261977ecb915961762d178bb58f07dad76d",
+            "efe2706ef92f8ffc03c82692f69d06df9741dc6f0b1f637e77cecdd4ee058277",
+            "041c8f7907016decc31d082a31f9a092eb42a6dba2262ed4e29edb214bb84594",
+            "a1236507cb844686ba3d4a97ca11788cb5fbe63a5aedafa729a7ad22a68fb24b",
+            "b4e7db0865fcefaaa94d0753e0fc22e519a8d2dd0456ee35d24d2e87aa00da2a",
             "prestart-vmnet-runtime-",
             "prestart-recovery-transaction-",
             ".airgap-hardware-lock.json.pending",
