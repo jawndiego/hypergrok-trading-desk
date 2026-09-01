@@ -174,7 +174,13 @@ AIRGAP_START_ARGUMENTS = (
     "trading-desk-router",
 )
 FINAL_AIRGAP_REVIEW_STATUS = (
-    "attended_router_home_migration_only"
+    "attended_online_poststart_unknown_recovery_only"
+)
+POSTSTART_UNKNOWN_RECOVERY_CONTRACT_SHA256 = (
+    "9f858f10316f287a9cb063d33c5f1ef6e224dc9fd9642dfa3c1a40f49df82730"
+)
+POSTSTART_UNKNOWN_RESERVED_SESSION_ID = (
+    "791f39c1e4dae90f50436de700211158688f557f70e91156c0a9dd95d3b7b7b8"
 )
 ROUTER_HOME_MIGRATION = {
     "birth_bug_quarantine_path": "/private/etc/trading-desk/.testnet-foreground-router-birth-v2.uid0-bug-79cf0db",
@@ -1013,7 +1019,8 @@ def _load_lock() -> dict[str, Any]:
             "guest_package_apply_enabled": False,
             "hardened_recreate_apply_enabled": False,
             "interrupted_first_boot_recovery_enabled": False,
-            "router_operator_home_migration_enabled": True,
+            "poststart_unknown_recovery_enabled": True,
+            "router_operator_home_migration_enabled": False,
             "proven_preboot_recovery_enabled": False,
             "router_activation_apply_enabled": False,
         }
@@ -1036,6 +1043,13 @@ def _load_lock() -> dict[str, Any]:
         raise BootstrapError("bootstrap lock boundary differs")
     if lock.get("router_operator_home_migration") != ROUTER_HOME_MIGRATION:
         raise BootstrapError("router operator home migration lock differs")
+    recovery = lock.get("poststart_unknown_recovery")
+    if (
+        not isinstance(recovery, dict)
+        or _sha256_bytes(_canonical_json(recovery))
+        != POSTSTART_UNKNOWN_RECOVERY_CONTRACT_SHA256
+    ):
+        raise BootstrapError("post-start UNKNOWN recovery lock differs")
     interrupted = lock.get("interrupted_first_boot_recovery")
     if (
         interrupted != INTERRUPTED_FIRST_BOOT_RECOVERY
@@ -1098,6 +1112,7 @@ def _verify_bundle(expected_manifest_sha256: str) -> dict[str, Any]:
             "attended_airgapped_start_apply_enabled",
             "bundle_kind",
             "files",
+            "fresh_session_reserved",
             "hardened_plan_sha256",
             "hardened_recreate_apply_enabled",
             "hardened_vm_receipt_sha256",
@@ -1106,6 +1121,9 @@ def _verify_bundle(expected_manifest_sha256: str) -> dict[str, Any]:
             "mainnet_authorized",
             "network_changes_performed",
             "predecessor_vm_receipt_sha256",
+            "poststart_unknown_recovery_apply_enabled",
+            "recreation_authorized",
+            "reserved_fresh_session_id",
             "router_operator_home_migration_apply_enabled",
             "schema_version",
             "venue_writes_authorized",
@@ -1118,7 +1136,12 @@ def _verify_bundle(expected_manifest_sha256: str) -> dict[str, Any]:
         or manifest.get("attended_airgapped_start_apply_enabled") is not False
         or manifest.get("hardened_recreate_apply_enabled") is not False
         or manifest.get("interrupted_first_boot_recovery_enabled") is not False
-        or manifest.get("router_operator_home_migration_apply_enabled") is not True
+        or manifest.get("poststart_unknown_recovery_apply_enabled") is not True
+        or manifest.get("fresh_session_reserved") is not True
+        or manifest.get("recreation_authorized") is not False
+        or manifest.get("reserved_fresh_session_id")
+        != POSTSTART_UNKNOWN_RESERVED_SESSION_ID
+        or manifest.get("router_operator_home_migration_apply_enabled") is not False
         or manifest.get("airgap_session_id")
         != INTERRUPTED_FIRST_BOOT_RECOVERY["fresh_session_id"]
         or manifest.get("hardened_vm_receipt_sha256")
@@ -1654,6 +1677,108 @@ def _process_home_identity(lock: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _poststart_process_home_identity(
+    lock: dict[str, Any], *, allow_library: bool
+) -> dict[str, Any]:
+    path = _process_home(lock)
+    metadata = path.stat()
+    entries = sorted(path.iterdir(), key=lambda item: item.name)
+    expected = {"Library"} if allow_library and entries else set()
+    if {item.name for item in entries} != expected:
+        raise BootstrapError("post-start process HOME inventory differs")
+    library: dict[str, int] | None = None
+    if entries:
+        item = entries[0]
+        if item.name != "Library" or item.is_symlink() or not item.is_dir():
+            raise BootstrapError("post-start process HOME Library differs")
+        item_metadata = item.stat()
+        if (
+            item.resolve(strict=True) != item
+            or item_metadata.st_uid != 454
+            or item_metadata.st_gid != 454
+            or stat.S_IMODE(item_metadata.st_mode) not in {0o700, 0o755}
+        ):
+            raise BootstrapError("post-start process HOME Library differs")
+        _no_named_acl(item)
+        library = {
+            "device": item_metadata.st_dev,
+            "gid": item_metadata.st_gid,
+            "inode": item_metadata.st_ino,
+            "mode": stat.S_IMODE(item_metadata.st_mode),
+            "uid": item_metadata.st_uid,
+        }
+    return {
+        "device": metadata.st_dev,
+        "gid": metadata.st_gid,
+        "inode": metadata.st_ino,
+        "library": library,
+        "links": metadata.st_nlink,
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "path": str(path),
+        "size": metadata.st_size,
+        "uid": metadata.st_uid,
+    }
+
+
+def _poststart_lima_home_identity(
+    lock: dict[str, Any], *, live_instance: bool, live_library: bool
+) -> dict[str, Any]:
+    root_path = Path(lock["paths"]["lima_home"])
+    root = _assert_real(
+        root_path, kind="directory", uid=454, gid=454, mode=0o700
+    )
+    expected_root = {"_config"}
+    if live_instance:
+        expected_root.add(lock["guest"]["instance_name"])
+    if live_library:
+        expected_root.add("Library")
+    if {item.name for item in root_path.iterdir()} != expected_root:
+        raise BootstrapError("post-start LIMA_HOME inventory differs")
+    config = root_path / "_config"
+    config_metadata = _assert_real(
+        config, kind="directory", uid=454, gid=454, mode=0o700
+    )
+    if _darwin_listxattr(root_path) or _darwin_listxattr(config):
+        raise BootstrapError("post-start Lima home xattrs differ")
+    names = {"networks.yaml", "user", "user.pub"}
+    if {item.name for item in config.iterdir()} != names:
+        raise BootstrapError("post-start Lima config inventory differs")
+    files: dict[str, dict[str, Any]] = {}
+    for name in sorted(names):
+        item = config / name
+        item_metadata = _assert_real(
+            item, kind="file", uid=454, gid=454, mode=0o600, links=1
+        )
+        if item_metadata.st_size <= 0 or item_metadata.st_size > 128 * 1024:
+            raise BootstrapError("post-start Lima config file size differs")
+        if _darwin_listxattr(item):
+            raise BootstrapError("post-start Lima config xattrs differ")
+        evidence: dict[str, Any] = {
+            "inode": item_metadata.st_ino,
+            "size": item_metadata.st_size,
+        }
+        if name != "user":
+            digest = _hash_bound_file(
+                item,
+                uid=454,
+                gid=454,
+                mode=0o600,
+                expected_size=item_metadata.st_size,
+            )
+            evidence["sha256"] = digest
+        if name == "networks.yaml" and evidence.get("sha256") != lock["pins"]["networks_first_boot_sha256"]:
+            raise BootstrapError("post-start Lima networks config differs")
+        files[name] = evidence
+    return {
+        "config_device": config_metadata.st_dev,
+        "config_files": files,
+        "config_inode": config_metadata.st_ino,
+        "device": root.st_dev,
+        "inode": root.st_ino,
+        "mode": stat.S_IMODE(root.st_mode),
+    }
+
+
 def _environment(lock: dict[str, Any]) -> dict[str, str]:
     process_home = _process_home(lock)
     return {
@@ -1699,16 +1824,43 @@ def _assert_no_vm_process() -> None:
     )
     if result.returncode != 0 or result.stderr or len(result.stdout) > 4 * 1024 * 1024:
         raise BootstrapError("process inventory failed")
-    forbidden = (
-        "/usr/libexec/InternetSharing",
-        "/usr/libexec/bootpd",
+    candidate_tokens = (
+        "InternetSharing",
+        "bootpd",
         "socket_vmnet",
-        "limactl hostagent",
+        "limactl",
         "lima-trading-desk-router",
         "qemu-system",
     )
-    if any(token in line for token in forbidden for line in result.stdout.splitlines()):
-        raise BootstrapError("VM or socket_vmnet process is active")
+    for line in result.stdout.splitlines():
+        fields = line.split(None, 3)
+        if (
+            len(fields) != 4
+            or not fields[0].isdigit()
+            or not _valid_ps_uid(fields[1])
+            or not fields[2]
+            or not fields[3]
+        ):
+            raise BootstrapError("process inventory is malformed")
+        if not any(token in fields[3] for token in candidate_tokens):
+            continue
+        pid = int(fields[0], 10)
+        if pid <= 1:
+            raise BootstrapError("process inventory PID is unsafe")
+        executable = _proc_pid_path(pid)
+        active = (
+            executable
+            in {
+                "/usr/libexec/InternetSharing",
+                "/usr/libexec/bootpd",
+                "/opt/socket_vmnet/bin/socket_vmnet",
+            }
+            or Path(executable).name.startswith("qemu-system")
+            or executable
+            == "/opt/trading-desk-router-tools/lima-2.2.0/bin/limactl"
+        )
+        if active:
+            raise BootstrapError("VM or socket_vmnet process is active")
 
 
 def _host_helpers_active(content: str) -> bool:
@@ -1812,6 +1964,37 @@ def _network_snapshot() -> dict[str, str]:
     return result
 
 
+def _online_recovery_managed_network_authority(
+    lock: dict[str, Any],
+) -> dict[str, Any]:
+    sudoers = Path(lock["paths"]["vmnet_sudoers"])
+    if sudoers.exists() or sudoers.is_symlink():
+        raise BootstrapError("online recovery VMNet authority is present")
+    observed = subprocess.run(
+        ["/sbin/ifconfig", "-l"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=10,
+        check=False,
+    )
+    if observed.returncode != 0 or observed.stderr or len(observed.stdout) > 256 * 1024:
+        raise BootstrapError("online recovery interface inventory failed")
+    interfaces = observed.stdout.split()
+    if len(interfaces) != len(set(interfaces)) or any(
+        re.fullmatch(r"vmenet[0-9]+", interface) for interface in interfaces
+    ):
+        raise BootstrapError("online recovery managed interface is present")
+    return {
+        "live_vm_interfaces": [],
+        "vmnet_sudoers_present": False,
+    }
+
+
 def _free_bytes(path: Path) -> int:
     return shutil.disk_usage(path).free
 
@@ -1858,6 +2041,14 @@ def _parse_status_result(
     if len(lines) != 1:
         raise BootstrapError("limactl instance count differs")
     value = _load_json_bytes(lines[0].encode("utf-8"), "limactl status")
+    return _validate_status_value(lock, value, expected_status=expected_status)
+
+
+def _validate_status_value(
+    lock: dict[str, Any], value: object, *, expected_status: str
+) -> dict[str, Any]:
+    if expected_status not in {"Stopped", "Running"} or not isinstance(value, dict):
+        raise BootstrapError("unexpected Lima status expectation")
     instance = Path(lock["paths"]["lima_home"]) / lock["guest"]["instance_name"]
     if (
         value.get("name") != lock["guest"]["instance_name"]
@@ -2007,12 +2198,19 @@ def _validate_interrupted_first_boot_successor(
     *,
     allow_current_library: bool = False,
     allow_current_runtime: bool = False,
+    allow_consumed_session: bool = False,
 ) -> dict[str, Any]:
     contract = lock["interrupted_first_boot_recovery"]
     source = contract["source_session_id"]
     fresh = contract["fresh_session_id"]
     if (
-        lock["phases"]["hardened_recreate_apply_enabled"] is not False
+        (
+            lock["phases"]["hardened_recreate_apply_enabled"] is not False
+            and not (
+                allow_consumed_session
+                and lock["phases"].get("poststart_unknown_recovery_enabled") is True
+            )
+        )
         or lock["phases"]["interrupted_first_boot_recovery_enabled"] is not False
         or lock["proven_preboot_recovery"]["fresh_session_id"] != source
         or lock["pins"]["airgap_session_id"] != fresh
@@ -2300,11 +2498,17 @@ def _validate_interrupted_first_boot_successor(
         live["sudoers"],
         live["base"],
         live["base"].parent / f".{live['base'].name}.pending",
-        live["hardware_lock"],
-        live["hardware_lock"].parent / f".{live['hardware_lock'].name}.pending",
-        live["preparing"],
-        live["starting"],
     ]
+    if not allow_consumed_session:
+        old_source_absent.extend(
+            [
+                live["hardware_lock"],
+                live["hardware_lock"].parent
+                / f".{live['hardware_lock'].name}.pending",
+                live["preparing"],
+                live["starting"],
+            ]
+        )
     if not allow_current_library:
         old_source_absent.append(live["library"])
     if not allow_current_runtime:
@@ -2484,7 +2688,9 @@ def _validate_interrupted_first_boot_successor(
         if path.name.startswith(fresh_prefixes)
         or path.name.startswith(f"prestart-vmnet-runtime-{fresh}-")
     )
-    if any(path.exists() or path.is_symlink() for path in unused):
+    if not allow_consumed_session and any(
+        path.exists() or path.is_symlink() for path in unused
+    ):
         raise BootstrapError("final air-gap session is not unused")
     return receipt
 
@@ -2574,6 +2780,7 @@ def _router_post_recreate_runtime_identity(
         raise BootstrapError("post-recreate VMNet PID is live or reused")
     return {
         "device": root.st_dev,
+        "gid": root.st_gid,
         "inode": root.st_ino,
         "mode": stat.S_IMODE(root.st_mode),
         "pid": pid_content.decode("ascii"),
@@ -2581,6 +2788,7 @@ def _router_post_recreate_runtime_identity(
         "pid_sha256": _sha256_bytes(pid_content),
         "pid_size": pid_metadata.st_size,
         "socket_inode": socket_metadata.st_ino,
+        "uid": root.st_uid,
     }
 
 
@@ -5166,6 +5374,1589 @@ def _apply_hardened_vm(args: argparse.Namespace) -> int:
     return 0
 
 
+def _poststart_unknown_paths(
+    lock: dict[str, Any], state: dict[str, Path]
+) -> dict[str, tuple[Path, Path]]:
+    contract = lock["poststart_unknown_recovery"]
+    session = contract["source_session_id"]
+    live = {
+        "base": state["state"] / f"airgap-hardware-base-capture-{session}.json",
+        "hardware_lock": state["state"] / "airgap-hardware-lock.json",
+        "incident": state["receipts"] / f"09-airgap-first-boot-incident-{session}.json",
+        "instance": Path(lock["paths"]["lima_home"]) / lock["guest"]["instance_name"],
+        "library": Path(lock["paths"]["lima_home"]) / "Library",
+        "preparing": state["state"] / ".airgap-first-boot.PREPARING.json",
+        "receipt08": Path(lock["paths"]["hardened_vm_receipt"]),
+        "runtime": Path(lock["paths"]["vmnet_runtime"]),
+        "socket_stderr": state["state"] / f"socket-vmnet-{session}.stderr",
+        "socket_stdout": state["state"] / f"socket-vmnet-{session}.stdout",
+        "start_stderr": state["state"] / f"limactl-start-{session}.stderr",
+        "start_stdout": state["state"] / f"limactl-start-{session}.stdout",
+        "starting": state["state"] / ".airgap-first-boot.STARTING.json",
+        "sudoers": state["quarantine"] / f"first-boot-sudoers-{session}",
+        "watchdog": state["state"] / "airgap-watchdog-results" / f"{session}-watch.json",
+    }
+    return {
+        key: (
+            path,
+            state["quarantine"] / f"poststart-unknown-{key}-{session}",
+        )
+        for key, path in live.items()
+    }
+
+
+def _poststart_prior_lineage(
+    lock: dict[str, Any], state: dict[str, Path]
+) -> dict[str, str]:
+    contract = lock["interrupted_first_boot_recovery"]
+    source = contract["source_session_id"]
+    paths = {
+        "authorization": state["receipts"]
+        / f"12-interrupted-first-boot-resume-authorization-{source}.json",
+        "proof": state["quarantine"]
+        / f"interrupted-first-boot-stopped-proof-{source}.json",
+        "quarantine_receipt": state["receipts"]
+        / f"12-interrupted-first-boot-quarantine-{source}.json",
+        "transaction": state["quarantine"]
+        / f"interrupted-first-boot-transaction-{source}.json",
+    }
+    expected = {
+        "authorization": contract["resume_authorization_sha256"],
+        "proof": contract["stopped_proof_sha256"],
+        "quarantine_receipt": lock["pins"][
+            "interrupted_first_boot_quarantine_receipt_sha256"
+        ],
+        "transaction": contract["transaction_sha256"],
+    }
+    observed: dict[str, str] = {}
+    for key, path in paths.items():
+        pending = path.parent / f".{path.name}.pending"
+        if pending.exists() or pending.is_symlink():
+            raise BootstrapError("interrupted first-boot lineage is pending")
+        content = _read_bound(
+            path, uid=0, gid=0, mode=0o400, maximum=256 * 1024
+        )
+        _no_named_acl(path)
+        digest = _sha256_bytes(content)
+        if digest != expected[key]:
+            raise BootstrapError("interrupted first-boot lineage digest differs")
+        observed[key] = digest
+    return observed
+
+
+def _poststart_fixed_file(
+    path: Path, specification: list[Any]
+) -> bytes:
+    if len(specification) != 4:
+        raise BootstrapError("post-start evidence specification differs")
+    inode, size, digest, mode = specification
+    content = _read_bound(
+        path,
+        uid=0,
+        gid=0,
+        mode=mode,
+        maximum=max(size, 1),
+        allow_empty=size == 0,
+    )
+    metadata = path.stat()
+    _no_named_acl(path)
+    if (
+        metadata.st_ino != inode
+        or metadata.st_size != size
+        or _sha256_bytes(content) != digest
+    ):
+        raise BootstrapError("post-start fixed evidence differs")
+    return content
+
+
+def _poststart_tainted_instance(
+    lock: dict[str, Any],
+    receipt08: dict[str, Any],
+    path: Path,
+    *,
+    expected: dict[str, Any] | None = None,
+    hash_disk: bool = True,
+) -> dict[str, Any]:
+    if not hash_disk and not isinstance(expected, dict):
+        raise BootstrapError("post-start tainted instance expectation is missing")
+    root = _assert_real(path, kind="directory", uid=454, gid=454, mode=0o700)
+    if (root.st_dev, root.st_ino) != (
+        receipt08["instance_device"],
+        receipt08["instance_inode"],
+    ):
+        raise BootstrapError("post-start tainted instance identity differs")
+    before = (
+        root.st_dev,
+        root.st_ino,
+        root.st_mtime_ns,
+        root.st_ctime_ns,
+    )
+    entries = sorted(path.iterdir(), key=lambda item: item.name)
+    if not entries or len(entries) > 128:
+        raise BootstrapError("post-start tainted instance inventory differs")
+    inventory: list[dict[str, Any]] = []
+    for item in entries:
+        metadata = item.lstat()
+        if item.is_symlink() or len(item.name.encode("utf-8")) > 255:
+            raise BootstrapError("post-start tainted instance entry is unsafe")
+        if stat.S_ISREG(metadata.st_mode):
+            kind = "file"
+        elif stat.S_ISDIR(metadata.st_mode):
+            kind = "directory"
+        elif stat.S_ISSOCK(metadata.st_mode):
+            kind = "socket"
+        else:
+            raise BootstrapError("post-start tainted instance entry type differs")
+        _no_named_acl(item)
+        inventory.append(
+            {
+                "gid": metadata.st_gid,
+                "inode": metadata.st_ino,
+                "kind": kind,
+                "links": metadata.st_nlink,
+                "mode": stat.S_IMODE(metadata.st_mode),
+                "mtime_ns": metadata.st_mtime_ns,
+                "name": item.name,
+                "size": metadata.st_size,
+                "uid": metadata.st_uid,
+            }
+        )
+    core_modes = {
+        "cloud-config.yaml": 0o400,
+        "disk": 0o600,
+        "lima-version": 0o400,
+        "lima.yaml": 0o600,
+        "vz-identifier": 0o600,
+    }
+    expected_hashes = {
+        "cloud-config.yaml": receipt08["cloud_config_sha256"],
+        "lima-version": receipt08["lima_version_sha256"],
+        "lima.yaml": lock["pins"]["hardened_plan_sha256"],
+        "vz-identifier": receipt08["vz_identifier_sha256"],
+    }
+    core: dict[str, dict[str, Any]] = {}
+    for name, mode in core_modes.items():
+        item = path / name
+        metadata = _assert_real(
+            item, kind="file", uid=454, gid=454, mode=mode, links=1
+        )
+        expected_core = expected.get("core", {}) if isinstance(expected, dict) else {}
+        if name == "disk" and not hash_disk:
+            specification = expected_core.get(name)
+            if (
+                not isinstance(specification, dict)
+                or set(specification) != {"inode", "mtime_ns", "sha256", "size"}
+                or metadata.st_ino != specification["inode"]
+                or metadata.st_mtime_ns != specification["mtime_ns"]
+                or metadata.st_size != specification["size"]
+                or SHA256_RE.fullmatch(specification.get("sha256", "")) is None
+            ):
+                raise BootstrapError("post-start tainted disk descriptor differs")
+            digest = specification["sha256"]
+        else:
+            digest = _hash_bound_file(
+                item,
+                uid=454,
+                gid=454,
+                mode=mode,
+                expected_size=metadata.st_size,
+            )
+        if name in expected_hashes and digest != expected_hashes[name]:
+            raise BootstrapError("post-start tainted instance core differs")
+        core[name] = {
+            "inode": metadata.st_ino,
+            "mtime_ns": metadata.st_mtime_ns,
+            "sha256": digest,
+            "size": metadata.st_size,
+        }
+    after_metadata = path.stat()
+    after = (
+        after_metadata.st_dev,
+        after_metadata.st_ino,
+        after_metadata.st_mtime_ns,
+        after_metadata.st_ctime_ns,
+    )
+    if after != before:
+        raise BootstrapError("post-start tainted instance changed during hashing")
+    observed = {
+        "core": core,
+        "device": root.st_dev,
+        "inode": root.st_ino,
+        "inventory_sha256": _sha256_bytes(_canonical_json(inventory)),
+    }
+    if expected is not None and observed != expected:
+        raise BootstrapError("post-start tainted instance evidence changed")
+    return observed
+
+
+def _poststart_receipt08(
+    lock: dict[str, Any], path: Path
+) -> tuple[dict[str, Any], list[Any]]:
+    contract = lock["poststart_unknown_recovery"]
+    content = _read_bound(path, uid=0, gid=0, mode=0o400, maximum=256 * 1024)
+    _no_named_acl(path)
+    receipt = _load_json_bytes(content, "post-start source receipt08")
+    metadata = path.stat()
+    if (
+        _sha256_bytes(content) != contract["source_hardened_vm_receipt_sha256"]
+        or receipt.get("kind") != "trading-desk.router-bootstrap.hardened-vm"
+        or receipt.get("vm_status") != "Stopped"
+        or receipt.get("vm_started") is not False
+        or receipt.get("network_changes_performed") is not False
+        or receipt.get("network_reconnect_authorized") is not False
+        or receipt.get("venue_writes_authorized") is not False
+        or receipt.get("mainnet_authorized") is not False
+        or receipt.get("instance_path")
+        != str(Path(lock["paths"]["lima_home"]) / lock["guest"]["instance_name"])
+    ):
+        raise BootstrapError("post-start source receipt08 differs")
+    return receipt, [metadata.st_ino, metadata.st_size, _sha256_bytes(content)]
+
+
+def _poststart_source_session_forbidden(
+    lock: dict[str, Any],
+    state: dict[str, Path],
+    paths: dict[str, tuple[Path, Path]],
+) -> list[Path]:
+    session = lock["poststart_unknown_recovery"]["source_session_id"]
+    expected_sources = {
+        paths[key][0]
+        for key in (
+            "base",
+            "incident",
+            "socket_stderr",
+            "socket_stdout",
+            "start_stderr",
+            "start_stdout",
+            "watchdog",
+        )
+    }
+    forbidden = [
+        path
+        for path in _fresh_recovery_artifacts(state, session)
+        if path not in expected_sources
+    ]
+    fixed = [
+        state["state"] / f"limactl-create-{session}.stdout",
+        state["state"] / f"limactl-create-{session}.stderr",
+        state["receipts"] / f"11-proven-preboot-recovery-{session}.json",
+        state["receipts"] / f".11-proven-preboot-recovery-{session}.json.pending",
+        state["quarantine"] / f"proven-preboot-transaction-{session}.json",
+        state["quarantine"] / f".proven-preboot-transaction-{session}.json.pending",
+        state["quarantine"] / f"first-boot-vmnet-runtime-{session}",
+        state["quarantine"] / f".first-boot-vmnet-runtime-{session}.pending",
+        state["quarantine"] / f"prestart-base-capture-{session}",
+        state["quarantine"] / f".prestart-base-capture-{session}.pending",
+        state["quarantine"] / f"prestart-preparing-{session}",
+        state["quarantine"] / f".prestart-preparing-{session}.pending",
+        state["receipts"] / f"12-interrupted-first-boot-quarantine-{session}.json",
+        state["receipts"] / f".12-interrupted-first-boot-quarantine-{session}.json.pending",
+        state["receipts"]
+        / f"12-interrupted-first-boot-resume-authorization-{session}.json",
+        state["receipts"]
+        / f".12-interrupted-first-boot-resume-authorization-{session}.json.pending",
+        state["quarantine"] / f"interrupted-first-boot-transaction-{session}.json",
+        state["quarantine"]
+        / f".interrupted-first-boot-transaction-{session}.json.pending",
+        state["quarantine"]
+        / f"interrupted-first-boot-stopped-proof-{session}.json",
+        state["quarantine"]
+        / f".interrupted-first-boot-stopped-proof-{session}.json.pending",
+    ]
+    interrupted_keys = (
+        "library",
+        "instance",
+        "runtime",
+        "sudoers",
+        "base",
+        "hardware_lock",
+        "preparing",
+        "starting",
+        "receipt08",
+    )
+    fixed.extend(
+        path
+        for key in interrupted_keys
+        for path in (
+            state["quarantine"] / f"interrupted-first-boot-{key}-{session}",
+            state["quarantine"]
+            / f".interrupted-first-boot-{key}-{session}.pending",
+        )
+    )
+    prefixes = tuple(
+        f"proven-preboot-{key}-{session}-"
+        for key in ("runtime", "base", "hardware_lock", "preparing", "starting")
+    ) + (f"prestart-vmnet-runtime-{session}-",)
+    fixed.extend(
+        path for path in state["quarantine"].iterdir() if path.name.startswith(prefixes)
+    )
+    return forbidden + fixed
+
+
+def _validate_poststart_unknown_frontier(
+    lock: dict[str, Any],
+    state: dict[str, Path],
+    *,
+    allowed_existing: frozenset[Path] = frozenset(),
+    expected_evidence: dict[str, Any] | None = None,
+    full_disk_hash: bool = True,
+) -> dict[str, Any]:
+    contract = lock["poststart_unknown_recovery"]
+    session = contract["source_session_id"]
+    paths = _poststart_unknown_paths(lock, state)
+    current = {
+        key: _recovery_current_path(source, destination)
+        for key, (source, destination) in paths.items()
+    }
+    lima_home = _poststart_lima_home_identity(
+        lock,
+        live_instance=current["instance"] == paths["instance"][0],
+        live_library=current["library"] == paths["library"][0],
+    )
+    fixed = {
+        key: _poststart_fixed_file(current[key], specification)
+        for key, specification in contract["files"].items()
+    }
+    receipt08, receipt_evidence = _poststart_receipt08(lock, current["receipt08"])
+    if (
+        current["receipt08"] == paths["receipt08"][0]
+        and current["instance"] == paths["instance"][0]
+    ):
+        _validate_interrupted_first_boot_successor(
+            lock,
+            state,
+            receipt08,
+            allow_current_library=True,
+            allow_current_runtime=True,
+            allow_consumed_session=True,
+        )
+    expected_instance = (
+        expected_evidence.get("instance")
+        if isinstance(expected_evidence, dict)
+        else None
+    )
+    instance = _poststart_tainted_instance(
+        lock,
+        receipt08,
+        current["instance"],
+        expected=expected_instance,
+        hash_disk=full_disk_hash,
+    )
+    if instance["core"]["disk"]["sha256"] == receipt08["disk_sha256"]:
+        raise BootstrapError("post-start tainted disk did not change")
+    library_metadata = _assert_real(
+        current["library"], kind="directory", uid=454, gid=454, mode=0o755
+    )
+    expected_library = contract["library"]
+    if {
+        "device": library_metadata.st_dev,
+        "gid": library_metadata.st_gid,
+        "inode": library_metadata.st_ino,
+        "mode": stat.S_IMODE(library_metadata.st_mode),
+        "size": library_metadata.st_size,
+        "uid": library_metadata.st_uid,
+    } != expected_library:
+        raise BootstrapError("post-start Library evidence differs")
+    runtime = _router_post_recreate_runtime_identity(lock, current["runtime"])
+    runtime_contract = contract["vmnet_runtime"]
+    if any(runtime.get(key) != value for key, value in runtime_contract.items()):
+        raise BootstrapError("post-start VMNet runtime contract differs")
+
+    marker = {
+        "attempt_id": session,
+        "controller_manifest_sha256": contract["source_controller_manifest_sha256"],
+        "hardened_vm_receipt_sha256": contract[
+            "source_hardened_vm_receipt_sha256"
+        ],
+        "kind": "trading-desk.router-bootstrap.installing",
+        "phase": "airgap-first-boot",
+        "physical_airgap_attested": True,
+        "schema_version": 1,
+        "start_invocation_limit": 1,
+        "state": "PREPARING",
+    }
+    if fixed["preparing"] != _canonical_json(marker):
+        raise BootstrapError("post-start PREPARING marker differs")
+    starting = {
+        **marker,
+        "start_argv_sha256": _sha256_bytes(
+            _canonical_json(list(AIRGAP_START_ARGUMENTS))
+        ),
+        "state": "STARTING",
+    }
+    if fixed["starting"] != _canonical_json(starting):
+        raise BootstrapError("post-start STARTING marker differs")
+    incident, incident_state = _validate_reconnect_incident(
+        fixed["incident"], session, state["quarantine"]
+    )
+    if incident_state != "poststart" or incident.get("failure_stage") != "vm_start":
+        raise BootstrapError("post-start incident differs")
+    watchdog = _load_json_bytes(fixed["watchdog"], "post-start watchdog")
+    force = watchdog.get("force_stop")
+    if (
+        set(watchdog) != WATCHDOG_RESULT_KEYS
+        or watchdog.get("schema_version") != 1
+        or watchdog.get("session_id") != session
+        or watchdog.get("kind")
+        != "trading-desk.router-bootstrap.airgap-watchdog"
+        or watchdog.get("mode") != "watch"
+        or watchdog.get("allow_host_only") is not True
+        or watchdog.get("disposition") != "ABORTED"
+        or watchdog.get("reason") != "full_route_topology_drift"
+        or watchdog.get("network_opened") is not False
+        or watchdog.get("network_reconnect_authorized") is not False
+        or watchdog.get("venue_writes_authorized") is not False
+        or watchdog.get("mainnet_authorized") is not False
+        or not isinstance(force, dict)
+        or force.get("stopped_proven") is not True
+        or force.get("router_processes_absent") is not True
+        or force.get("start_processes_absent") is not True
+    ):
+        raise BootstrapError("post-start watchdog evidence differs")
+    if not fixed["start_stderr"].endswith(b'[VZ] - vm state change: running"\n'):
+        raise BootstrapError("post-start VZ running evidence differs")
+    if b"for process 42782\n" not in fixed["socket_stderr"]:
+        raise BootstrapError("post-start socket process evidence differs")
+    for key in ("base", "hardware_lock"):
+        value = _load_json_bytes(fixed[key], f"post-start {key}")
+        if value.get("capture_session_id") != session:
+            raise BootstrapError("post-start capture session differs")
+    observed_lima_logs = {
+        path.name
+        for path in state["state"].iterdir()
+        if path.name.startswith("limactl-")
+        and path.name.endswith((f"-{session}.stdout", f"-{session}.stderr"))
+    }
+    expected_live_lima_logs = {
+        paths[key][0].name
+        for key in ("start_stdout", "start_stderr")
+        if current[key] == paths[key][0]
+    }
+    if observed_lima_logs != expected_live_lima_logs:
+        raise BootstrapError("post-start limactl log inventory differs")
+    final09 = Path(lock["paths"]["airgap_first_boot_receipt"])
+    forbidden = [
+        final09,
+        final09.parent / f".{final09.name}.pending",
+        Path(lock["paths"]["hardened_vm_receipt"]).parent
+        / f".{Path(lock['paths']['hardened_vm_receipt']).name}.pending",
+        Path(lock["paths"]["vmnet_sudoers"]),
+        state["state"] / ".hardened-vm.INSTALLING.json",
+        state["state"] / ".hardened-vm.INSTALLING.json.pending",
+        state["state"] / "..hardened-vm.INSTALLING.json.pending",
+        Path(lock["router_operator_home_migration"]["migration_receipt_path"]),
+        Path(lock["router_operator_home_migration"]["migration_receipt_path"]).parent
+        / f".{Path(lock['router_operator_home_migration']['migration_receipt_path']).name}.pending",
+        Path(lock["router_operator_home_migration"]["migration_transaction_path"]),
+        Path(lock["router_operator_home_migration"]["migration_transaction_path"]).parent
+        / f".{Path(lock['router_operator_home_migration']['migration_transaction_path']).name}.pending",
+        Path(lock["router_operator_home_migration"]["prior_library_retained_path"]),
+        Path(lock["router_operator_home_migration"]["prior_runtime_retained_path"]),
+    ]
+    forbidden.extend(_poststart_source_session_forbidden(lock, state, paths))
+    transaction_path = _poststart_transaction_path(lock, state)
+    recovery_path = _poststart_recovery_receipt_path(lock, state)
+    fresh = contract["fresh_session_id"]
+    forbidden.extend(
+        [
+            transaction_path.parent / f".{transaction_path.name}.pending",
+            recovery_path.parent / f".{recovery_path.name}.pending",
+            *_fresh_recovery_artifacts(state, fresh),
+            state["state"] / f"limactl-create-{fresh}.stdout",
+            state["state"] / f"limactl-create-{fresh}.stderr",
+            state["receipts"] / f"14-poststart-unknown-recovery-{fresh}.json",
+            state["receipts"] / f".14-poststart-unknown-recovery-{fresh}.json.pending",
+            state["quarantine"] / f"poststart-unknown-transaction-{fresh}.json",
+            state["quarantine"] / f".poststart-unknown-transaction-{fresh}.json.pending",
+            state["quarantine"] / f"poststart-unknown-stopped-proof-{fresh}.json",
+            state["quarantine"] / f".poststart-unknown-stopped-proof-{fresh}.json.pending",
+            state["state"] / "airgap-watchdog-results" / f"{session}-check.json",
+            state["state"] / "airgap-watchdog-results" / f".{session}-check.json.pending",
+        ]
+    )
+    for key in contract["files"]:
+        source = paths[key][0]
+        forbidden.append(source.parent / f".{source.name}.pending")
+    forbidden.extend(
+        path
+        for path in state["quarantine"].iterdir()
+        if path.name.startswith("failed-hardened-instance-")
+    )
+    forbidden.extend(
+        path
+        for key in _poststart_move_order()
+        for path in (
+            state["quarantine"] / f"poststart-unknown-{key}-{fresh}",
+            state["quarantine"] / f".poststart-unknown-{key}-{fresh}.pending",
+        )
+    )
+    if any(
+        (path.exists() or path.is_symlink()) and path not in allowed_existing
+        for path in forbidden
+    ):
+        raise BootstrapError("post-start UNKNOWN absence frontier differs")
+    _assert_no_airgap_watchdog_process()
+    _assert_no_vm_process()
+    agents = _router_uid_process_records()
+    _assert_migration_agent_profile(lock, agents, live=True)
+    return {
+        "fixed_sha256": {
+            key: _sha256_bytes(content) for key, content in fixed.items()
+        },
+        "instance": instance,
+        "library": expected_library,
+        "lima_home": lima_home,
+        "prior_interrupted_lineage": _poststart_prior_lineage(lock, state),
+        "receipt08": receipt_evidence,
+        "runtime": runtime,
+    }
+
+
+def _poststart_transaction_path(
+    lock: dict[str, Any], state: dict[str, Path]
+) -> Path:
+    session = lock["poststart_unknown_recovery"]["source_session_id"]
+    return state["quarantine"] / f"poststart-unknown-transaction-{session}.json"
+
+
+def _poststart_recovery_receipt_path(
+    lock: dict[str, Any], state: dict[str, Path]
+) -> Path:
+    session = lock["poststart_unknown_recovery"]["source_session_id"]
+    return state["receipts"] / f"14-poststart-unknown-recovery-{session}.json"
+
+
+def _poststart_stopped_proof_path(
+    lock: dict[str, Any], state: dict[str, Path]
+) -> Path:
+    session = lock["poststart_unknown_recovery"]["source_session_id"]
+    return state["quarantine"] / f"poststart-unknown-stopped-proof-{session}.json"
+
+
+def _poststart_move_order() -> tuple[str, ...]:
+    return (
+        "library",
+        "runtime",
+        "instance",
+        "receipt08",
+        "base",
+        "hardware_lock",
+        "preparing",
+        "starting",
+        "start_stdout",
+        "start_stderr",
+        "socket_stdout",
+        "socket_stderr",
+        "watchdog",
+        "incident",
+        "sudoers",
+    )
+
+
+def _load_poststart_unknown_transaction(
+    lock: dict[str, Any],
+    state: dict[str, Path],
+    expected_controller_manifest_sha256: str,
+    *,
+    transaction_path: Path | None = None,
+    allowed_existing: frozenset[Path] = frozenset(),
+    full_disk_hash: bool = True,
+) -> tuple[dict[str, Any], bytes]:
+    contract = lock["poststart_unknown_recovery"]
+    canonical = _poststart_transaction_path(lock, state)
+    pending = canonical.parent / f".{canonical.name}.pending"
+    path = canonical if transaction_path is None else transaction_path
+    if path not in {canonical, pending}:
+        raise BootstrapError("post-start recovery transaction path differs")
+    if transaction_path is None and (pending.exists() or pending.is_symlink()):
+        raise BootstrapError("post-start recovery transaction is pending")
+    content = _read_bound(path, uid=0, gid=0, mode=0o400, maximum=512 * 1024)
+    _no_named_acl(path)
+    value = _load_json_bytes(content, "post-start recovery transaction")
+    paths = _poststart_unknown_paths(lock, state)
+    expected_moves = [
+        {"destination": str(paths[key][1]), "key": key, "source": str(paths[key][0])}
+        for key in _poststart_move_order()
+    ]
+    if (
+        set(value)
+        != {
+            "active_controller_manifest_sha256",
+            "automatic_retry_authorized",
+            "airgap_start_authorized",
+            "birth_bug",
+            "birth_marker",
+            "disk_reuse_authorized",
+            "evidence",
+            "fresh_session_id",
+            "fresh_session_reserved",
+            "identity_receipt",
+            "initial_agents",
+            "interrupted_quarantine_receipt_sha256",
+            "kind",
+            "mainnet_authorized",
+            "managed_network_authority",
+            "moves",
+            "network_snapshot_sha256",
+            "process_home_initial_identity",
+            "recreation_authorized",
+            "source_instance_present",
+            "schema_version",
+            "source_controller_manifest_sha256",
+            "source_hardened_vm_receipt_sha256",
+            "source_session_id",
+            "source_start_count",
+            "source_home",
+            "target_home",
+            "venue_writes_authorized",
+            "vm_boot_observed",
+            "vm_status",
+        }
+        or value.get("kind")
+        != "trading-desk.router-bootstrap.poststart-unknown-transaction"
+        or value.get("schema_version") != 1
+        or value.get("active_controller_manifest_sha256")
+        != expected_controller_manifest_sha256
+        or value.get("source_controller_manifest_sha256")
+        != contract["source_controller_manifest_sha256"]
+        or value.get("source_hardened_vm_receipt_sha256")
+        != contract["source_hardened_vm_receipt_sha256"]
+        or value.get("source_session_id") != contract["source_session_id"]
+        or value.get("fresh_session_id") != contract["fresh_session_id"]
+        or value.get("moves") != expected_moves
+        or value.get("interrupted_quarantine_receipt_sha256")
+        != lock["pins"]["interrupted_first_boot_quarantine_receipt_sha256"]
+        or value.get("source_home")
+        != lock["router_operator_home_migration"]["source_home"]
+        or value.get("target_home")
+        != lock["router_operator_home_migration"]["target_home"]
+        or value.get("source_start_count") != 1
+        or value.get("fresh_session_reserved") is not True
+        or value.get("managed_network_authority")
+        != _online_recovery_managed_network_authority(lock)
+        or value.get("vm_boot_observed") is not True
+        or value.get("source_instance_present") is not True
+        or value.get("vm_status") != "Stopped"
+        or any(
+            value.get(key) is not False
+            for key in (
+                "airgap_start_authorized",
+                "automatic_retry_authorized",
+                "disk_reuse_authorized",
+                "mainnet_authorized",
+                "recreation_authorized",
+                "venue_writes_authorized",
+            )
+        )
+    ):
+        raise BootstrapError("post-start recovery transaction differs")
+    initial_home = value.get("process_home_initial_identity")
+    current_home = _process_home_identity(lock)
+    if (
+        not isinstance(initial_home, dict)
+        or set(initial_home)
+        != {
+            "device",
+            "gid",
+            "inode",
+            "library",
+            "links",
+            "mode",
+            "path",
+            "size",
+            "uid",
+        }
+        or initial_home.get("library") is not None
+        or any(initial_home.get(key) != current_home[key] for key in current_home)
+    ):
+        raise BootstrapError("post-start recovery initial process HOME differs")
+    migration_paths = _router_home_migration_paths(lock)
+    migration = lock["router_operator_home_migration"]
+    identity_content, identity_evidence = _bound_migration_file(
+        migration_paths["identity"], migration["prior_identity_receipt_sha256"]
+    )
+    birth_content, birth_evidence = _bound_migration_file(
+        migration_paths["birth"], migration["prior_birth_marker_sha256"]
+    )
+    bug_content, bug_evidence = _bound_migration_file(
+        migration_paths["birth_bug"], migration["birth_bug_quarantine_sha256"]
+    )
+    if (
+        identity_content != _identity_receipt_content(lock, migration["source_home"])
+        or birth_content != _birth_marker_content(migration["source_home"])
+        or bug_content
+        != _birth_marker_content(migration["source_home"])
+        .replace(b"uid=454\n", b"uid=0\n", 1)
+        .replace(b"gid=454\n", b"gid=0\n", 1)
+        or value.get("identity_receipt") != identity_evidence
+        or value.get("birth_marker") != birth_evidence
+        or value.get("birth_bug") != bug_evidence
+    ):
+        raise BootstrapError("post-start recovery identity lineage differs")
+    frontier_allow = set(allowed_existing)
+    if path == pending:
+        frontier_allow.add(pending)
+    live_home = _dscl_value(
+        f"/Users/{lock['host']['router_operator_account']}", "NFSHomeDirectory"
+    )
+    migration = lock["router_operator_home_migration"]
+    if path == pending and live_home != migration["source_home"]:
+        raise BootstrapError("post-start pending transaction follows mutation")
+    if path == pending:
+        later = (
+            _poststart_stopped_proof_path(lock, state),
+            _poststart_recovery_receipt_path(lock, state),
+        )
+        if any(
+            candidate.exists()
+            or candidate.is_symlink()
+            or (candidate.parent / f".{candidate.name}.pending").exists()
+            or (candidate.parent / f".{candidate.name}.pending").is_symlink()
+            for candidate in later
+        ):
+            raise BootstrapError("post-start pending transaction follows later state")
+    if live_home == migration["source_home"]:
+        if _poststart_process_home_identity(
+            lock, allow_library=False
+        ) != initial_home:
+            raise BootstrapError("post-start process HOME changed before home CAS")
+        if any(
+            not source.exists()
+            or source.is_symlink()
+            or destination.exists()
+            or destination.is_symlink()
+            for source, destination in paths.values()
+        ):
+            raise BootstrapError("post-start recovery mutation predates home CAS")
+    elif live_home != migration["target_home"]:
+        raise BootstrapError("post-start recovery home state differs")
+    evidence = _validate_poststart_unknown_frontier(
+        lock,
+        state,
+        allowed_existing=frozenset(frontier_allow),
+        expected_evidence=value.get("evidence"),
+        full_disk_hash=full_disk_hash,
+    )
+    if evidence != value["evidence"]:
+        raise BootstrapError("post-start recovery evidence changed")
+    initial_agents = value.get("initial_agents")
+    if not isinstance(initial_agents, list):
+        raise BootstrapError("post-start recovery initial agent evidence differs")
+    _assert_migration_agent_profile(lock, initial_agents, live=False)
+    return value, content
+
+
+def _status_named_stopped(lock: dict[str, Any], limactl: Path) -> dict[str, Any]:
+    result = subprocess.run(
+        [
+            str(limactl),
+            "list",
+            "--format=json",
+            lock["guest"]["instance_name"],
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_environment(lock),
+        cwd=_process_home(lock),
+        preexec_fn=_drop_preexec(454, 454),
+        timeout=30,
+        check=False,
+    )
+    return _parse_status_result(lock, result, expected_status="Stopped")
+
+
+def _validate_poststart_stopped_proof(
+    lock: dict[str, Any],
+    state: dict[str, Path],
+    expected_controller_manifest_sha256: str,
+    transaction: dict[str, Any],
+    transaction_content: bytes,
+    *,
+    proof_path: Path | None = None,
+) -> tuple[dict[str, Any], bytes]:
+    canonical = _poststart_stopped_proof_path(lock, state)
+    pending = canonical.parent / f".{canonical.name}.pending"
+    candidate = canonical if proof_path is None else proof_path
+    if candidate not in {canonical, pending}:
+        raise BootstrapError("post-start stopped proof path differs")
+    if proof_path is None and (pending.exists() or pending.is_symlink()):
+        raise BootstrapError("post-start stopped proof is pending")
+    content = _read_bound(
+        candidate, uid=0, gid=0, mode=0o400, maximum=512 * 1024
+    )
+    _no_named_acl(candidate)
+    proof = _load_json_bytes(content, "post-start stopped proof")
+    expected_keys = {
+        "active_controller_manifest_sha256",
+        "kind",
+        "managed_network_authority",
+        "network_snapshot_sha256",
+        "post_home_bootout",
+        "pre_home_bootout",
+        "process_home_post_status_identity",
+        "process_home_pre_status_identity",
+        "raw_uid454_processes_absent",
+        "schema_version",
+        "source_session_id",
+        "status",
+        "status_bootout",
+        "status_sha256",
+        "transaction_sha256",
+        "vm_processes_absent",
+        "vm_status",
+        "watchdog_process_absent",
+    }
+    status = proof.get("status")
+    if (
+        set(proof) != expected_keys
+        or proof.get("kind")
+        != "trading-desk.router-bootstrap.poststart-unknown-stopped-proof"
+        or proof.get("schema_version") != 1
+        or proof.get("active_controller_manifest_sha256")
+        != expected_controller_manifest_sha256
+        or proof.get("source_session_id")
+        != lock["poststart_unknown_recovery"]["source_session_id"]
+        or proof.get("transaction_sha256") != _sha256_bytes(transaction_content)
+        or proof.get("network_snapshot_sha256")
+        != transaction["network_snapshot_sha256"]
+        or proof.get("managed_network_authority")
+        != transaction["managed_network_authority"]
+        or proof.get("managed_network_authority")
+        != _online_recovery_managed_network_authority(lock)
+        or proof.get("status_sha256") != _sha256_bytes(_canonical_json(status))
+        or proof.get("raw_uid454_processes_absent") is not True
+        or proof.get("vm_processes_absent") is not True
+        or proof.get("watchdog_process_absent") is not True
+        or proof.get("vm_status") != "Stopped"
+    ):
+        raise BootstrapError("post-start stopped proof differs")
+    _validate_status_value(lock, status, expected_status="Stopped")
+    for key in ("pre_home_bootout", "post_home_bootout", "status_bootout"):
+        _validate_bootout_evidence(lock, proof[key])
+    pre_status_home = proof.get("process_home_pre_status_identity")
+    post_status_home = proof.get("process_home_post_status_identity")
+    home_keys = {
+        "device",
+        "gid",
+        "inode",
+        "library",
+        "links",
+        "mode",
+        "path",
+        "size",
+        "uid",
+    }
+    initial_home = transaction["process_home_initial_identity"]
+    if (
+        not isinstance(pre_status_home, dict)
+        or not isinstance(post_status_home, dict)
+        or set(pre_status_home) != home_keys
+        or set(post_status_home) != home_keys
+        or any(
+            evidence.get(key) != initial_home[key]
+            for evidence in (pre_status_home, post_status_home)
+            for key in ("device", "gid", "inode", "mode", "path", "uid")
+        )
+        or pre_status_home not in (initial_home, post_status_home)
+    ):
+        raise BootstrapError("post-start stopped proof process HOME differs")
+    if post_status_home != _poststart_process_home_identity(
+        lock, allow_library=True
+    ):
+        raise BootstrapError("post-start stopped proof process HOME changed")
+    return proof, content
+
+
+def _validate_poststart_recovery_receipt(
+    lock: dict[str, Any],
+    state: dict[str, Path],
+    expected_controller_manifest_sha256: str,
+    *,
+    receipt_path: Path | None = None,
+    require_live_quiescence: bool = True,
+    full_disk_hash: bool = True,
+) -> tuple[dict[str, Any], str]:
+    canonical = _poststart_recovery_receipt_path(lock, state)
+    pending = canonical.parent / f".{canonical.name}.pending"
+    candidate = canonical if receipt_path is None else receipt_path
+    if candidate not in {canonical, pending}:
+        raise BootstrapError("post-start recovery receipt path differs")
+    if receipt_path is None and (pending.exists() or pending.is_symlink()):
+        raise BootstrapError("post-start recovery receipt is pending")
+    transaction, transaction_content = _load_poststart_unknown_transaction(
+        lock,
+        state,
+        expected_controller_manifest_sha256,
+        allowed_existing=(frozenset({candidate}) if candidate == pending else frozenset()),
+        full_disk_hash=full_disk_hash,
+    )
+    content = _read_bound(
+        candidate, uid=0, gid=0, mode=0o400, maximum=512 * 1024
+    )
+    _no_named_acl(candidate)
+    receipt = _load_json_bytes(content, "post-start recovery receipt")
+    proof, proof_content = _validate_poststart_stopped_proof(
+        lock,
+        state,
+        expected_controller_manifest_sha256,
+        transaction,
+        transaction_content,
+    )
+    migration = lock["router_operator_home_migration"]
+    retained_paths = [move["destination"] for move in transaction["moves"]]
+    paths = _poststart_unknown_paths(lock, state)
+    expected_keys = {
+        "active_controller_manifest_sha256",
+        "airgap_start_authorized",
+        "automatic_retry_authorized",
+        "birth_bug_quarantine_sha256",
+        "credentials_accessed",
+        "disk_reuse_authorized",
+        "evidence",
+        "final_lima_home_identity",
+        "final_process_home_identity",
+        "final_bootout",
+        "fresh_session_id",
+        "fresh_session_reserved",
+        "home_migrated",
+        "interrupted_quarantine_receipt_sha256",
+        "kind",
+        "mainnet_authorized",
+        "managed_network_authority",
+        "network_changes_performed",
+        "network_reconnect_authorized",
+        "network_snapshot_sha256",
+        "post_home_bootout",
+        "pre_home_bootout",
+        "prior_birth_marker_sha256",
+        "prior_identity_receipt_sha256",
+        "quarantine_complete",
+        "raw_uid454_processes_absent",
+        "recreation_authorized",
+        "replacement_instance_present",
+        "retained_instance_identity",
+        "retained_library_identity",
+        "retained_paths",
+        "retained_receipt08_sha256",
+        "retained_runtime_identity",
+        "schema_version",
+        "source_controller_manifest_sha256",
+        "source_hardened_vm_receipt_sha256",
+        "source_home",
+        "source_session_id",
+        "source_start_count",
+        "source_vm_status",
+        "stopped_proof_path",
+        "stopped_proof_sha256",
+        "stopped_status",
+        "stopped_status_sha256",
+        "status_bootout",
+        "target_home",
+        "target_process_home_identity",
+        "transaction_path",
+        "transaction_sha256",
+        "venue_writes_authorized",
+        "vm_boot_observed",
+        "vm_started",
+        "watchdog_process_absent",
+    }
+    if (
+        set(receipt) != expected_keys
+        or receipt.get("kind")
+        != "trading-desk.router-bootstrap.poststart-unknown-recovery"
+        or receipt.get("schema_version") != 1
+        or receipt.get("active_controller_manifest_sha256")
+        != expected_controller_manifest_sha256
+        or receipt.get("transaction_path")
+        != str(_poststart_transaction_path(lock, state))
+        or receipt.get("transaction_sha256")
+        != _sha256_bytes(transaction_content)
+        or receipt.get("stopped_proof_sha256")
+        != _sha256_bytes(proof_content)
+        or receipt.get("stopped_proof_path")
+        != str(_poststart_stopped_proof_path(lock, state))
+        or receipt.get("fresh_session_id")
+        != lock["poststart_unknown_recovery"]["fresh_session_id"]
+        or receipt.get("fresh_session_reserved") is not True
+        or receipt.get("evidence") != transaction["evidence"]
+        or receipt.get("retained_paths") != retained_paths
+        or receipt.get("source_controller_manifest_sha256")
+        != transaction["source_controller_manifest_sha256"]
+        or receipt.get("source_hardened_vm_receipt_sha256")
+        != transaction["source_hardened_vm_receipt_sha256"]
+        or receipt.get("interrupted_quarantine_receipt_sha256")
+        != transaction["interrupted_quarantine_receipt_sha256"]
+        or receipt.get("source_session_id") != transaction["source_session_id"]
+        or receipt.get("source_start_count") != 1
+        or receipt.get("source_home") != migration["source_home"]
+        or receipt.get("target_home") != migration["target_home"]
+        or receipt.get("target_process_home_identity")
+        != transaction["process_home_initial_identity"]
+        or receipt.get("final_process_home_identity")
+        != _poststart_process_home_identity(lock, allow_library=True)
+        or receipt.get("final_lima_home_identity")
+        != transaction["evidence"]["lima_home"]
+        or receipt.get("prior_identity_receipt_sha256")
+        != migration["prior_identity_receipt_sha256"]
+        or receipt.get("prior_birth_marker_sha256")
+        != migration["prior_birth_marker_sha256"]
+        or receipt.get("birth_bug_quarantine_sha256")
+        != migration["birth_bug_quarantine_sha256"]
+        or receipt.get("home_migrated") is not True
+        or receipt.get("quarantine_complete") is not True
+        or receipt.get("raw_uid454_processes_absent") is not True
+        or receipt.get("source_vm_status") != "Stopped"
+        or receipt.get("vm_boot_observed") is not True
+        or receipt.get("stopped_status") != proof["status"]
+        or receipt.get("stopped_status_sha256") != proof["status_sha256"]
+        or receipt.get("post_home_bootout") != proof["post_home_bootout"]
+        or receipt.get("pre_home_bootout") != proof["pre_home_bootout"]
+        or receipt.get("status_bootout") != proof["status_bootout"]
+        or receipt.get("network_snapshot_sha256")
+        != transaction["network_snapshot_sha256"]
+        or receipt.get("managed_network_authority")
+        != transaction["managed_network_authority"]
+        or receipt.get("managed_network_authority")
+        != _online_recovery_managed_network_authority(lock)
+        or receipt.get("retained_instance_identity")
+        != transaction["evidence"]["instance"]
+        or receipt.get("retained_library_identity")
+        != transaction["evidence"]["library"]
+        or receipt.get("retained_runtime_identity")
+        != transaction["evidence"]["runtime"]
+        or receipt.get("retained_receipt08_sha256")
+        != transaction["source_hardened_vm_receipt_sha256"]
+        or receipt.get("replacement_instance_present") is not False
+        or any(
+            receipt.get(key) is not False
+            for key in (
+                "airgap_start_authorized",
+                "automatic_retry_authorized",
+                "credentials_accessed",
+                "disk_reuse_authorized",
+                "mainnet_authorized",
+                "network_changes_performed",
+                "network_reconnect_authorized",
+                "recreation_authorized",
+                "venue_writes_authorized",
+                "vm_started",
+            )
+        )
+        or receipt.get("watchdog_process_absent") is not True
+    ):
+        raise BootstrapError("post-start recovery receipt differs")
+    _validate_bootout_evidence(lock, receipt["final_bootout"])
+    for source, destination in paths.values():
+        if source.exists() or source.is_symlink() or not destination.exists() or destination.is_symlink():
+            raise BootstrapError("post-start recovery retained frontier differs")
+    if Path(lock["paths"]["hardened_vm_receipt"]).exists():
+        raise BootstrapError("post-start replacement receipt is present")
+    _assert_host_identity(lock)
+    _assert_no_airgap_watchdog_process()
+    _assert_no_vm_process()
+    if require_live_quiescence and _router_uid_processes():
+        raise BootstrapError("post-start recovery router process remains")
+    return receipt, _sha256_bytes(content)
+
+
+def _recover_poststart_unknown_online(args: argparse.Namespace) -> int:
+    _verify_bundle(args.expected_controller_manifest_sha256)
+    lock = _load_lock()
+    if (
+        lock["phases"].get("poststart_unknown_recovery_enabled") is not True
+        or lock["phases"]["airgapped_start_apply_enabled"] is not False
+        or lock["phases"]["router_operator_home_migration_enabled"] is not False
+    ):
+        raise BootstrapError("post-start UNKNOWN recovery is disabled")
+    _verify_system_tools(lock)
+    _assert_attended_root_tty()
+    state = _require_existing_state(lock)
+    contract = lock["poststart_unknown_recovery"]
+    migration = lock["router_operator_home_migration"]
+    transaction_path = _poststart_transaction_path(lock, state)
+    recovery_path = _poststart_recovery_receipt_path(lock, state)
+    transaction_pending = transaction_path.parent / f".{transaction_path.name}.pending"
+    recovery_pending = recovery_path.parent / f".{recovery_path.name}.pending"
+    proof_path = _poststart_stopped_proof_path(lock, state)
+    proof_pending = proof_path.parent / f".{proof_path.name}.pending"
+    disk_hash_verified = False
+
+    if (recovery_path.exists() or recovery_path.is_symlink()) and (
+        recovery_pending.exists() or recovery_pending.is_symlink()
+    ):
+        raise BootstrapError("post-start recovery receipt is ambiguous")
+    if recovery_pending.exists() or recovery_pending.is_symlink():
+        _validate_poststart_recovery_receipt(
+            lock,
+            state,
+            args.expected_controller_manifest_sha256,
+            receipt_path=recovery_pending,
+            require_live_quiescence=False,
+            full_disk_hash=True,
+        )
+        disk_hash_verified = True
+        _quiesce_router_user_domain(lock, require_exact_migration_agents=True)
+        _validate_poststart_recovery_receipt(
+            lock,
+            state,
+            args.expected_controller_manifest_sha256,
+            receipt_path=recovery_pending,
+            full_disk_hash=False,
+        )
+        _rename_exclusive(recovery_pending, recovery_path)
+    if recovery_path.exists() or recovery_path.is_symlink():
+        _validate_poststart_recovery_receipt(
+            lock,
+            state,
+            args.expected_controller_manifest_sha256,
+            require_live_quiescence=False,
+            full_disk_hash=not disk_hash_verified,
+        )
+        disk_hash_verified = True
+        _quiesce_router_user_domain(lock, require_exact_migration_agents=True)
+        _receipt, recovery_sha256 = _validate_poststart_recovery_receipt(
+            lock,
+            state,
+            args.expected_controller_manifest_sha256,
+            full_disk_hash=False,
+        )
+        print(f"poststart_unknown_recovery_receipt={recovery_path}")
+        print(f"poststart_unknown_recovery_receipt_sha256={recovery_sha256}")
+        print(f"reserved_fresh_session_id={contract['fresh_session_id']}")
+        print("fresh_recreate_authorized=false")
+        print("disk_reuse_authorized=false")
+        print("vm_status=Stopped")
+        print("network_changes_performed=false")
+        print("network_reconnect_authorized=false")
+        print("venue_writes_authorized=false")
+        print("mainnet_authorized=false")
+        return 0
+
+    if (transaction_path.exists() or transaction_path.is_symlink()) and (
+        transaction_pending.exists() or transaction_pending.is_symlink()
+    ):
+        raise BootstrapError("post-start recovery transaction is ambiguous")
+    current_network = _network_snapshot()
+    if transaction_pending.exists() or transaction_pending.is_symlink():
+        pending_transaction, _pending_content = _load_poststart_unknown_transaction(
+            lock,
+            state,
+            args.expected_controller_manifest_sha256,
+            transaction_path=transaction_pending,
+            full_disk_hash=True,
+        )
+        disk_hash_verified = True
+        if (
+            _sha256_bytes(_canonical_json(_network_snapshot()))
+            != pending_transaction["network_snapshot_sha256"]
+        ):
+            raise BootstrapError("network changed before transaction promotion")
+        _rename_exclusive(transaction_pending, transaction_path)
+    if not transaction_path.exists() and not transaction_path.is_symlink():
+        if any(
+            path.exists() or path.is_symlink()
+            for path in (proof_path, proof_pending)
+        ):
+            raise BootstrapError("post-start stopped proof predates transaction")
+        _assert_host_identity(lock, legacy_home=True)
+        paths = _poststart_unknown_paths(lock, state)
+        if any(
+            not source.exists()
+            or source.is_symlink()
+            or destination.exists()
+            or destination.is_symlink()
+            for source, destination in paths.values()
+        ):
+            raise BootstrapError("post-start recovery mutation predates transaction")
+        process_home_initial = _poststart_process_home_identity(
+            lock, allow_library=False
+        )
+        _assert_no_airgap_watchdog_process()
+        _assert_no_vm_process()
+        evidence = _validate_poststart_unknown_frontier(lock, state)
+        disk_hash_verified = True
+        agents = _router_uid_process_records()
+        _assert_migration_agent_profile(lock, agents, live=True)
+        fresh = contract["fresh_session_id"]
+        fresh_paths = _fresh_recovery_artifacts(state, fresh) + [
+            state["state"] / f"limactl-create-{fresh}.stdout",
+            state["state"] / f"limactl-create-{fresh}.stderr",
+            state["receipts"] / f"14-poststart-unknown-recovery-{fresh}.json",
+            state["receipts"] / f".14-poststart-unknown-recovery-{fresh}.json.pending",
+            state["quarantine"] / f"poststart-unknown-transaction-{fresh}.json",
+            state["quarantine"] / f".poststart-unknown-transaction-{fresh}.json.pending",
+            state["quarantine"] / f"poststart-unknown-stopped-proof-{fresh}.json",
+            state["quarantine"] / f".poststart-unknown-stopped-proof-{fresh}.json.pending",
+        ]
+        fresh_paths.extend(
+            path
+            for key in _poststart_move_order()
+            for path in (
+                state["quarantine"] / f"poststart-unknown-{key}-{fresh}",
+                state["quarantine"] / f".poststart-unknown-{key}-{fresh}.pending",
+            )
+        )
+        if any(path.exists() or path.is_symlink() for path in fresh_paths):
+            raise BootstrapError("post-start recovery fresh namespace differs")
+        identity_paths = _router_home_migration_paths(lock)
+        _identity, identity_evidence = _bound_migration_file(
+            identity_paths["identity"], migration["prior_identity_receipt_sha256"]
+        )
+        _birth, birth_evidence = _bound_migration_file(
+            identity_paths["birth"], migration["prior_birth_marker_sha256"]
+        )
+        _bug, bug_evidence = _bound_migration_file(
+            identity_paths["birth_bug"], migration["birth_bug_quarantine_sha256"]
+        )
+        network_sha256 = _sha256_bytes(_canonical_json(current_network))
+        if (
+            _sha256_bytes(_canonical_json(_network_snapshot())) != network_sha256
+            or _poststart_process_home_identity(lock, allow_library=False)
+            != process_home_initial
+        ):
+            raise BootstrapError("post-start recovery pretransaction state changed")
+        transaction = {
+            "active_controller_manifest_sha256": args.expected_controller_manifest_sha256,
+            "airgap_start_authorized": False,
+            "automatic_retry_authorized": False,
+            "birth_bug": bug_evidence,
+            "birth_marker": birth_evidence,
+            "disk_reuse_authorized": False,
+            "evidence": evidence,
+            "fresh_session_id": fresh,
+            "fresh_session_reserved": True,
+            "identity_receipt": identity_evidence,
+            "initial_agents": agents,
+            "interrupted_quarantine_receipt_sha256": lock["pins"][
+                "interrupted_first_boot_quarantine_receipt_sha256"
+            ],
+            "kind": "trading-desk.router-bootstrap.poststart-unknown-transaction",
+            "mainnet_authorized": False,
+            "managed_network_authority": _online_recovery_managed_network_authority(
+                lock
+            ),
+            "moves": [
+                {"destination": str(paths[key][1]), "key": key, "source": str(paths[key][0])}
+                for key in _poststart_move_order()
+            ],
+            "network_snapshot_sha256": network_sha256,
+            "process_home_initial_identity": process_home_initial,
+            "recreation_authorized": False,
+            "source_instance_present": True,
+            "schema_version": 1,
+            "source_controller_manifest_sha256": contract[
+                "source_controller_manifest_sha256"
+            ],
+            "source_hardened_vm_receipt_sha256": contract[
+                "source_hardened_vm_receipt_sha256"
+            ],
+            "source_session_id": contract["source_session_id"],
+            "source_start_count": 1,
+            "source_home": migration["source_home"],
+            "target_home": migration["target_home"],
+            "venue_writes_authorized": False,
+            "vm_boot_observed": True,
+            "vm_status": "Stopped",
+        }
+        _atomic_receipt(
+            transaction_path.parent, transaction_path.name, transaction
+        )
+        if (
+            _sha256_bytes(_canonical_json(_network_snapshot())) != network_sha256
+            or _poststart_process_home_identity(lock, allow_library=False)
+            != process_home_initial
+        ):
+            raise BootstrapError("post-start recovery transaction boundary changed")
+    transaction, transaction_content = _load_poststart_unknown_transaction(
+        lock,
+        state,
+        args.expected_controller_manifest_sha256,
+        full_disk_hash=not disk_hash_verified,
+    )
+    disk_hash_verified = True
+    _assert_no_airgap_watchdog_process()
+    _assert_no_vm_process()
+    pre_home_bootout = _quiesce_router_user_domain(
+        lock, require_exact_migration_agents=True
+    )
+    _assert_no_airgap_watchdog_process()
+    _assert_no_vm_process()
+    if _router_uid_processes():
+        raise BootstrapError("router process appeared before home CAS")
+    if _online_recovery_managed_network_authority(lock) != transaction[
+        "managed_network_authority"
+    ]:
+        raise BootstrapError("managed network authority changed before home CAS")
+    current_home = _dscl_value(
+        f"/Users/{lock['host']['router_operator_account']}", "NFSHomeDirectory"
+    )
+    if current_home == migration["source_home"]:
+        _assert_host_identity(lock, legacy_home=True)
+        changed = subprocess.run(
+            [
+                "/usr/bin/dscl",
+                ".",
+                "-change",
+                f"/Users/{lock['host']['router_operator_account']}",
+                "NFSHomeDirectory",
+                migration["source_home"],
+                migration["target_home"],
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+            timeout=10,
+            check=False,
+        )
+        if changed.returncode != 0 or changed.stdout or changed.stderr:
+            raise BootstrapError("post-start recovery home update failed")
+    elif current_home == migration["target_home"]:
+        _assert_host_identity(lock, allow_cached_source_home=True)
+    else:
+        raise BootstrapError("post-start recovery home state differs")
+    cache = subprocess.run(
+        ["/usr/bin/dscacheutil", "-flushcache"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C"},
+        timeout=10,
+        check=False,
+    )
+    if cache.returncode != 0 or cache.stdout or cache.stderr:
+        raise BootstrapError("post-start recovery identity cache flush failed")
+    deadline = time.monotonic() + 10
+    while True:
+        if (
+            pwd.getpwnam(lock["host"]["router_operator_account"]).pw_dir
+            == migration["target_home"]
+            and _dscl_value(
+                f"/Users/{lock['host']['router_operator_account']}",
+                "NFSHomeDirectory",
+            )
+            == migration["target_home"]
+        ):
+            break
+        if time.monotonic() >= deadline:
+            raise BootstrapError("post-start recovery home cache did not converge")
+        time.sleep(0.1)
+    _assert_host_identity(lock)
+    post_home_bootout = _quiesce_router_user_domain(lock)
+    _assert_no_airgap_watchdog_process()
+    _assert_no_vm_process()
+    if _router_uid_processes():
+        raise BootstrapError("router process appeared after home migration")
+    if _online_recovery_managed_network_authority(lock) != transaction[
+        "managed_network_authority"
+    ]:
+        raise BootstrapError("managed network authority changed during home migration")
+    process_home_pre_status = _poststart_process_home_identity(
+        lock, allow_library=True
+    )
+    if (proof_pending.exists() or proof_pending.is_symlink()) and (
+        proof_path.exists() or proof_path.is_symlink()
+    ):
+        raise BootstrapError("post-start stopped proof is ambiguous")
+    if not any(
+        path.exists() or path.is_symlink() for path in (proof_path, proof_pending)
+    ):
+        source_instance = _poststart_unknown_paths(lock, state)["instance"][0]
+        if not source_instance.exists() or source_instance.is_symlink():
+            raise BootstrapError("post-start source moved before stopped proof")
+        _load_poststart_unknown_transaction(
+            lock,
+            state,
+            args.expected_controller_manifest_sha256,
+            full_disk_hash=False,
+        )
+        status = _status_named_stopped(lock, _limactl(lock))
+        status_bootout = _quiesce_router_user_domain(lock)
+        _assert_no_airgap_watchdog_process()
+        _assert_no_vm_process()
+        if _router_uid_processes():
+            raise BootstrapError("router process appeared after stopped status")
+        if _online_recovery_managed_network_authority(lock) != transaction[
+            "managed_network_authority"
+        ]:
+            raise BootstrapError("managed network authority changed during stopped proof")
+        process_home_post_status = _poststart_process_home_identity(
+            lock, allow_library=True
+        )
+        proof = {
+            "active_controller_manifest_sha256": args.expected_controller_manifest_sha256,
+            "kind": "trading-desk.router-bootstrap.poststart-unknown-stopped-proof",
+            "managed_network_authority": transaction["managed_network_authority"],
+            "network_snapshot_sha256": transaction["network_snapshot_sha256"],
+            "post_home_bootout": post_home_bootout,
+            "pre_home_bootout": pre_home_bootout,
+            "process_home_post_status_identity": process_home_post_status,
+            "process_home_pre_status_identity": process_home_pre_status,
+            "raw_uid454_processes_absent": True,
+            "schema_version": 1,
+            "source_session_id": contract["source_session_id"],
+            "status": status,
+            "status_bootout": status_bootout,
+            "status_sha256": _sha256_bytes(_canonical_json(status)),
+            "transaction_sha256": _sha256_bytes(transaction_content),
+            "vm_processes_absent": True,
+            "vm_status": "Stopped",
+            "watchdog_process_absent": True,
+        }
+        _atomic_receipt(proof_path.parent, proof_path.name, proof)
+    if proof_pending.exists() or proof_pending.is_symlink():
+        proof, proof_content = _validate_poststart_stopped_proof(
+            lock,
+            state,
+            args.expected_controller_manifest_sha256,
+            transaction,
+            transaction_content,
+            proof_path=proof_pending,
+        )
+        _rename_exclusive(proof_pending, proof_path)
+    proof, proof_content = _validate_poststart_stopped_proof(
+        lock,
+        state,
+        args.expected_controller_manifest_sha256,
+        transaction,
+        transaction_content,
+    )
+    _load_poststart_unknown_transaction(
+        lock,
+        state,
+        args.expected_controller_manifest_sha256,
+        full_disk_hash=False,
+    )
+    paths = _poststart_unknown_paths(lock, state)
+    for key in _poststart_move_order():
+        _assert_no_airgap_watchdog_process()
+        _assert_no_vm_process()
+        if _router_uid_processes():
+            raise BootstrapError("router process appeared before recovery move")
+        if _online_recovery_managed_network_authority(lock) != transaction[
+            "managed_network_authority"
+        ]:
+            raise BootstrapError("managed network authority changed before recovery move")
+        _resume_recovery_moves((paths[key],))
+        _assert_no_airgap_watchdog_process()
+        _assert_no_vm_process()
+        if _router_uid_processes():
+            raise BootstrapError("router process appeared after recovery move")
+        if _online_recovery_managed_network_authority(lock) != transaction[
+            "managed_network_authority"
+        ]:
+            raise BootstrapError("managed network authority changed after recovery move")
+    _load_poststart_unknown_transaction(
+        lock,
+        state,
+        args.expected_controller_manifest_sha256,
+        full_disk_hash=True,
+    )
+    final_bootout = _quiesce_router_user_domain(lock)
+    _assert_no_airgap_watchdog_process()
+    _assert_no_vm_process()
+    if _router_uid_processes():
+        raise BootstrapError("post-start recovery router process remains")
+    if _online_recovery_managed_network_authority(lock) != transaction[
+        "managed_network_authority"
+    ]:
+        raise BootstrapError("managed network authority changed during post-start recovery")
+    final_lima_home = _poststart_lima_home_identity(
+        lock, live_instance=False, live_library=False
+    )
+    if final_lima_home != transaction["evidence"]["lima_home"]:
+        raise BootstrapError("post-start final LIMA_HOME differs")
+    final_process_home = _poststart_process_home_identity(
+        lock, allow_library=True
+    )
+    receipt = {
+        "active_controller_manifest_sha256": args.expected_controller_manifest_sha256,
+        "airgap_start_authorized": False,
+        "automatic_retry_authorized": False,
+        "birth_bug_quarantine_sha256": migration["birth_bug_quarantine_sha256"],
+        "credentials_accessed": False,
+        "disk_reuse_authorized": False,
+        "evidence": transaction["evidence"],
+        "final_bootout": final_bootout,
+        "final_lima_home_identity": final_lima_home,
+        "final_process_home_identity": final_process_home,
+        "fresh_session_id": contract["fresh_session_id"],
+        "fresh_session_reserved": True,
+        "home_migrated": True,
+        "interrupted_quarantine_receipt_sha256": transaction[
+            "interrupted_quarantine_receipt_sha256"
+        ],
+        "kind": "trading-desk.router-bootstrap.poststart-unknown-recovery",
+        "mainnet_authorized": False,
+        "managed_network_authority": transaction["managed_network_authority"],
+        "network_changes_performed": False,
+        "network_reconnect_authorized": False,
+        "network_snapshot_sha256": transaction["network_snapshot_sha256"],
+        "post_home_bootout": proof["post_home_bootout"],
+        "pre_home_bootout": proof["pre_home_bootout"],
+        "prior_birth_marker_sha256": migration["prior_birth_marker_sha256"],
+        "prior_identity_receipt_sha256": migration["prior_identity_receipt_sha256"],
+        "quarantine_complete": True,
+        "raw_uid454_processes_absent": True,
+        "recreation_authorized": False,
+        "replacement_instance_present": False,
+        "retained_instance_identity": transaction["evidence"]["instance"],
+        "retained_library_identity": transaction["evidence"]["library"],
+        "retained_paths": [move["destination"] for move in transaction["moves"]],
+        "retained_receipt08_sha256": transaction[
+            "source_hardened_vm_receipt_sha256"
+        ],
+        "retained_runtime_identity": transaction["evidence"]["runtime"],
+        "schema_version": 1,
+        "source_controller_manifest_sha256": transaction[
+            "source_controller_manifest_sha256"
+        ],
+        "source_hardened_vm_receipt_sha256": transaction[
+            "source_hardened_vm_receipt_sha256"
+        ],
+        "source_home": migration["source_home"],
+        "source_session_id": contract["source_session_id"],
+        "source_start_count": 1,
+        "source_vm_status": "Stopped",
+        "stopped_proof_path": str(proof_path),
+        "stopped_proof_sha256": _sha256_bytes(proof_content),
+        "stopped_status": proof["status"],
+        "stopped_status_sha256": proof["status_sha256"],
+        "status_bootout": proof["status_bootout"],
+        "target_home": migration["target_home"],
+        "target_process_home_identity": transaction[
+            "process_home_initial_identity"
+        ],
+        "transaction_path": str(transaction_path),
+        "transaction_sha256": _sha256_bytes(transaction_content),
+        "venue_writes_authorized": False,
+        "vm_boot_observed": True,
+        "vm_started": False,
+        "watchdog_process_absent": True,
+    }
+    recovery_path, recovery_sha256 = _atomic_receipt(
+        recovery_path.parent, recovery_path.name, receipt
+    )
+    _receipt, recovery_sha256 = _validate_poststart_recovery_receipt(
+        lock,
+        state,
+        args.expected_controller_manifest_sha256,
+        full_disk_hash=False,
+    )
+    print(f"poststart_unknown_recovery_receipt={recovery_path}")
+    print(f"poststart_unknown_recovery_receipt_sha256={recovery_sha256}")
+    print(f"reserved_fresh_session_id={contract['fresh_session_id']}")
+    print("fresh_recreate_authorized=false")
+    print("disk_reuse_authorized=false")
+    print("vm_status=Stopped")
+    print("network_changes_performed=false")
+    print("network_reconnect_authorized=false")
+    print("venue_writes_authorized=false")
+    print("mainnet_authorized=false")
+    return 0
+
+
 def _migrate_router_operator_home(args: argparse.Namespace) -> int:
     _verify_bundle(args.expected_controller_manifest_sha256)
     lock = _load_lock()
@@ -7211,16 +9002,16 @@ def _recover_failed_prestart(args: argparse.Namespace) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="phase", required=True)
-    migration = subparsers.add_parser("migrate-router-operator-home")
-    migration.add_argument("--expected-controller-manifest-sha256", required=True)
+    recovery = subparsers.add_parser("recover-poststart-unknown-online")
+    recovery.add_argument("--expected-controller-manifest-sha256", required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.phase == "migrate-router-operator-home":
-            return _migrate_router_operator_home(args)
+        if args.phase == "recover-poststart-unknown-online":
+            return _recover_poststart_unknown_online(args)
         raise BootstrapError("unknown bootstrap phase")
     except (BootstrapError, OSError, KeyError, TypeError, ValueError, plistlib.InvalidFileException) as error:
         print(f"router_bootstrap_failed: {error}", file=sys.stderr)

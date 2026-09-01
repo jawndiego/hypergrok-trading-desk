@@ -338,6 +338,18 @@ the Directory Service home before retaining the accidental `LIMA_HOME/Library`,
 and preserve the original identity receipt/birth markers as historical bytes.
 It MUST expose no VM check/start/recovery authority. Only a later controller
 that pins the migration receipt may restore the single air-gapped start.
+If a subsequent attempt reaches VZ `running` and the watchdog records a
+post-start `UNKNOWN`, that instance and disk MUST be treated as tainted even
+when fail-stop proves the VM stopped and no network was opened. Recovery MUST
+not infer or relax an unrecorded route delta. A recovery-only controller MUST
+write an exact source/destination transaction before changing Directory
+Services or moving evidence, bind the prior recovery lineage, prove the named
+VM stopped, move every tainted artifact through a crash-resumable XOR frontier,
+and emit a receipt that reserves—but does not authorize—a fresh session. It
+MUST grant no recreate, start, retry, disk-reuse, route, credential, reconnect,
+venue-write or mainnet authority. Fresh stopped-VM creation and the later
+air-gapped start MUST be separate pinned successors; route convergence MUST be
+qualified without a VM before the latter restores start authority.
 If the controller prestarts socket_vmnet, Lima MUST receive only temporary
 read-only access to the exact live PID file, verify the process identity, reuse
 that daemon, and lose the ACL immediately after the guarded start boundary.

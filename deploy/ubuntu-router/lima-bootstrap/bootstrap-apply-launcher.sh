@@ -30,8 +30,8 @@ launcher=$(/bin/realpath "$0")
 [ "$launcher" = "$0" ] || die 'launcher path is noncanonical'
 controller=$(/usr/bin/dirname "$launcher")
 case "${1-}" in
-    migrate-router-operator-home) script=$controller/bootstrap-apply.py ;;
-    *) die 'launcher accepts only the reviewed router-home migration' ;;
+    recover-poststart-unknown-online) script=$controller/bootstrap-apply.py ;;
+    *) die 'launcher accepts only the reviewed online post-start recovery' ;;
 esac
 runtime=/opt/trading-desk/runtime/python-3.11.16
 python=$runtime/bin/python3.11

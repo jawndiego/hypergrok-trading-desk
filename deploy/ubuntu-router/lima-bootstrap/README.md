@@ -1,155 +1,69 @@
-# Attended air-gap bootstrap continuation
+# Attended online post-start UNKNOWN recovery
 
-This continuation consumes only the commissioned receipt-07 VM whose digest is
-`1b80f2931f496ef7ad9e7fa4aac48cdc2b2dcd8f47c8e08207988c4386af1601`.
-Its recovery history retained both the never-booted predecessor and the exact
-interrupted first-boot instance. The fresh hardened replacement remains stopped;
-receipt 08 is `e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c`
-and it binds quarantine receipt
+This bundle has one attended phase: `recover-poststart-unknown-online`. It is
+for the exact e33 first-boot attempt whose start log reached VZ `running`, whose
+watchdog aborted on `full_route_topology_drift`, and whose incident disposition
+is `UNKNOWN`. That disk is tainted and may never be retried or reused.
+
+The controller pins the e33 markers, logs, watchdog result, incident, hardware
+captures, retained sudoers, live VMNet residual, `LIMA_HOME/Library`, stopped VM
+instance, receipt 08
+`e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c`,
+and quarantine ancestry
 `2ae8f48d9363ebbc9605f604c4b6bbcd7ac54161b77a819731a0abe27525dbf5`.
-The current controller is migration-only. Its sole attended phase moves UID
-454's Directory Service home from `LIMA_HOME` to the verified process home and
-quarantines the newly created `LIMA_HOME/Library`. It cannot check, start,
-recreate, or recover a VM. No phase accesses credentials or a venue.
+It does not relax the route watchdog or infer the missing failed route row.
 
-Render and replay-check as the desktop operator:
+Run the sealed launcher online from a local attended Terminal:
 
 ```sh
-python3 scripts/render_ubuntu_router_bootstrap.py \
-  --hardware-profile /absolute/gitignored/airgap-hardware-profile.json \
-  --output-dir /absolute/new/review-directory
-
-manifest_sha256=$(shasum -a 256 \
-  /absolute/new/review-directory/bundle-manifest.json | awk '{print $1}')
-
-python3 scripts/render_ubuntu_router_bootstrap.py \
-  --hardware-profile /absolute/gitignored/airgap-hardware-profile.json \
-  --check-bundle /absolute/new/review-directory \
-  --expected-manifest-sha256 "$manifest_sha256" \
-  --require-owner-uid 501
+sudo /absolute/sealed/bundle/bootstrap-apply-launcher.sh \
+  recover-poststart-unknown-online \
+  --expected-controller-manifest-sha256 <sealed-manifest-sha256>
 ```
 
-The real profile is host-local and ignored by Git because it contains interface
-MAC addresses and exact inert-utun link-local identities. The committed
-`.example` is not a usable profile. Profiled inert utuns do not authorize
-Internet reachability: only their exact scoped IPv6 defaults are accepted,
-and the global IPv6 route/NWI probes must still prove no externally reachable
-interface. The profile also binds the inactive, addressless built-in
-Thunderbolt `bridge0` to its exact hardware-port members and member flags;
-missing, additional, substituted or altered members abort. During the
-host-only phase, only that passive bridge plus exact local `bridge100`
-reachability at `192.168.106.1` is permitted.
-The exact macOS-scoped IPv4 row `default link#N UCSIg bridge100 !` is also
-permitted only in that phase and remains topology-hashed; every gateway-bearing,
-physical, altered or non-host-only default still aborts.
-The fixed dormant Apple-local classes (`awdl0`, `llw0`, `ipsec0`) must first
-be taken down; their one canonical link-local is session-bound and only their
-exact local multicast/link-local route shapes are accepted.
-The historical lock lineage records the exact check-only rotation from retained session
-`bca4e4...` to session `0fbd65...`. Check runs a write-free base probe. Apply
-now publishes the final `e33dbb...` base once and immediately continues through PREPARING,
-host-only validation, watchdog arming and the single boot in the same call.
+Before mutation, a durable transaction binds the complete evidence frontier,
+the tainted instance and changed disk descriptor, the stopped/no-process proof,
+the host network snapshot, the original identity/birth lineage, an initially
+empty verified process HOME, and the exact `LIMA_HOME/_config` inventory. The
+SSH private key is bound only by metadata and is never opened or hashed.
 
-The migration renderer neither accepts nor emits the historical prestart recovery
-profile. The recovery commands and `apply-hardened-vm` are absent from the
-launcher and parser. Their sealed receipts remain evidence, not active CLI
-authority.
+The phase then quiesces the exact Apple UID-454 agent subset, compare-and-swaps
+the Directory Service home from `LIMA_HOME` to the verified process HOME, runs
+one exact-name stopped Lima status, quiesces UID 454 again, and retains all 15
+tainted artifacts through crash-resumable source-or-destination moves. It
+publishes receipt 14 only after `LIMA_HOME` contains exactly `_config`, every
+tainted source is absent, every retained destination revalidates, the target
+home is live, UID 454 and VM/watchdog processes are absent, and the network
+authority remains absent. The initial whole-host network snapshot stays in the
+audit record, but later online route, uplink, or inert-utun drift does not wedge
+quarantine; only live VM interfaces, temporary sudoers, or router processes do.
 
-Do not start the replacement manually. This bundle exposes only
-`migrate-router-operator-home`. It pins `launchctl`, Directory Service tools,
-and all seven possible Apple per-user agents. Each observed agent must be a
-unique exact subset and is reauthenticated by PID path, command, parent,
-UID/GID/process group, System-volume metadata, SHA-256, ACL, and Apple
-signature. A write-ahead transaction binds the stopped receipt-08 and
-interrupted-recovery lineage before any mutation. Two fixed idempotent
-`launchctl bootout user/454` calls, each followed by stable raw-zero samples,
-replace generic UID kills. The Directory Service compare-and-swap occurs before
-the accidental Library is retained. The original schema-v3 identity receipt and
-birth markers remain byte-for-byte historical evidence.
+Transaction, stopped-proof, and receipt pending files are validated and
+promoted on rerun. A completed rerun only revalidates and prints the same
+receipt. Ambiguous final-plus-pending state, out-of-order moves, drift, or an
+unexpected process fails closed.
 
-Record the printed migration receipt hash. Only a separately rendered successor
-may pin it, disable migration, and restore the one-airgapped-start surface.
-
-For that later successor, from a local Terminal—not SSH, tmux or screen—disable
-all network services, turn Wi-Fi off, physically disconnect
-Ethernet/USB/Thunderbolt uplinks, and close VPN/sharing software. Run the sealed
-controller's write-free `check-airgap --attest-physical-airgap`, then
-`apply-airgapped-first-boot --attest-physical-airgap` without reconnecting in
-between. Apply captures its own target-session base once and never reuses the
-check's dynamic observation. The controller continuously monitors the complete
-topology, verifies the guest over vsock, and stops it again.
-
-The sealed controller verifies its 19-tool ACL/network/process/privilege
-allowlist by exact System-volume device/flags, owner, mode (including setuid),
-link count, size and a stable `O_NOFOLLOW` file-descriptor SHA-256. `/bin/ls`
-is verified before it performs the ACL checks; the allowlist also includes the
-execute-only `sudo` and `visudo` binaries and requires no online trust service.
-Capture commands use file-backed, process-group-bounded execution. The live
-watchdog extinguishes surviving command groups inside its 250 ms sample budget,
-so a child timeout cannot silently freeze monitoring.
-
-Restore host networking only after the command prints both:
+Success prints:
 
 ```text
+poststart_unknown_recovery_receipt=/private/var/db/trading-desk-router-bootstrap-v1/receipts/14-poststart-unknown-recovery-e33dbb26c0b91014f0748dd121d78d66627dd11c1fe8db4af0931d2254865999.json
+poststart_unknown_recovery_receipt_sha256=<sha256>
+reserved_fresh_session_id=791f39c1e4dae90f50436de700211158688f557f70e91156c0a9dd95d3b7b7b8
+fresh_recreate_authorized=false
+disk_reuse_authorized=false
 vm_status=Stopped
-host_uplink_restore_safe_while_vm_stopped=true
+network_changes_performed=false
+network_reconnect_authorized=false
+venue_writes_authorized=false
+mainnet_authorized=false
 ```
 
-If the first-boot command fails, keep every uplink disabled and run the sealed
-controller's `verify-stopped-after-airgap` phase from the same local Terminal.
-That phase cannot start the VM; it only permits reconnection after independently
-proving the VM is stopped, UID 454 and all UIDs have no VM/socket process, and
-the temporary sudo authority is absent. An exact inert socket/PID residual may
-remain only after repeated current-session metadata, ACL, provenance and stale-
-PID proofs; it grants no guest reconnect or retry authority. Restore networking
-only if the phase prints the same literal
-`host_uplink_restore_safe_while_vm_stopped=true`. Host-only capture failures
-print only a fixed allowlisted reason code.
-For a post-start `UNKNOWN`, this output remains reconnect-only: automatic retry,
-VM reuse, guest reconnect and venue writes stay false because the disk may have
-changed.
+The fresh session is reserved only. This bundle cannot check an air gap,
+create, start, retry, reconnect to, or delete a VM. It cannot authorize venue
+writes or mainnet. A separately rendered phase-2 bundle must pin receipt 14
+before it may recreate a fresh stopped VM; a later, separately reviewed bundle
+must handle any air-gapped first boot.
 
-`recover-proven-preboot` is a one-off phase for the exact pinned attempt whose
-`limactl start` failed before guest boot. It cannot start the VM or mutate the
-network. It writes a durable transaction, then retains only the inactive VMNet
-runtime, base capture, hardware lock, and two start markers through five
-crash-resumable source-or-destination moves. A successor must pin the resulting
-receipt before using the fresh session.
-
-For the single guarded `limactl start`, UID 454 receives an exact read-only ACL
-on the already-live socket_vmnet PID file. A UID-454 probe must read that exact
-PID and observe the process before Lima runs, so Lima reuses the controller's
-validated daemon instead of attempting to create another. The ACL is removed
-immediately after start returns or during fail-stop cleanup. On normal teardown
-the pinned daemon must exit cleanly, remove its PID file and leave only the
-inactive Unix socket for exact retention; watchdog SIGKILL incidents may retain
-the separately validated stale PID.
-
-All Lima subprocesses use the verified UID-454 mode-0700
-`/private/var/db/trading-desk-router-process-home` as both `HOME` and working
-directory; `LIMA_HOME` remains the separate instance namespace. This prevents
-an inaccessible caller directory from changing command behavior. Create/start
-output evidence is file-backed, durable and bounded. Failure cleanup contains
-the VM first, then reaps the watchdog process group with bounded TERM/KILL waits.
-
-The retired `recover-interrupted-first-boot` flow handled only sealed session `91c455...`,
-whose retained start log proves VZ reached `running` and whose disk no longer
-matches receipt 08. From a local Terminal it first writes a durable transaction,
-then atomically retains the tainted `Library` tree and VM as opaque directories,
-the temporary VMNet authority, markers, hardware evidence, and old receipt 08.
-It never deletes or reuses the changed disk. After a durable stopped proof it
-publishes a no-retry quarantine receipt and, in the same invocation, recreates
-a fresh stopped VM from the pinned local image. The new receipt 08 binds that
-quarantine receipt. Air-gap check/apply remains blocked until a later controller
-pins both new receipts and rotates to the printed fresh session.
-If recovery resumes across controller bundles, an attended root-owned mode-0400
-authorization file must bind the immutable predecessor transaction, its exact
-initiating manifest, and the one completing manifest; the quarantine and new
-receipt 08 retain that lineage and reject a third controller. The final
-controller validates that authorization, transaction, stopped proof, quarantine
-receipt, replacement receipt, and home-migration receipt before either air-gap
-command; it exposes no recovery or migration dispatch.
-
-After the final one-shot air-gapped boot, no additional guest boot is authorized.
-A later stopped migration must
-remove bootstrap passwordless sudo and per-boot provisioning first.
+The renderer is inert: it writes a review directory and replay-checks hashes,
+owners, modes, ACLs, and the manifest. Rendering does not install the bundle or
+execute recovery.

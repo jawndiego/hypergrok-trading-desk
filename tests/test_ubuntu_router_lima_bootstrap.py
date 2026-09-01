@@ -325,7 +325,14 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             )
             self.assertFalse(manifest["apply_enabled"])
             self.assertFalse(manifest["attended_airgapped_start_apply_enabled"])
-            self.assertTrue(manifest["router_operator_home_migration_apply_enabled"])
+            self.assertFalse(manifest["router_operator_home_migration_apply_enabled"])
+            self.assertTrue(manifest["poststart_unknown_recovery_apply_enabled"])
+            self.assertTrue(manifest["fresh_session_reserved"])
+            self.assertFalse(manifest["recreation_authorized"])
+            self.assertEqual(
+                lock["poststart_unknown_recovery"]["fresh_session_id"],
+                manifest["reserved_fresh_session_id"],
+            )
             self.assertFalse(manifest["vm_started"])
             self.assertFalse(manifest["network_changes_performed"])
             self.assertFalse(manifest["hardened_recreate_apply_enabled"])
@@ -366,12 +373,13 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
         self.assertIn("failed reason={match.group(1)}", source)
         self.assertIn("watchdog timed out", source)
         launcher = (BOOTSTRAP / "bootstrap-apply-launcher.sh").read_text()
-        self.assertIn("migrate-router-operator-home", launcher)
+        self.assertIn("recover-poststart-unknown-online", launcher)
         for forbidden in (
             "apply-hardened-vm",
             "recover-failed-prestart",
             "recover-proven-preboot",
             "recover-interrupted-first-boot",
+            "migrate-router-operator-home",
             "check-airgap",
             "apply-airgapped-first-boot",
             "verify-stopped-after-airgap",
@@ -386,7 +394,7 @@ class LimaBootstrapArtifactTests(unittest.TestCase):
             for action in controller._parser()._actions
             if isinstance(action, controller.argparse._SubParsersAction)
         )
-        self.assertEqual({"migrate-router-operator-home"}, set(action.choices))
+        self.assertEqual({"recover-poststart-unknown-online"}, set(action.choices))
 
     def test_every_uid454_preexec_has_verified_process_home_cwd(self) -> None:
         tree = ast.parse(HOST_APPLY.read_text(encoding="utf-8"))

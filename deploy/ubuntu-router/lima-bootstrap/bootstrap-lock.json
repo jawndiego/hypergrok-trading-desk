@@ -60,7 +60,8 @@
     "guest_package_apply_enabled": false,
     "hardened_recreate_apply_enabled": false,
     "interrupted_first_boot_recovery_enabled": false,
-    "router_operator_home_migration_enabled": true,
+    "poststart_unknown_recovery_enabled": true,
+    "router_operator_home_migration_enabled": false,
     "router_activation_apply_enabled": false,
     "proven_preboot_recovery_enabled": false
   },
@@ -87,6 +88,27 @@
       "watchdog": [54412006, 1931, "5b539fa731670deeadf2d2ee21091d03418b6a937e83fd517c5324d4184bcd53"]
     },
     "runtime": {"inode": 54411818, "pid": "26009", "pid_inode": 54411821, "pid_sha256": "8d65dfd431c8372588510f701bd6e7449020bc8c6f3af9735253b201b15764fd", "socket_inode": 54411822}
+  },
+  "poststart_unknown_recovery": {
+    "files": {
+      "base": [55457426, 7577, "4f05b4179e0b96a82c2cb7c3c0143c229d70078b0b3553d7c117dad6cd9f76a2", 256],
+      "hardware_lock": [55457503, 7049, "00096a9a65932f4657fb8bff5192d6e4cdb8cad89a4e68bce0a985a23ac04577", 256],
+      "incident": [55457891, 473, "973e1fd116752d4a2fd4f07d53c3c92f512fc44a9f4fa6a6883108571790d038", 256],
+      "preparing": [55457427, 487, "38e29a788b21444fc2eb693407693b8138c8402dc1b527e3e613e5ee8f9b45b5", 256],
+      "socket_stderr": [55457431, 591, "c9d771de696a35f2fe0d44c936f6310567a675022e75be922562e81ea242941e", 384],
+      "socket_stdout": [55457430, 0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", 384],
+      "start_stderr": [55457547, 831, "bad8ea4c1ced248d40ee69028bb4d7de9a746d87c34f9d350bf4fd58776cb9e2", 384],
+      "start_stdout": [55457546, 0, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", 384],
+      "starting": [55457545, 577, "ee200cbc417c60cec31fa950f26289a43f9a9690c8a742aeb93e687b2ea31483", 256],
+      "sudoers": [55457428, 714, "fb36f1a319cc6bff643c11582ff08afe7564e7c47c309a4a702cf6f4e5b50e35", 256],
+      "watchdog": [55457857, 1939, "0f395169be9a144e5797a8e38caf6bc2702441f141e69ae5b9f34b21b0b93525", 256]
+    },
+    "fresh_session_id": "791f39c1e4dae90f50436de700211158688f557f70e91156c0a9dd95d3b7b7b8",
+    "library": {"device": 16777234, "gid": 454, "inode": 55457900, "mode": 493, "size": 192, "uid": 454},
+    "source_controller_manifest_sha256": "7e4a16f2622abc4a259c7c0eb117f9ea7d4de1b4cb121297c4fef9af952f3845",
+    "source_hardened_vm_receipt_sha256": "e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c",
+    "source_session_id": "e33dbb26c0b91014f0748dd121d78d66627dd11c1fe8db4af0931d2254865999",
+    "vmnet_runtime": {"device": 16777234, "gid": 0, "inode": 55457429, "mode": 493, "pid": "42782", "pid_inode": 55457432, "pid_sha256": "9ddff7e7f21000ac8a8bf11b01b108605e9b60c1ee60e7adc92859a0d96722a5", "pid_size": 5, "socket_inode": 55457433, "uid": 0}
   },
   "router_operator_home_migration": {
     "birth_bug_quarantine_path": "/private/etc/trading-desk/.testnet-foreground-router-birth-v2.uid0-bug-79cf0db",
@@ -138,7 +160,7 @@
     "proven_preboot_recovery_receipt_sha256": "60ccd31bee112bec55f133c9231da14878223e88e1be0ed8f30037f241fa1990",
     "socket_vmnet_sha256": "b8a72a62237312f2f756027dea504a844edeb40014702d4a320292c026d282b0"
   },
-  "review_status": "attended_router_home_migration_only",
+  "review_status": "attended_online_poststart_unknown_recovery_only",
   "schema_version": 1,
   "storage": {
     "minimum_free_after_bytes": 5368709120,

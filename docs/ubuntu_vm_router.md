@@ -425,21 +425,34 @@ session before any air-gap check or start can be admitted.
 Cross-controller resume additionally requires an attended root-owned immutable
 authorization binding the exact predecessor transaction and the sole completing
 controller; both identities are carried into the quarantine/new-receipt chain.
-The stopped replacement is pinned by receipt 08
-`e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c`,
-quarantine receipt
-`2ae8f48d9363ebbc9605f604c4b6bbcd7ac54161b77a819731a0abe27525dbf5`,
-and unused session `e33dbb...`. Its first final-airgap preflight exposed seven
-Apple per-user agents because UID 454's Directory Service home still named
-`LIMA_HOME`. A migration-only successor now binds the complete stopped lineage,
-authenticates only an exact subset of those pinned Apple agents, writes a
-transaction, performs two idempotent `launchctl bootout user/454` calls with
-stable zero-UID proofs, compares-and-swaps the home to the process-home path,
-and then retains the newly created `LIMA_HOME/Library` opaquely. It preserves
-the original schema-v3 identity receipt and birth markers byte-for-byte. This
-controller exposes no air-gap check, VM start, recreate, or recovery command.
-A separate successor must pin the migration receipt, disable migration, and
-revalidate all prior lineage before the one air-gapped start is restored.
+The stopped replacement was pinned by receipt 08
+`e5f8d3e43cb53fa0c72e0bfa88796147b310bdb50c21898b2f780362f910d84c`
+and quarantine receipt
+`2ae8f48d9363ebbc9605f604c4b6bbcd7ac54161b77a819731a0abe27525dbf5`.
+Session `e33dbb...` was then consumed: VZ reached `running`, the watchdog
+observed `full_route_topology_drift`, and fail-stop proved the VM stopped while
+recording an `UNKNOWN` incident. The exact drifting route row was not retained,
+so this recovery must not broaden the route policy or retry the tainted disk.
+
+The current attended online recovery-only successor pins the complete e33
+frontier and the earlier 91c/2ae chain. Before any mutation it writes a durable
+transaction binding the tainted disk descriptor, fixed evidence, stopped/no-
+process state, original identity/birth lineage, process-home identity and host
+network snapshot. It then quiesces the exact UID-454 Apple-agent subset,
+compare-and-swaps the Directory Service home to the process-home path, proves
+the named Lima instance stopped, and crash-resumably moves all 15 tainted
+artifacts to quarantine. It preserves the original identity receipt and birth
+markers byte-for-byte and never reads the Lima management private key.
+Receipt 14 is emitted only after the sources are absent and all retained
+destinations revalidate. It reserves the next session but authorizes no VM
+create/start/reuse, route change, credential access, network reconnect, venue
+write or mainnet action.
+
+A separately rendered recreate-only successor must pin receipt 14 before it
+may create a fresh VM, which must remain stopped. Before another air-gapped
+start, a no-VM host-only convergence qualification must persist the exact
+delayed route behavior seen after socket_vmnet attaches. Only a later pinned
+successor may restore the one attended air-gapped start.
 
 Both capture passes run pinned macOS observers sequentially under one total
 deadline. The continuous watchdog retains concurrent sampling, but each child

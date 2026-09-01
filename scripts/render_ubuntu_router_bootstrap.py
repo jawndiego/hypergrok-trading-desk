@@ -59,7 +59,13 @@ DORMANT_APPLE_PROFILES = [
 ]
 PLACEHOLDER_RE = re.compile(r"__[A-Z0-9_]+__")
 FINAL_AIRGAP_REVIEW_STATUS = (
-    "attended_router_home_migration_only"
+    "attended_online_poststart_unknown_recovery_only"
+)
+POSTSTART_UNKNOWN_RECOVERY_CONTRACT_SHA256 = (
+    "9f858f10316f287a9cb063d33c5f1ef6e224dc9fd9642dfa3c1a40f49df82730"
+)
+POSTSTART_UNKNOWN_RESERVED_SESSION_ID = (
+    "791f39c1e4dae90f50436de700211158688f557f70e91156c0a9dd95d3b7b7b8"
 )
 ROUTER_HOME_MIGRATION = {
     "birth_bug_quarantine_path": "/private/etc/trading-desk/.testnet-foreground-router-birth-v2.uid0-bug-79cf0db",
@@ -214,7 +220,8 @@ def _load_lock(content: bytes) -> dict[str, Any]:
             "guest_package_apply_enabled": False,
             "hardened_recreate_apply_enabled": False,
             "interrupted_first_boot_recovery_enabled": False,
-            "router_operator_home_migration_enabled": True,
+            "poststart_unknown_recovery_enabled": True,
+            "router_operator_home_migration_enabled": False,
             "proven_preboot_recovery_enabled": False,
             "router_activation_apply_enabled": False,
         }
@@ -237,6 +244,13 @@ def _load_lock(content: bytes) -> dict[str, Any]:
         raise ValueError("bootstrap lock authorization boundary differs")
     if value.get("router_operator_home_migration") != ROUTER_HOME_MIGRATION:
         raise ValueError("bootstrap router home migration differs")
+    poststart = value.get("poststart_unknown_recovery")
+    if (
+        not isinstance(poststart, dict)
+        or _sha256(_canonical_json(poststart))
+        != POSTSTART_UNKNOWN_RECOVERY_CONTRACT_SHA256
+    ):
+        raise ValueError("bootstrap post-start UNKNOWN recovery differs")
     interrupted = value.get("interrupted_first_boot_recovery")
     if (
         interrupted != INTERRUPTED_FIRST_BOOT_RECOVERY
@@ -684,6 +698,7 @@ def render(
             "attended_airgapped_start_apply_enabled": False,
             "bundle_kind": "trading-desk.ubuntu-router-airgap-bootstrap",
             "files": hashes,
+            "fresh_session_reserved": True,
             "hardened_recreate_apply_enabled": False,
             "hardened_plan_sha256": hashes["lima-first-boot.yaml"],
             "hardened_vm_receipt_sha256": lock["pins"][
@@ -698,7 +713,12 @@ def render(
             "predecessor_vm_receipt_sha256": lock["pins"][
                 "predecessor_vm_receipt_sha256"
             ],
-            "router_operator_home_migration_apply_enabled": True,
+            "poststart_unknown_recovery_apply_enabled": True,
+            "recreation_authorized": False,
+            "reserved_fresh_session_id": lock["poststart_unknown_recovery"][
+                "fresh_session_id"
+            ],
+            "router_operator_home_migration_apply_enabled": False,
             "schema_version": 1,
             "venue_writes_authorized": False,
             "vm_started": False,
@@ -745,6 +765,7 @@ def verify(
             "attended_airgapped_start_apply_enabled",
             "bundle_kind",
             "files",
+            "fresh_session_reserved",
             "hardened_plan_sha256",
             "hardened_recreate_apply_enabled",
             "hardened_vm_receipt_sha256",
@@ -753,6 +774,9 @@ def verify(
             "mainnet_authorized",
             "network_changes_performed",
             "predecessor_vm_receipt_sha256",
+            "poststart_unknown_recovery_apply_enabled",
+            "recreation_authorized",
+            "reserved_fresh_session_id",
             "router_operator_home_migration_apply_enabled",
             "schema_version",
             "venue_writes_authorized",
@@ -764,7 +788,12 @@ def verify(
         or manifest.get("attended_airgapped_start_apply_enabled") is not False
         or manifest.get("hardened_recreate_apply_enabled") is not False
         or manifest.get("interrupted_first_boot_recovery_enabled") is not False
-        or manifest.get("router_operator_home_migration_apply_enabled") is not True
+        or manifest.get("poststart_unknown_recovery_apply_enabled") is not True
+        or manifest.get("fresh_session_reserved") is not True
+        or manifest.get("recreation_authorized") is not False
+        or manifest.get("reserved_fresh_session_id")
+        != POSTSTART_UNKNOWN_RESERVED_SESSION_ID
+        or manifest.get("router_operator_home_migration_apply_enabled") is not False
         or manifest.get("airgap_session_id") != lock["pins"]["airgap_session_id"]
         or manifest.get("hardened_vm_receipt_sha256")
         != lock["pins"]["hardened_vm_receipt_sha256"]
